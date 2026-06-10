@@ -1,5 +1,7 @@
 # teammate
 
+![CI](https://github.com/laxels/teammate/actions/workflows/ci.yml/badge.svg)
+
 TypeScript + [Bun](https://bun.sh) + [Convex](https://convex.dev) starter.
 
 ## Setup
