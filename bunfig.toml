@@ -1,0 +1,3 @@
+[install]
+# Always pin exact versions when adding dependencies.
+exact = true

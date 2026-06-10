@@ -1,0 +1,8 @@
+node_modules/
+
+# Convex deployment config and local backend state (created by `bun run dev`)
+.env.local
+.env
+.convex/
+
+.DS_Store
