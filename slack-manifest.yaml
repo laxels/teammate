@@ -1,0 +1,44 @@
+# Slack app manifest for ultraclaude.
+# Create at https://api.slack.com/apps → "Create New App" → "From a manifest"
+# → pick your workspace → paste this YAML → Create.
+#
+# After creating:
+#   1. Basic Information → App Credentials → copy the Signing Secret
+#   2. Click "Install to Workspace", then OAuth & Permissions → copy the
+#      Bot User OAuth Token (xoxb-...)
+#   3. Hand both to the agent (it sets them as Convex env vars), THEN
+#      App Manifest page → "Verify" the events request URL (the endpoint
+#      answers Slack's url_verification challenge).
+display_information:
+  name: ultraclaude
+  description: Virtual teammate — delegates tasks to Claude Code devboxes
+  background_color: "#5c3b58"
+features:
+  bot_user:
+    display_name: ultraclaude
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read # receive @ultraclaude mentions in channels
+      - chat:write # post messages and thread replies
+      - chat:write.public # post status updates to public channels without invite
+      - im:history # receive and read DMs sent to the bot
+      - im:write # proactively open DMs (status updates)
+      - channels:history # read thread context around mentions (public)
+      - groups:history # same for private channels the bot is added to
+      - mpim:history # same for group DMs
+      - users:read # resolve user IDs to names
+      - files:write # attach files (logs, screenshots) to updates
+      - files:read # read files users share with the bot
+settings:
+  event_subscriptions:
+    request_url: https://zealous-robin-941.convex.site/slack/events
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

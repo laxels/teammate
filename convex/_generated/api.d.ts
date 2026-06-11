@@ -8,7 +8,8 @@
  * @module
  */
 
-import type * as messages from "../messages.js";
+import type * as http from "../http.js";
+import type * as slack from "../slack.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +18,8 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  messages: typeof messages;
+  http: typeof http;
+  slack: typeof slack;
 }>;
 
 /**
