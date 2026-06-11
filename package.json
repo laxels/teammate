@@ -12,6 +12,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.104.1",
     "convex": "1.41.0"
   },
   "devDependencies": {
