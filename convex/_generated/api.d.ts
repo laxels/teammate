@@ -11,6 +11,7 @@
 import type * as commands from "../commands.js";
 import type * as crons from "../crons.js";
 import type * as devboxes from "../devboxes.js";
+import type * as hosts from "../hosts.js";
 import type * as http from "../http.js";
 import type * as notify from "../notify.js";
 import type * as orchestrator from "../orchestrator.js";
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   commands: typeof commands;
   crons: typeof crons;
   devboxes: typeof devboxes;
+  hosts: typeof hosts;
   http: typeof http;
   notify: typeof notify;
   orchestrator: typeof orchestrator;

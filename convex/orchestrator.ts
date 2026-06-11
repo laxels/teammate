@@ -2,7 +2,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
-import type { StartTaskRequest } from "../shared/protocol";
+import type { HostVmPayload, StartTaskRequest } from "../shared/protocol";
 import {
   classifySlackEvent,
   monitoringUrl,
@@ -24,7 +24,7 @@ const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates 
 Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, plus Google Chrome with the Claude in Chrome extension signed in. Tasks can control the browser (set use_chrome) — web apps, sites without APIs, web games, anything a person could do at a Mac. Never claim you cannot use a browser: you personally cannot, but your devboxes can, so delegate.
 
 You receive Slack messages (DMs and @mentions). Either answer directly or use your tools:
-- start_task delegates work to a Claude Code instance on a warm devbox. Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. Set use_chrome: true when the task needs the browser. If no devbox is warm, say so plainly and suggest retrying later or stopping a running task.
+- start_task delegates work to a Claude Code instance on a devbox: a warm devbox when one is free, otherwise a fresh devbox VM is provisioned automatically (takes ~1-2 min before work starts). Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. Set use_chrome: true when the task needs the browser. If there is no capacity at all, say so plainly and relay the tool's suggestions.
 - get_task / list_tasks answer questions about ongoing work.
 - stop_task interrupts a running task.
 - Steering a running task does NOT go through you: mid-task guidance happens on the task's monitoring page (linked in its status updates). Point users there.
@@ -55,7 +55,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "start_task",
     description:
-      "Start a new Claude Code task on a warm devbox. Call this when the user asks for engineering work to be done. Fails when no devbox is warm.",
+      "Start a new Claude Code task on a devbox (a warm one when available, otherwise a fresh VM is provisioned in ~1-2 min). Call this when the user asks for engineering work to be done. Fails only when no host has VM capacity left.",
     input_schema: {
       type: "object",
       properties: {
@@ -151,34 +151,51 @@ async function executeTool(
         return toolError("title (string) and prompt (string) are required");
       }
       const taskId = `task-${crypto.randomUUID().slice(0, 8)}`;
+      // Warm permanent devboxes are first choice; otherwise allocate an
+      // ephemeral devbox VM on a host with spare capacity.
       const claimed = await ctx.runMutation(internal.devboxes.claimWarm, {
         taskId,
       });
-      if (claimed === null) {
+      const ephemeral =
+        claimed === null
+          ? await ctx.runMutation(internal.hosts.allocateEphemeral, { taskId })
+          : null;
+      const allocated = claimed ?? ephemeral;
+      if (allocated === null) {
         return toolError(
-          "no warm devbox is available — all devboxes are busy or offline. Tell the user and suggest retrying later or stopping a running task.",
+          "no capacity: no warm devbox is available and no host has a free VM slot. Tell the user and suggest retrying later, stopping a running task, or adding a Mac host with scripts/provision-host.sh.",
         );
       }
       // Devboxes live on the tailnet, which Convex cannot reach — delivery
       // goes through the command queue the gateway subscribes to (outbound
-      // only). The gateway acks within seconds; its "started" event confirms
-      // pickup, and the staleness cron catches a devbox that died after
-      // claiming.
+      // only). For an ephemeral devbox the start command is enqueued BEFORE
+      // the VM exists: the freshly booted gateway picks it up on first
+      // subscription. The gateway's "started" event confirms pickup, and the
+      // staleness cron catches a devbox that died (or never booted) after
+      // assignment.
       const request: StartTaskRequest = {
         taskId,
         prompt,
         ...(input.use_chrome === true ? { chrome: true } : {}),
       };
       await ctx.runMutation(internal.commands.enqueue, {
-        devboxId: claimed.devboxId,
+        devboxId: allocated.devboxId,
         kind: "start",
         payload: JSON.stringify(request),
       });
+      if (ephemeral !== null) {
+        const payload: HostVmPayload = { devboxId: ephemeral.devboxId };
+        await ctx.runMutation(internal.hosts.enqueue, {
+          hostId: ephemeral.hostId,
+          kind: "provision_vm",
+          payload: JSON.stringify(payload),
+        });
+      }
       await ctx.runMutation(internal.tasks.create, {
         taskId,
         title,
         prompt,
-        devboxId: claimed.devboxId,
+        devboxId: allocated.devboxId,
         slackChannel: target.channel,
         ...(target.threadTs === undefined
           ? {}
@@ -187,9 +204,12 @@ async function executeTool(
       return JSON.stringify({
         ok: true,
         taskId,
-        devboxId: claimed.devboxId,
-        monitoringUrl: monitoringUrl(claimed.gatewayUrl),
-        note: "Status updates will be posted to this conversation automatically.",
+        devboxId: allocated.devboxId,
+        monitoringUrl: monitoringUrl(allocated.gatewayUrl),
+        note:
+          ephemeral !== null
+            ? "No devbox was warm, so a fresh devbox VM is being provisioned for this task (~1-2 min before the 'started' update). Status updates will be posted to this conversation automatically."
+            : "Status updates will be posted to this conversation automatically.",
       });
     }
 

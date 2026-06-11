@@ -59,6 +59,31 @@ export type GatewayHealth = {
   taskId: string | null;
 };
 
+// ---- Host-level control plane: orchestrator -> host agent ----
+// Each Mac host runs a host agent (same outbound-subscription pattern as the
+// gateway, against the `hostCommands` table) that manages VM lifecycle.
+// Apple's EULA caps each host at 2 concurrent macOS VMs; concurrency scales
+// by adding hosts (scripts/provision-host.sh).
+//
+// VM lifecycle for ephemeral devboxes: the orchestrator pre-creates the
+// devbox row (status "provisioning", deterministic gatewayUrl from the
+// devbox id + tailnet suffix) and enqueues the task's start command BEFORE
+// the VM exists — the freshly booted gateway picks it up on first
+// subscription. After the task reaches a terminal status the devbox goes to
+// "retiring" (never back to warm) and is destroyed after a short grace
+// period, so no task ever runs on a previous task's VM.
+
+export type HostCommandKind = "provision_vm" | "destroy_vm";
+
+// JSON payload for both host command kinds.
+export type HostVmPayload = {
+  devboxId: string;
+};
+
+/** How long a finished ephemeral devbox stays up (monitoring page, final
+ * event flush) before the destroy command is enqueued. */
+export const EPHEMERAL_RETIRE_GRACE_MS = 5 * 60_000;
+
 // ---- Gateway -> orchestrator: POST {CONVEX_SITE_URL}/devbox/events ----
 // Auth: `x-devbox-secret` header must equal the DEVBOX_SHARED_SECRET env var
 // on both sides.

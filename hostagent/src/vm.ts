@@ -1,0 +1,291 @@
+// VM lifecycle executors for host commands (provision_vm / destroy_vm).
+// Every side effect goes through an injected `Run` so tests can record and
+// stub the exact tart/ssh command sequences. The provisioning steps mirror
+// scripts/provision-devbox.sh, executed from ON the host (no ssh jump).
+
+export type RunResult = { code: number; stdout: string; stderr: string };
+export type RunOptions = { stdin?: string };
+export type Run = (
+  command: string[],
+  options?: RunOptions,
+) => Promise<RunResult>;
+
+/** Default runner: Bun.spawn, capturing stdout/stderr, optional stdin. */
+export const spawnRun: Run = async (command, options) => {
+  const proc = Bun.spawn(command, {
+    stdin: options?.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout, stderr };
+};
+
+export type VmConfig = {
+  goldenImage: string;
+  payloadDir: string;
+  tartBin: string;
+  tailnetSuffix: string;
+  tailscaleAuthkey: string;
+  convexUrl: string;
+  convexSiteUrl: string;
+  devboxSharedSecret: string;
+};
+
+export type VmExecutors = {
+  provision: (devboxId: string) => Promise<void>;
+  destroy: (devboxId: string) => Promise<void>;
+};
+
+export type VmExecutorOptions = {
+  config: VmConfig;
+  /** Drops the devbox row in Convex after a successful tart delete. */
+  removeDevbox: (devboxId: string) => Promise<void>;
+  run?: Run;
+  /** Injectable for tests; defaults to real timers. */
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const GATEWAY_PORT = 8787;
+const VM_USER = "admin";
+// Golden-image default; VMs are reachable only from the host (NAT) and the
+// tailnet, and sshd inside the image allows password auth on purpose.
+const VM_PASSWORD = "admin";
+const TAILSCALE = "/opt/homebrew/bin/tailscale";
+
+const POLL_INTERVAL_MS = 5_000;
+const IP_ATTEMPTS = 36; // 3 min
+const SSH_ATTEMPTS = 60; // 5 min
+const HEALTH_ATTEMPTS = 36; // 3 min
+
+// Devbox ids are interpolated into remote shell commands; the same pattern
+// scripts/provision-devbox.sh enforces keeps them shell-inert.
+const DEVBOX_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+// Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so
+// host-key pinning is meaningless; skip known_hosts entirely.
+const SSH_OPTS = [
+  "-o",
+  "StrictHostKeyChecking=no",
+  "-o",
+  "UserKnownHostsFile=/dev/null",
+  "-o",
+  "LogLevel=ERROR",
+  "-o",
+  "ConnectTimeout=10",
+];
+
+const SSH_BASE = ["sshpass", "-p", VM_PASSWORD, "ssh", ...SSH_OPTS];
+
+function sshCommand(ip: string, remoteCommand: string): string[] {
+  return [...SSH_BASE, `${VM_USER}@${ip}`, remoteCommand];
+}
+
+// Exact pattern from scripts/provision-devbox.sh: kickstart the baked
+// LaunchAgent, bootstrapping it first if this boot never loaded it.
+const GATEWAY_KICKSTART =
+  "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
+  "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
+  "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";
+
+export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
+  const { config, removeDevbox } = options;
+  const run = options.run ?? spawnRun;
+  const sleep =
+    options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const tart = config.tartBin;
+
+  const must = async (
+    step: string,
+    command: string[],
+    runOptions?: RunOptions,
+  ): Promise<RunResult> => {
+    const result = await run(command, runOptions);
+    if (result.code !== 0) {
+      const detail = result.stderr.trim() || result.stdout.trim();
+      throw new Error(`${step} failed (exit ${result.code}): ${detail}`);
+    }
+    return result;
+  };
+
+  const vmExists = async (devboxId: string): Promise<boolean> => {
+    const list = await run([tart, "list"]);
+    return (
+      list.code === 0 &&
+      new RegExp(`^local\\s+${devboxId}\\s`, "m").test(list.stdout)
+    );
+  };
+
+  const provisionSteps = async (devboxId: string): Promise<void> => {
+    await must("tart clone", [tart, "clone", config.goldenImage, devboxId]);
+
+    // Boot headless, detached: `tart run` blocks for the VM's lifetime, so it
+    // is backgrounded under nohup (same pattern as provision-devbox.sh). The
+    // tart path and VM name are passed as positional args to dodge quoting.
+    await must("tart run (detached)", [
+      "/bin/sh",
+      "-c",
+      'nohup "$0" run "$1" --no-graphics </dev/null >>"/tmp/tart-$1.log" 2>&1 & sleep 1',
+      tart,
+      devboxId,
+    ]);
+
+    let ip = "";
+    for (let i = 0; i < IP_ATTEMPTS; i++) {
+      const result = await run([tart, "ip", devboxId]);
+      const candidate = result.stdout.trim();
+      if (result.code === 0 && candidate !== "") {
+        ip = candidate;
+        break;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    if (ip === "") {
+      throw new Error(`${devboxId} never got an IP`);
+    }
+    console.log(`[hostagent] ${devboxId} IP: ${ip}`);
+
+    let sshUp = false;
+    for (let i = 0; i < SSH_ATTEMPTS; i++) {
+      if ((await run(sshCommand(ip, "true"))).code === 0) {
+        sshUp = true;
+        break;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    if (!sshUp) {
+      throw new Error(`SSH to ${devboxId} (${ip}) never came up`);
+    }
+
+    // Current code on top of the baked image: the golden image provides the
+    // slow-to-build environment (logins, node_modules); the payload dir holds
+    // the repo's latest gateway/src, shared, web/dist (scripts/deploy-payload.sh).
+    await must("rsync payload", [
+      "rsync",
+      "-az",
+      "-e",
+      SSH_BASE.join(" "),
+      `${config.payloadDir}/`,
+      `${VM_USER}@${ip}:ultraclaude/`,
+    ]);
+
+    // Gateway config only; Claude Code auth comes from the golden image.
+    const envFile = [
+      `DEVBOX_ID=${devboxId}`,
+      `PORT=${GATEWAY_PORT}`,
+      `CONVEX_SITE_URL=${config.convexSiteUrl}`,
+      `CONVEX_URL=${config.convexUrl}`,
+      `DEVBOX_SHARED_SECRET=${config.devboxSharedSecret}`,
+      "",
+    ].join("\n");
+    await must(
+      "write ultraclaude.env",
+      sshCommand(
+        ip,
+        "umask 077; cat > ~/ultraclaude.env && chmod 600 ~/ultraclaude.env",
+      ),
+      { stdin: envFile },
+    );
+
+    // Authkey is piped via stdin so it never appears in a command line.
+    await must(
+      "tailscale up",
+      sshCommand(
+        ip,
+        `sudo ${TAILSCALE} up --authkey="$(cat)" --hostname=${devboxId}`,
+      ),
+      { stdin: config.tailscaleAuthkey },
+    );
+    // HTTPS front for the monitoring page (noVNC needs a secure context).
+    await must(
+      "tailscale serve",
+      sshCommand(ip, `sudo ${TAILSCALE} serve --bg ${GATEWAY_PORT}`),
+    );
+
+    await must("gateway kickstart", sshCommand(ip, GATEWAY_KICKSTART));
+
+    // The host cannot reach VM tailnet addresses reliably (and the orchestrator
+    // health-checks nothing), so verify the gateway from INSIDE the VM.
+    let healthy = false;
+    for (let i = 0; i < HEALTH_ATTEMPTS; i++) {
+      const health = await run(
+        sshCommand(ip, `curl -s http://127.0.0.1:${GATEWAY_PORT}/health`),
+      );
+      if (health.stdout.includes(`"devboxId":"${devboxId}"`)) {
+        healthy = true;
+        break;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    if (!healthy) {
+      throw new Error(`gateway health check failed for ${devboxId}`);
+    }
+
+    // Best-effort TLS cert pre-warm: the first HTTPS request triggers
+    // issuance (~30s), so the monitoring link works instantly when posted.
+    await run(
+      sshCommand(
+        ip,
+        `curl -fsS --max-time 60 https://${devboxId}.${config.tailnetSuffix}/health`,
+      ),
+    );
+  };
+
+  const requireValidId = (devboxId: string): void => {
+    if (!DEVBOX_ID_PATTERN.test(devboxId)) {
+      throw new Error(`invalid devbox id: ${JSON.stringify(devboxId)}`);
+    }
+  };
+
+  return {
+    provision: async (devboxId) => {
+      requireValidId(devboxId);
+      console.log(
+        `[hostagent] provisioning ${devboxId} from ${config.goldenImage}`,
+      );
+      try {
+        await provisionSteps(devboxId);
+        console.log(`[hostagent] ${devboxId} provisioned and healthy`);
+      } catch (error) {
+        // Best-effort teardown of the partial VM, then rethrow so the failure
+        // is visible in the log. The consumer acks regardless; the
+        // orchestrator's staleness cron surfaces the stuck task.
+        console.error(
+          `[hostagent] provisioning ${devboxId} failed; cleaning up partial VM:`,
+          error,
+        );
+        await run([tart, "stop", devboxId]);
+        await run([tart, "delete", devboxId]);
+        throw error;
+      }
+    },
+
+    destroy: async (devboxId) => {
+      requireValidId(devboxId);
+      console.log(`[hostagent] destroying ${devboxId}`);
+      // Best-effort: release the tailnet identity while the VM is still up.
+      const ipResult = await run([tart, "ip", devboxId]);
+      const ip = ipResult.code === 0 ? ipResult.stdout.trim() : "";
+      if (ip !== "") {
+        await run(sshCommand(ip, `sudo ${TAILSCALE} logout`));
+      }
+      await run([tart, "stop", devboxId]); // may already be stopped
+      const deleted = await run([tart, "delete", devboxId]);
+      if (deleted.code !== 0 && (await vmExists(devboxId))) {
+        // The VM survived the delete: keep the devbox row so the leak stays
+        // visible (the consumer acks the command either way).
+        const detail = deleted.stderr.trim() || deleted.stdout.trim();
+        throw new Error(
+          `tart delete ${devboxId} failed (exit ${deleted.code}): ${detail}`,
+        );
+      }
+      await removeDevbox(devboxId);
+      console.log(`[hostagent] ${devboxId} destroyed and removed from Convex`);
+    },
+  };
+}
