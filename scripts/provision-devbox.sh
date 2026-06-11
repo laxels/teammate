@@ -93,6 +93,19 @@ for i in $(seq 1 60); do
   sleep 5
 done
 
+# ----------------------------------------------------------- sync current code
+# The golden image provides the slow-to-build environment (logins, apps, bun,
+# node_modules); the CODE is whatever was baked at image time and goes stale
+# with every merge. Provisioning deploys the repo's current gateway + page on
+# top, so fresh devboxes always run HEAD. (Dependency changes still require a
+# rebake: node_modules is not synced.)
+log "Syncing current gateway/web code into the VM"
+(cd "$REPO_ROOT/web" && bun run build >/dev/null 2>&1)
+RSYNC_SSH="ssh ${VM_SSH_OPTS[*]}"
+(cd "$REPO_ROOT" &&
+  rsync -az -e "$RSYNC_SSH" --relative gateway/src shared web/dist \
+    "$VM_USER@$VM_IP:ultraclaude/")
+
 # ------------------------------------------------------- gateway env config
 # Claude Code auth is NOT configured here: it comes from the golden image
 # itself (~/.zprofile exports CLAUDE_CODE_OAUTH_TOKEN from
@@ -116,6 +129,10 @@ vm '/opt/homebrew/bin/tailscale ip -4'
 # HTTPS front for the monitoring page: noVNC needs a secure context
 # (crypto.subtle), so the page is served via Tailscale Serve on 443.
 vm 'sudo /opt/homebrew/bin/tailscale serve --bg 8787'
+# Pre-warm the TLS cert: the first HTTPS request triggers issuance (~30s);
+# doing it here means the monitoring link works instantly when posted.
+(curl -fsS --max-time 60 "https://$DEVBOX_ID.$TAILNET_SUFFIX/health" >/dev/null 2>&1 || true) &
+CERT_WARM_PID=$!
 
 # ------------------------------------------------------------ start gateway
 log "Kicking the gateway LaunchAgent"
@@ -143,4 +160,5 @@ log "Registering devbox in Convex"
 (cd "$REPO_ROOT" && bunx convex run devboxes:registerDevbox \
   "{\"devboxId\": \"$DEVBOX_ID\", \"gatewayUrl\": \"$GATEWAY_URL\"}")
 
+wait "$CERT_WARM_PID" 2>/dev/null || true
 log "Done. $DEVBOX_ID is warm and registered at $GATEWAY_URL"
