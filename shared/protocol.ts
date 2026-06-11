@@ -16,6 +16,7 @@ export type PermissionMode =
 export type SteerClientMessage =
   | { type: "user_message"; text: string }
   | { type: "interrupt" }
+  // No UI sender yet (planned sidebar control); the gateway already handles it.
   | { type: "set_permission_mode"; mode: PermissionMode };
 
 export type SteerServerMessage =
@@ -41,6 +42,8 @@ export type SteerServerMessage =
 // POST /task       StartTaskRequest -> 202, or 409 if a task is running
 // POST /interrupt  {}               -> 200
 // GET  /health     -> GatewayHealth
+// Both POSTs require the x-devbox-secret header (Tailscale Serve exposes the
+// whole port to the tailnet); missing/wrong secret -> 401.
 export type StartTaskRequest = {
   taskId: string;
   prompt: string;
@@ -63,6 +66,7 @@ export type GatewayHealth = {
 export type DevboxEventType =
   | "started"
   | "progress"
+  // No producer yet: the gateway does not emit needs_input (roadmap).
   | "needs_input"
   | "completed"
   | "failed"
@@ -110,10 +114,18 @@ export function isTerminalTaskStatus(status: TaskStatus): boolean {
  * Whether an incoming devbox event may change a task's status. Events can
  * arrive out of order (concurrent POSTs, retries), so a non-terminal event
  * must never regress a task that already reached a terminal status.
+ *
+ * Terminal-to-terminal transitions apply (a retry/correction wins), with one
+ * exception: completed -> stopped is blocked, because a later session
+ * eviction (interrupting a finished-but-steerable session to free the
+ * devbox) must not regress a finished task's record.
  */
 export function shouldApplyTaskStatus(
   current: TaskStatus,
   incoming: TaskStatus,
 ): boolean {
+  if (current === "completed" && incoming === "stopped") {
+    return false;
+  }
   return !isTerminalTaskStatus(current) || isTerminalTaskStatus(incoming);
 }

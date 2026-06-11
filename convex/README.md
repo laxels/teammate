@@ -42,13 +42,15 @@ Re-running upserts and resets the devbox to `warm`.
    runs the Fable 5 loop with tools `list_tasks` / `get_task` / `start_task` /
    `stop_task` (steering is via the monitoring page, not a tool). The final
    reply is posted to the originating channel — threaded for channel mentions.
-3. `start_task` claims a warm devbox, POSTs `{gatewayUrl}/task`, and inserts a
-   `tasks` row; the gateway then posts `DevboxEvent`s to `/devbox/events`,
-   which update task/devbox state and notify the task's Slack thread (with the
-   monitoring link `http://<devbox-host>:8787/`).
-4. Every 15 min, `crons.ts` → `staleness.checkStaleTasks`: running tasks with
-   no event for 30+ min get a one-line check-in (gateway `/health` + monitoring
-   link), at most once per 30 min per task (`lastNudgedAt`).
+3. `start_task` claims a warm devbox, enqueues a command in the `commands`
+   table (gateways subscribe outbound — Convex cannot reach the tailnet), and
+   inserts a `tasks` row; the gateway then posts `DevboxEvent`s to
+   `/devbox/events`, which update task/devbox state and notify the task's
+   Slack thread (with the monitoring link `https://<devbox-host>/`).
+4. Every 15 min, `crons.ts` → `staleness.checkStaleTasks`: active (queued or
+   running) tasks with no event for 30+ min get a one-line check-in (devbox
+   heartbeat freshness + monitoring link), at most once per 30 min per task
+   (`lastNudgedAt`).
 
 Pure logic (event filtering, thread targeting, monitoring-URL derivation,
 staleness predicate, DevboxEvent validation) lives in `src/orchestration.ts`

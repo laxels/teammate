@@ -15,12 +15,11 @@ import { type ActionCtx, internalAction } from "./_generated/server";
 
 // Model policy (ARCHITECTURE.md): claude-fable-5 at xhigh everywhere, no
 // fallback model, no `fallbacks` parameter — flagged requests refuse rather
-// than downgrade. (MODEL/SYSTEM_PROMPT/TOOLS are exported so smoke scripts
-// can exercise the exact production request shape.)
-export const MODEL = "claude-fable-5";
+// than downgrade.
+const MODEL = "claude-fable-5";
 const MAX_TOOL_ITERATIONS = 12;
 
-export const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
+const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
 
 Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, plus Google Chrome with the Claude in Chrome extension signed in. Tasks can control the browser (set use_chrome) — web apps, sites without APIs, web games, anything a person could do at a Mac. Never claim you cannot use a browser: you personally cannot, but your devboxes can, so delegate.
 
@@ -34,7 +33,7 @@ Once a task starts, status updates and the monitoring link are posted to this co
 
 Formatting: concise Slack style — *bold*, _italic_, \`code\`, "-" bullets, <URL|label> links. No markdown headers, no **double asterisks**. Keep replies short: you are a teammate in chat, not an essayist.`;
 
-export const TOOLS: Anthropic.Tool[] = [
+const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_tasks",
     description:

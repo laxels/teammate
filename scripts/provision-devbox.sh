@@ -94,6 +94,10 @@ for i in $(seq 1 60); do
 done
 
 # ------------------------------------------------------- gateway env config
+# Claude Code auth is NOT configured here: it comes from the golden image
+# itself (~/.zprofile exports CLAUDE_CODE_OAUTH_TOKEN from
+# ~/claude-oauth-token.txt, and ~/.claude/settings.json carries an env block).
+# ultraclaude.env only configures the gateway.
 log "Writing ~/ultraclaude.env"
 vm 'umask 077; cat > ~/ultraclaude.env && chmod 600 ~/ultraclaude.env' <<EOF
 DEVBOX_ID=$DEVBOX_ID

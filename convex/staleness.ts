@@ -1,33 +1,16 @@
-import type { GatewayHealth } from "../shared/protocol";
-import {
-  monitoringUrl,
-  STALE_AFTER_MS,
-  shouldNudge,
-} from "../src/orchestration";
+import { monitoringUrl, shouldNudge } from "../src/orchestration";
 import { postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
-
-async function fetchGatewayHealth(
-  gatewayUrl: string,
-): Promise<GatewayHealth | null> {
-  try {
-    const response = await fetch(new URL("/health", gatewayUrl), {
-      method: "GET",
-    });
-    if (!response.ok) {
-      return null;
-    }
-    return (await response.json()) as GatewayHealth;
-  } catch {
-    return null;
-  }
-}
+import { HEARTBEAT_FRESHNESS_MS } from "./devboxes";
 
 /**
- * Cron target: for running tasks with no devbox event in the last 30 minutes,
- * check the gateway's health and post a one-line check-in to the task thread.
- * markNudged guarantees at most one check-in per task per 30 minutes.
+ * Cron target: for active (queued or running) tasks with no devbox event in
+ * the last 30 minutes, post a one-line check-in to the task thread. The
+ * status line is derived purely from Convex state (devbox heartbeat freshness
+ * and task assignment) — Convex cloud cannot reach tailnet gateway addresses,
+ * so dialing the gateway from here would always fail. markNudged guarantees
+ * at most one check-in per task per 30 minutes.
  */
 export const checkStaleTasks = internalAction({
   args: {},
@@ -38,12 +21,9 @@ export const checkStaleTasks = internalAction({
       return;
     }
     const now = Date.now();
-    const running = await ctx.runQuery(
-      internal.tasks.runningWithLatestEvent,
-      {},
-    );
+    const active = await ctx.runQuery(internal.tasks.activeWithLatestEvent, {});
 
-    for (const task of running) {
+    for (const task of active) {
       const nudgeArgs: Parameters<typeof shouldNudge>[0] = {
         nowMs: now,
         latestActivityMs: task.latestActivityMs,
@@ -61,18 +41,25 @@ export const checkStaleTasks = internalAction({
           : await ctx.runQuery(internal.devboxes.getByDevboxId, {
               devboxId: task.devboxId,
             });
-      const health =
-        devbox === null ? null : await fetchGatewayHealth(devbox.gatewayUrl);
       const monitorUrl =
         devbox === null ? null : monitoringUrl(devbox.gatewayUrl);
 
+      let statusPart: string;
+      if (devbox === null) {
+        statusPart = "no devbox is assigned to this task";
+      } else {
+        const heartbeatMin = Math.round((now - devbox.lastSeenAt) / 60_000);
+        const heartbeatPart =
+          now - devbox.lastSeenAt <= HEARTBEAT_FRESHNESS_MS
+            ? `last devbox heartbeat ${heartbeatMin}m ago`
+            : `no devbox heartbeat for ${heartbeatMin}m — the devbox may be down`;
+        statusPart =
+          devbox.taskId === task.taskId
+            ? heartbeatPart
+            : `${heartbeatPart}, and the devbox is no longer assigned to this task`;
+      }
+
       const sinceMin = Math.round((now - task.latestActivityMs) / 60_000);
-      const statusPart =
-        health === null
-          ? "the devbox gateway is not responding"
-          : health.running && health.taskId === task.taskId
-            ? "the devbox says it is still working"
-            : "the devbox no longer reports this task as running";
       const monitorPart = monitorUrl === null ? "" : ` Monitor: ${monitorUrl}`;
       const text = `:hourglass_flowing_sand: No updates from *${task.title}* for ${sinceMin} min — ${statusPart}.${monitorPart}`;
 
@@ -93,6 +80,3 @@ export const checkStaleTasks = internalAction({
     }
   },
 });
-
-// Re-export so the 30-minute contract is visible from the cron module too.
-export { STALE_AFTER_MS };

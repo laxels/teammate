@@ -19,7 +19,6 @@ import { createThrottler, type Throttler } from "./throttle";
 export type AgentQuery = AsyncGenerator<SDKMessage, void> & {
   interrupt(): Promise<void>;
   setPermissionMode(mode: SdkPermissionMode): Promise<void>;
-  close(): void;
 };
 
 export type QueryFn = (params: {

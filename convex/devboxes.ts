@@ -91,20 +91,6 @@ export const claimWarm = internalMutation({
   },
 });
 
-/** Returns a claimed devbox to the warm pool (e.g. when /task POST fails). */
-export const release = internalMutation({
-  args: { devboxId: v.string() },
-  handler: async (ctx, args) => {
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
-    if (devbox !== null) {
-      await ctx.db.patch(devbox._id, { status: "warm", taskId: undefined });
-    }
-  },
-});
-
 /**
  * Records a DevboxEvent posted by a gateway: appends to taskEvents, moves the
  * task to the mapped TaskStatus, and refreshes the devbox row (lastSeenAt +
@@ -151,7 +137,13 @@ export const recordEvent = internalMutation({
       .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
       .unique();
     if (devbox !== null) {
-      if (applied || task === null) {
+      // Events for a task that is NOT the devbox's current assignment must
+      // not clobber the devbox row (e.g. a late event from a previous task
+      // racing a new claim). Any event still proves liveness, so lastSeenAt
+      // is always refreshed.
+      const isCurrentAssignment =
+        devbox.taskId === undefined || devbox.taskId === args.taskId;
+      if (isCurrentAssignment && (applied || task === null)) {
         const busy = BUSY_EVENT_TYPES.has(args.type);
         await ctx.db.patch(devbox._id, {
           status: busy ? "busy" : "warm",

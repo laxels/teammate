@@ -22,6 +22,8 @@ const server = createGatewayServer({ config });
 // surface it as a failed lifecycle event so the task doesn't sit in "queued".
 const emitEvent = createEventSender(config);
 const localUrl = `http://127.0.0.1:${server.port}`;
+// POST /task and /interrupt require the shared secret even from localhost.
+const authHeader = { "x-devbox-secret": config.devboxSharedSecret };
 startCommandConsumer({
   convexUrl: config.convexUrl,
   devboxId: config.devboxId,
@@ -31,7 +33,7 @@ startCommandConsumer({
       const post = () =>
         fetch(`${localUrl}/task`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...authHeader },
           body: command.payload,
         });
       let response = await post();
@@ -40,7 +42,11 @@ startCommandConsumer({
         // orchestrator only assigns devboxes Convex considers warm, so a new
         // task wins: end the old session, wait for the slot to actually free
         // (teardown is asynchronous), then retry.
-        await fetch(`${localUrl}/interrupt`, { method: "POST", body: "{}" });
+        await fetch(`${localUrl}/interrupt`, {
+          method: "POST",
+          headers: authHeader,
+          body: "{}",
+        });
         const deadline = Date.now() + 15_000;
         while (Date.now() < deadline) {
           const health = (await fetch(`${localUrl}/health`).then((r) =>
@@ -65,7 +71,11 @@ startCommandConsumer({
       }
       return;
     }
-    await fetch(`${localUrl}/interrupt`, { method: "POST", body: "{}" });
+    await fetch(`${localUrl}/interrupt`, {
+      method: "POST",
+      headers: authHeader,
+      body: "{}",
+    });
   },
 });
 

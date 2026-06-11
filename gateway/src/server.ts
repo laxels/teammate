@@ -41,6 +41,17 @@ export type GatewayServerOptions = {
 
 const DEFAULT_WEB_DIST = resolve(import.meta.dir, "../../web/dist");
 
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
   if (typeof body !== "object" || body === null) return null;
   const candidate = body as Record<string, unknown>;
@@ -135,6 +146,22 @@ export function createGatewayServer(
           taskId: status.taskId,
         };
         return Response.json(health);
+      }
+
+      // Tailscale Serve exposes this whole port to the tailnet, so the
+      // control endpoints require the shared secret (same value gateways use
+      // to authenticate with Convex).
+      if (
+        request.method === "POST" &&
+        (url.pathname === "/task" || url.pathname === "/interrupt")
+      ) {
+        const provided = request.headers.get("x-devbox-secret");
+        if (
+          provided === null ||
+          !timingSafeEqual(provided, config.devboxSharedSecret)
+        ) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
       }
 
       if (request.method === "POST" && url.pathname === "/task") {

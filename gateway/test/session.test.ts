@@ -117,7 +117,6 @@ describe("SessionManager", () => {
           gate.resolve();
         },
         setPermissionMode: async () => {},
-        close: () => {},
       });
     };
     const { session, events } = makeSession(queryFn);
@@ -165,7 +164,6 @@ describe("SessionManager", () => {
       return Object.assign(generate(), {
         interrupt: async () => {},
         setPermissionMode: async () => {},
-        close: () => {},
       });
     };
     const { session, events } = makeSession(queryFn, { now: () => clock.t });
@@ -218,7 +216,6 @@ describe("SessionManager", () => {
       return Object.assign(generate(), {
         interrupt: async () => {},
         setPermissionMode: async () => {},
-        close: () => {},
       });
     };
     const { session, events } = makeSession(queryFn);

@@ -22,8 +22,12 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   (logged in), Claude Code ≥2.1.172 pinned to `claude-fable-5` at `xhigh`
   (`~/.claude/settings.json`), `switchModelsOnFlag: false`, subscription OAuth
   token at `~/claude-oauth-token.txt`.
+- Provisioning (`scripts/provision-devbox.sh`) clones `golden-v2`: golden-v1
+  plus the gateway and its LaunchAgent baked in.
 - Each devbox VM joins the tailnet with its own identity at provision time
   (tailscale is installed in the image but deliberately logged out).
+- The monitoring page is fronted by Tailscale Serve (HTTPS on 443 → gateway
+  port 8787): noVNC needs a secure context (`crypto.subtle`).
 - Devbox VM networking is host-NAT (192.168.64.x); nothing on the host proxies
   VM traffic in production — the gateway binds inside the VM and is reached
   over the VM's own tailnet address. (macOS Local Network TCC silently blocks
@@ -41,7 +45,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    `DevboxEvent`s back to Convex `/devbox/events`. Gateways heartbeat every
    60s; `claimWarm` only assigns devboxes seen in the last 2 minutes.
 4. Orchestrator turns events into Slack updates (thread-aware) and posts the
-   monitoring link `http://<devbox-tailnet-host>:8787/`.
+   monitoring link `https://<devbox-tailnet-host>/` (Tailscale Serve).
 5. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
    steering sidebar (`/ws/steer` → Agent SDK streaming input / `interrupt()`).
 6. A Convex cron flags tasks with no events for >30 min and the orchestrator
