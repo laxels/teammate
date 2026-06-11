@@ -20,6 +20,7 @@ if [[ ! "$DEVBOX_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
 fi
 
 HOST_SSH="m1@100.121.13.107"
+HOST_ID="ultraclaude-host-1"
 TART='~/tart.app/Contents/MacOS/tart'
 SOURCE_IMAGE="golden-v2"
 VM_USER="admin"
@@ -158,7 +159,7 @@ fi
 # -------------------------------------------------------- register in Convex
 log "Registering devbox in Convex"
 (cd "$REPO_ROOT" && bunx convex run devboxes:registerDevbox \
-  "{\"devboxId\": \"$DEVBOX_ID\", \"gatewayUrl\": \"$GATEWAY_URL\"}")
+  "{\"devboxId\": \"$DEVBOX_ID\", \"gatewayUrl\": \"$GATEWAY_URL\", \"hostId\": \"$HOST_ID\"}")
 
 wait "$CERT_WARM_PID" 2>/dev/null || true
 log "Done. $DEVBOX_ID is warm and registered at $GATEWAY_URL"

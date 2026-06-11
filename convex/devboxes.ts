@@ -27,7 +27,14 @@ const BUSY_EVENT_TYPES = new Set(["started", "progress", "needs_input"]);
  * Upserts by devboxId and resets the devbox to warm.
  */
 export const registerDevbox = internalMutation({
-  args: { devboxId: v.string(), gatewayUrl: v.string() },
+  args: {
+    devboxId: v.string(),
+    gatewayUrl: v.string(),
+    // The Mac host whose VM slots this devbox occupies. Without it the
+    // capacity accounting in hosts.allocateEphemeral cannot see the VM and
+    // may oversubscribe the host (Apple EULA: 2 VMs max).
+    hostId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("devboxes")
@@ -39,6 +46,7 @@ export const registerDevbox = internalMutation({
         status: "warm",
         taskId: undefined,
         lastSeenAt: Date.now(),
+        ...(args.hostId === undefined ? {} : { hostId: args.hostId }),
       });
       return { created: false };
     }
@@ -47,6 +55,7 @@ export const registerDevbox = internalMutation({
       gatewayUrl: args.gatewayUrl,
       status: "warm",
       lastSeenAt: Date.now(),
+      ...(args.hostId === undefined ? {} : { hostId: args.hostId }),
     });
     return { created: true };
   },
