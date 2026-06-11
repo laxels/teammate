@@ -1,8 +1,11 @@
 import { v } from "convex/values";
 import {
   DEVBOX_EVENT_TO_TASK_STATUS,
+  EPHEMERAL_RETIRE_GRACE_MS,
   shouldApplyTaskStatus,
 } from "../shared/protocol";
+import { shouldRetireEphemeralDevbox } from "../src/hostPool";
+import { internal } from "./_generated/api";
 import { internalMutation, internalQuery } from "./_generated/server";
 
 export const devboxEventTypeValidator = v.union(
@@ -140,16 +143,47 @@ export const recordEvent = internalMutation({
       // Events for a task that is NOT the devbox's current assignment must
       // not clobber the devbox row (e.g. a late event from a previous task
       // racing a new claim). Any event still proves liveness, so lastSeenAt
-      // is always refreshed.
+      // is always refreshed. "retiring" is a one-way street: nothing short of
+      // destruction takes a devbox out of it.
       const isCurrentAssignment =
         devbox.taskId === undefined || devbox.taskId === args.taskId;
-      if (isCurrentAssignment && (applied || task === null)) {
-        const busy = BUSY_EVENT_TYPES.has(args.type);
+      const eligible = devbox.status !== "retiring" && isCurrentAssignment;
+      const retire =
+        eligible &&
+        shouldRetireEphemeralDevbox({
+          ephemeral: devbox.ephemeral,
+          statusApplied: applied,
+          incomingStatus,
+        });
+      if (retire) {
+        // Ephemeral devboxes never return to the warm pool — no task ever
+        // runs on a previous task's VM. The VM stays up (monitoring page,
+        // final event flush) for the grace period, then the host agent gets
+        // the destroy command.
         await ctx.db.patch(devbox._id, {
-          status: busy ? "busy" : "warm",
-          taskId: busy ? args.taskId : undefined,
+          status: "retiring",
+          taskId: undefined,
           lastSeenAt: Date.now(),
         });
+        await ctx.scheduler.runAfter(
+          EPHEMERAL_RETIRE_GRACE_MS,
+          internal.hosts.retireDevbox,
+          { devboxId: args.devboxId },
+        );
+      } else if (eligible && (applied || task === null)) {
+        const busy = BUSY_EVENT_TYPES.has(args.type);
+        if (busy || devbox.ephemeral !== true) {
+          await ctx.db.patch(devbox._id, {
+            status: busy ? "busy" : "warm",
+            taskId: busy ? args.taskId : undefined,
+            lastSeenAt: Date.now(),
+          });
+        } else {
+          // Non-busy event on an ephemeral devbox that didn't qualify for
+          // retire (e.g. its task row is missing): never park it as
+          // claimable "warm".
+          await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
+        }
       } else {
         await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
       }

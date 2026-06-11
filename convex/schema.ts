@@ -50,14 +50,51 @@ export default defineSchema({
     .index("by_task_id", ["taskId"])
     .index("by_status", ["status"]),
 
-  // Devbox VMs (manually registered in v1 via devboxes.registerDevbox).
+  // Devbox VMs. Permanent devboxes are registered manually via
+  // devboxes.registerDevbox and cycle warm <-> busy; ephemeral devboxes are
+  // created by hosts.allocateEphemeral (provisioning -> busy -> retiring ->
+  // row deleted by hosts.removeDevbox) and never enter the warm pool.
   devboxes: defineTable({
     devboxId: v.string(),
     gatewayUrl: v.string(),
-    status: v.union(v.literal("warm"), v.literal("busy")),
+    status: v.union(
+      v.literal("warm"),
+      v.literal("busy"),
+      v.literal("provisioning"),
+      v.literal("retiring"),
+    ),
     taskId: v.optional(v.string()),
+    // The Mac host whose agent manages this VM (ephemeral devboxes only).
+    hostId: v.optional(v.string()),
+    // Ephemeral devboxes are destroyed after their single task finishes.
+    ephemeral: v.optional(v.boolean()),
     lastSeenAt: v.number(),
   }).index("by_devbox_id", ["devboxId"]),
+
+  // Mac hosts running the host agent (self-registered on first heartbeat).
+  // Each host runs Tart VMs; Apple's EULA caps maxVms at 2 concurrent macOS
+  // VMs per host. "draining" excludes a host from new allocations without
+  // touching its running VMs.
+  hosts: defineTable({
+    hostId: v.string(),
+    maxVms: v.number(),
+    status: v.union(v.literal("active"), v.literal("draining")),
+    lastSeenAt: v.number(),
+  }).index("by_host_id", ["hostId"]),
+
+  // Host-level command queue (VM lifecycle), mirroring `commands`: the
+  // orchestrator enqueues, host agents subscribe and ack (outbound-only).
+  hostCommands: defineTable({
+    commandId: v.string(),
+    hostId: v.string(),
+    kind: v.union(v.literal("provision_vm"), v.literal("destroy_vm")),
+    // JSON payload: HostVmPayload for both kinds.
+    payload: v.string(),
+    status: v.union(v.literal("pending"), v.literal("acked")),
+    createdAt: v.number(),
+  })
+    .index("by_host_status", ["hostId", "status"])
+    .index("by_command_id", ["commandId"]),
 
   // Control-plane command queue: the orchestrator enqueues, gateways
   // subscribe and ack (outbound-only — Convex cloud cannot reach tailnet
