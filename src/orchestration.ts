@@ -165,11 +165,11 @@ export function resolveThreadTarget(trigger: SlackTrigger): ThreadTarget {
 
 // ---- Monitoring-URL derivation ----
 
-const MONITORING_PORT = 8787;
-
 /**
- * Derives the monitoring page URL (`http://{devboxHost}:8787/`) from a
- * devbox gateway URL. Returns null when the gateway URL can't be parsed.
+ * Derives the monitoring page URL (`https://{devboxHost}/`) from a devbox
+ * gateway URL. The page is fronted by Tailscale Serve on 443: noVNC needs a
+ * secure context (crypto.subtle is unavailable over plain http, which breaks
+ * the VNC auth handshake). Returns null when the gateway URL can't be parsed.
  */
 export function monitoringUrl(gatewayUrl: string): string | null {
   let parsed: URL;
@@ -181,7 +181,7 @@ export function monitoringUrl(gatewayUrl: string): string | null {
   if (parsed.hostname === "") {
     return null;
   }
-  return `http://${parsed.hostname}:${MONITORING_PORT}/`;
+  return `https://${parsed.hostname}/`;
 }
 
 // ---- Staleness predicate ----

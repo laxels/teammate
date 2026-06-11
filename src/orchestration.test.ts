@@ -244,15 +244,15 @@ describe("resolveThreadTarget", () => {
 });
 
 describe("monitoringUrl", () => {
-  test("derives http://{host}:8787/ from the gateway URL", () => {
+  test("derives https://{host}/ (Tailscale Serve on 443) from the gateway URL", () => {
     expect(monitoringUrl("http://devbox-1.tail1234.ts.net:8787")).toBe(
-      "http://devbox-1.tail1234.ts.net:8787/",
+      "https://devbox-1.tail1234.ts.net/",
     );
   });
 
-  test("normalizes paths and non-8787 ports to the monitoring port", () => {
+  test("drops gateway ports and paths", () => {
     expect(monitoringUrl("http://100.99.1.5:9090/api")).toBe(
-      "http://100.99.1.5:8787/",
+      "https://100.99.1.5/",
     );
   });
 
