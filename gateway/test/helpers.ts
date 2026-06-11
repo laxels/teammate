@@ -157,9 +157,6 @@ export function createEchoQueryFn(
       setPermissionMode: async (mode: string) => {
         control.permissionModes.push(mode);
       },
-      close: () => {
-        interrupted = true;
-      },
     });
     return query;
   };

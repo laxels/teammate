@@ -25,6 +25,13 @@ test("normal forward transitions apply", () => {
 });
 
 test("terminal-to-terminal transitions apply (a retry/correction wins)", () => {
-  expect(shouldApplyTaskStatus("completed", "stopped")).toBe(true);
   expect(shouldApplyTaskStatus("failed", "completed")).toBe(true);
+  expect(shouldApplyTaskStatus("failed", "stopped")).toBe(true);
+});
+
+test("a session eviction cannot regress a completed task to stopped", () => {
+  // After a task completes, the session stays alive for steering; evicting it
+  // later (to free the devbox for the next task) emits "stopped", which must
+  // not overwrite the finished task's record.
+  expect(shouldApplyTaskStatus("completed", "stopped")).toBe(false);
 });

@@ -93,19 +93,27 @@ export const markNudged = internalMutation({
 });
 
 /**
- * Running tasks joined with their latest event timestamp, for the staleness
- * cron. `latestActivityMs` falls back to the task's updatedAt when no events
- * have been recorded yet.
+ * Active (queued or running) tasks joined with their latest event timestamp,
+ * for the staleness cron. Queued tasks are included because a devbox that
+ * dies after claiming but before posting "started" would otherwise leave the
+ * task queued forever, unmonitored. `latestActivityMs` falls back to the
+ * task's updatedAt when no events have been recorded yet.
  */
-export const runningWithLatestEvent = internalQuery({
+export const activeWithLatestEvent = internalQuery({
   args: {},
   handler: async (ctx) => {
-    const running = await ctx.db
-      .query("tasks")
-      .withIndex("by_status", (q) => q.eq("status", "running"))
-      .collect();
+    const active = (
+      await Promise.all(
+        (["queued", "running"] as const).map((status) =>
+          ctx.db
+            .query("tasks")
+            .withIndex("by_status", (q) => q.eq("status", status))
+            .collect(),
+        ),
+      )
+    ).flat();
     return await Promise.all(
-      running.map(async (task) => {
+      active.map(async (task) => {
         const latest = await ctx.db
           .query("taskEvents")
           .withIndex("by_task_id", (q) => q.eq("taskId", task.taskId))

@@ -20,6 +20,9 @@ const config: GatewayConfig = {
   devboxSharedSecret: "shhh",
 };
 
+// POST /task and /interrupt require the shared secret header.
+const auth = { "x-devbox-secret": config.devboxSharedSecret };
+
 type Harness = {
   server: GatewayServer;
   base: string;
@@ -107,7 +110,7 @@ describe("HTTP API", () => {
 
     const accepted = await fetch(`${base}/task`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       body: JSON.stringify({ taskId: "task-1", prompt: "do the work" }),
     });
     expect(accepted.status).toBe(202);
@@ -120,7 +123,7 @@ describe("HTTP API", () => {
 
     const conflict = await fetch(`${base}/task`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       body: JSON.stringify({ taskId: "task-2", prompt: "me too" }),
     });
     expect(conflict.status).toBe(409);
@@ -138,26 +141,54 @@ describe("HTTP API", () => {
     const { base } = makeHarness();
     const bad = await fetch(`${base}/task`, {
       method: "POST",
+      headers: auth,
       body: JSON.stringify({ taskId: "x" }),
     });
     expect(bad.status).toBe(400);
-    const notJson = await fetch(`${base}/task`, { method: "POST", body: "{" });
+    const notJson = await fetch(`${base}/task`, {
+      method: "POST",
+      headers: auth,
+      body: "{",
+    });
     expect(notJson.status).toBe(400);
+  });
+
+  test("POST /task and /interrupt reject a missing or wrong secret (401)", async () => {
+    const { base } = makeHarness();
+    const missing = await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ taskId: "task-1", prompt: "work" }),
+    });
+    expect(missing.status).toBe(401);
+    const wrong = await fetch(`${base}/interrupt`, {
+      method: "POST",
+      headers: { "x-devbox-secret": "wrong" },
+    });
+    expect(wrong.status).toBe(401);
+    // The unauthorized /task did not start a session.
+    const health = (await (
+      await fetch(`${base}/health`)
+    ).json()) as GatewayHealth;
+    expect(health.running).toBe(false);
   });
 
   test("POST /interrupt returns 200 and is idempotent", async () => {
     const { base } = makeHarness();
-    expect((await fetch(`${base}/interrupt`, { method: "POST" })).status).toBe(
-      200,
-    );
+    expect(
+      (await fetch(`${base}/interrupt`, { method: "POST", headers: auth }))
+        .status,
+    ).toBe(200);
 
     await fetch(`${base}/task`, {
       method: "POST",
+      headers: auth,
       body: JSON.stringify({ taskId: "task-1", prompt: "work" }),
     });
-    expect((await fetch(`${base}/interrupt`, { method: "POST" })).status).toBe(
-      200,
-    );
+    expect(
+      (await fetch(`${base}/interrupt`, { method: "POST", headers: auth }))
+        .status,
+    ).toBe(200);
     await until(async () => {
       const health = (await (
         await fetch(`${base}/health`)
@@ -208,6 +239,7 @@ describe("/ws/steer", () => {
 
     await fetch(`${base}/task`, {
       method: "POST",
+      headers: auth,
       body: JSON.stringify({ taskId: "task-1", prompt: "stream me" }),
     });
 
@@ -252,6 +284,7 @@ describe("/ws/steer", () => {
 
     await fetch(`${base}/task`, {
       method: "POST",
+      headers: auth,
       body: JSON.stringify({ taskId: "task-1", prompt: "work" }),
     });
     ws.send(JSON.stringify({ type: "interrupt" }));

@@ -2,7 +2,11 @@
 
 ![CI](https://github.com/laxels/teammate/actions/workflows/ci.yml/badge.svg)
 
-TypeScript + [Bun](https://bun.sh) + [Convex](https://convex.dev) starter.
+ultraclaude: a Slack-addressable "virtual teammate". A [Convex](https://convex.dev)-hosted
+orchestrator receives Slack DMs/mentions and delegates engineering work to Claude Code
+instances running in macOS devbox VMs, each with a full desktop (Chrome included). Every
+task gets a tailnet-only monitoring page with a live remote desktop and a steering sidebar.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for components, infrastructure, and task flow.
 
 ## Setup
 

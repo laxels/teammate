@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { timingSafeEqual } from "../src/slack";
 import { internalMutation, mutation, query } from "./_generated/server";
 
 export const commandKindValidator = v.union(
@@ -11,10 +12,20 @@ export const commandKindValidator = v.union(
  * passed as a function argument (gateways are Convex clients, so there are no
  * request headers). On mismatch the functions no-op rather than throw: a
  * misconfigured gateway sees an empty queue instead of generating error spam.
+ * A console.warn still records the mismatch for diagnosability.
  */
 function secretOk(secret: string): boolean {
   const expected = process.env.DEVBOX_SHARED_SECRET;
-  return expected !== undefined && expected !== "" && secret === expected;
+  const ok =
+    expected !== undefined &&
+    expected !== "" &&
+    timingSafeEqual(secret, expected);
+  if (!ok) {
+    console.warn(
+      "commands: devbox shared secret mismatch (or DEVBOX_SHARED_SECRET unset); ignoring request",
+    );
+  }
+  return ok;
 }
 
 /** Reactive query a gateway subscribes to for its own pending commands. */

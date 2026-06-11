@@ -54,7 +54,7 @@ export default defineSchema({
   devboxes: defineTable({
     devboxId: v.string(),
     gatewayUrl: v.string(),
-    status: v.union(v.literal("warm"), v.literal("busy"), v.literal("offline")),
+    status: v.union(v.literal("warm"), v.literal("busy")),
     taskId: v.optional(v.string()),
     lastSeenAt: v.number(),
   }).index("by_devbox_id", ["devboxId"]),
