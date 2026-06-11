@@ -109,6 +109,9 @@ log "Joining tailnet as $DEVBOX_ID"
 vm "sudo /opt/homebrew/bin/tailscale up --authkey=\"\$(cat)\" --hostname=$DEVBOX_ID" \
   <<<"$TAILSCALE_AUTHKEY"
 vm '/opt/homebrew/bin/tailscale ip -4'
+# HTTPS front for the monitoring page: noVNC needs a secure context
+# (crypto.subtle), so the page is served via Tailscale Serve on 443.
+vm 'sudo /opt/homebrew/bin/tailscale serve --bg 8787'
 
 # ------------------------------------------------------------ start gateway
 log "Kicking the gateway LaunchAgent"
