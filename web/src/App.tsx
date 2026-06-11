@@ -77,6 +77,13 @@ function VncPane() {
         retryDuration={VNC_RETRY_MS}
         background="#262522"
         style={{ width: "100%", height: "100%" }}
+        // macOS Screen Sharing uses ARD (RFB security type 30) auth; without
+        // credentials the connection silently fails and the pane stays blank.
+        // Devbox images use the fixed admin account; the page itself is only
+        // reachable over the tailnet.
+        rfbOptions={{
+          credentials: { username: "admin", password: "admin" },
+        }}
         onDisconnect={(event) => {
           // react-vnc auto-retries unclean disconnects on its own; clean
           // closes (e.g. gateway restart) need a manual reconnect.
