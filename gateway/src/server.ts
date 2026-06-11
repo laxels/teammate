@@ -5,6 +5,8 @@ import type {
   StartTaskRequest,
   SteerServerMessage,
 } from "../../shared/protocol";
+import { ComputerExecutor } from "./computer/executor";
+import { createComputerUseMcpServer } from "./computer/mcp";
 import type { GatewayConfig } from "./config";
 import { createEventSender, type FetchLike } from "./events";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
@@ -64,14 +66,10 @@ function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
   if (candidate.cwd !== undefined && typeof candidate.cwd !== "string") {
     return null;
   }
-  if (candidate.chrome !== undefined && typeof candidate.chrome !== "boolean") {
-    return null;
-  }
   return {
     taskId: candidate.taskId,
     prompt: candidate.prompt,
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
-    ...(candidate.chrome === true ? { chrome: true } : {}),
   };
 }
 
@@ -98,6 +96,9 @@ export function createGatewayServer(
 
   const session = new SessionManager({
     emitEvent,
+    createMcpServers: () => ({
+      "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
+    }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
     onStatusChange: (status: SessionStatus) =>

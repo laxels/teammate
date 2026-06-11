@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  McpServerConfig,
+  SDKMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { type QueryFn, SessionManager } from "../src/session";
 import {
   assistantMessage,
@@ -237,6 +240,37 @@ describe("SessionManager", () => {
     session.start({ taskId: "task-1", prompt: "task" });
     expect(await session.setPermissionMode("plan")).toBe(true);
     expect(control.permissionModes).toEqual(["plan"]);
+  });
+
+  test("in-process MCP servers are rebuilt and passed to the SDK per task", async () => {
+    const { queryFn, control } = createEchoQueryFn();
+    const { emitEvent } = createEventRecorder();
+    let factoryCalls = 0;
+    const session = new SessionManager({
+      emitEvent,
+      queryFn,
+      createMcpServers: () => {
+        factoryCalls += 1;
+        return {
+          "computer-use": {
+            type: "sdk",
+            name: "computer-use",
+            instance: {},
+          } as unknown as McpServerConfig,
+        };
+      },
+    });
+
+    session.start({ taskId: "task-1", prompt: "first" });
+    await until(() => control.calls.length > 0);
+    expect(control.calls[0]?.options?.mcpServers).toHaveProperty(
+      "computer-use",
+    );
+
+    await session.stop();
+    await until(() => !session.status().running);
+    session.start({ taskId: "task-2", prompt: "second" });
+    expect(factoryCalls).toBe(2);
   });
 
   test("history is capped at the configured capacity", async () => {
