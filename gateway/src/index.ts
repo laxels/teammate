@@ -28,18 +28,38 @@ startCommandConsumer({
   secret: config.devboxSharedSecret,
   execute: async (command) => {
     if (command.kind === "start") {
-      const response = await fetch(`${localUrl}/task`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: command.payload,
-      });
+      const post = () =>
+        fetch(`${localUrl}/task`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: command.payload,
+        });
+      let response = await post();
       if (response.status === 409) {
+        // A finished-but-steerable session still occupies the slot. The
+        // orchestrator only assigns devboxes Convex considers warm, so a new
+        // task wins: end the old session, wait for the slot to actually free
+        // (teardown is asynchronous), then retry.
+        await fetch(`${localUrl}/interrupt`, { method: "POST", body: "{}" });
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          const health = (await fetch(`${localUrl}/health`).then((r) =>
+            r.json(),
+          )) as { running: boolean };
+          if (!health.running) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        response = await post();
+      }
+      if (response.status !== 202) {
         const request = JSON.parse(command.payload) as { taskId?: string };
         if (typeof request.taskId === "string") {
           await emitEvent(
             request.taskId,
             "failed",
-            "devbox rejected the task: a session is already active (interrupt it first)",
+            `devbox rejected the task (HTTP ${response.status}) even after interrupting the previous session`,
           );
         }
       }

@@ -92,3 +92,25 @@ export const DEVBOX_EVENT_TO_TASK_STATUS: Record<DevboxEventType, TaskStatus> =
     failed: "failed",
     stopped: "stopped",
   };
+
+const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "completed",
+  "failed",
+  "stopped",
+]);
+
+export function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return TERMINAL_TASK_STATUSES.has(status);
+}
+
+/**
+ * Whether an incoming devbox event may change a task's status. Events can
+ * arrive out of order (concurrent POSTs, retries), so a non-terminal event
+ * must never regress a task that already reached a terminal status.
+ */
+export function shouldApplyTaskStatus(
+  current: TaskStatus,
+  incoming: TaskStatus,
+): boolean {
+  return !isTerminalTaskStatus(current) || isTerminalTaskStatus(incoming);
+}

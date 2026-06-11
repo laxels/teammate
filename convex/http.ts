@@ -93,11 +93,13 @@ http.route({
       return new Response("invalid devbox event", { status: 400 });
     }
 
-    const { taskFound } = await ctx.runMutation(
+    const { taskFound, applied } = await ctx.runMutation(
       internal.devboxes.recordEvent,
       event,
     );
-    if (taskFound) {
+    // Skip Slack noise for events that didn't change task state (e.g. a late
+    // progress event racing the completed event it duplicates).
+    if (taskFound && applied) {
       await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
         devboxId: event.devboxId,
         taskId: event.taskId,

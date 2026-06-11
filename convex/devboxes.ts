@@ -1,5 +1,8 @@
 import { v } from "convex/values";
-import { DEVBOX_EVENT_TO_TASK_STATUS } from "../shared/protocol";
+import {
+  DEVBOX_EVENT_TO_TASK_STATUS,
+  shouldApplyTaskStatus,
+} from "../shared/protocol";
 import { internalMutation, internalQuery } from "./_generated/server";
 
 export const devboxEventTypeValidator = v.union(
@@ -125,13 +128,19 @@ export const recordEvent = internalMutation({
       ts: args.ts,
     });
 
+    const incomingStatus = DEVBOX_EVENT_TO_TASK_STATUS[args.type];
     const task = await ctx.db
       .query("tasks")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
       .unique();
-    if (task !== null) {
+    // Events can arrive out of order (concurrent POSTs, retries): a late
+    // non-terminal event must never regress a terminal task status, and must
+    // not re-mark the devbox busy for an already-finished task.
+    const applied =
+      task !== null && shouldApplyTaskStatus(task.status, incomingStatus);
+    if (task !== null && applied) {
       await ctx.db.patch(task._id, {
-        status: DEVBOX_EVENT_TO_TASK_STATUS[args.type],
+        status: incomingStatus,
         devboxId: args.devboxId,
         updatedAt: Date.now(),
       });
@@ -142,14 +151,18 @@ export const recordEvent = internalMutation({
       .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
       .unique();
     if (devbox !== null) {
-      const busy = BUSY_EVENT_TYPES.has(args.type);
-      await ctx.db.patch(devbox._id, {
-        status: busy ? "busy" : "warm",
-        taskId: busy ? args.taskId : undefined,
-        lastSeenAt: Date.now(),
-      });
+      if (applied || task === null) {
+        const busy = BUSY_EVENT_TYPES.has(args.type);
+        await ctx.db.patch(devbox._id, {
+          status: busy ? "busy" : "warm",
+          taskId: busy ? args.taskId : undefined,
+          lastSeenAt: Date.now(),
+        });
+      } else {
+        await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
+      }
     }
 
-    return { taskFound: task !== null };
+    return { taskFound: task !== null, applied };
   },
 });

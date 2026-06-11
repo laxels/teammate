@@ -26,7 +26,11 @@ export function createEventSender(
   now: () => number = Date.now,
 ): EventSender {
   const endpoint = new URL("/devbox/events", config.convexSiteUrl).toString();
-  return async (taskId, type, summary) => {
+  // Deliveries are serialized: adjacent events (e.g. the final progress and
+  // the completed event it precedes) must not race each other on the wire,
+  // or the receiver may apply them out of order.
+  let queue: Promise<void> = Promise.resolve();
+  return (taskId, type, summary) => {
     const event: DevboxEvent = {
       devboxId: config.devboxId,
       taskId,
@@ -34,23 +38,26 @@ export function createEventSender(
       summary,
       ts: now(),
     };
-    try {
-      const response = await fetchFn(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-devbox-secret": config.devboxSharedSecret,
-        },
-        body: JSON.stringify(event),
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        console.error(
-          `[gateway] devbox event POST failed (${response.status}): ${body}`,
-        );
+    queue = queue.then(async () => {
+      try {
+        const response = await fetchFn(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-devbox-secret": config.devboxSharedSecret,
+          },
+          body: JSON.stringify(event),
+        });
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          console.error(
+            `[gateway] devbox event POST failed (${response.status}): ${body}`,
+          );
+        }
+      } catch (error) {
+        console.error("[gateway] devbox event POST error:", error);
       }
-    } catch (error) {
-      console.error("[gateway] devbox event POST error:", error);
-    }
+    });
+    return queue;
   };
 }

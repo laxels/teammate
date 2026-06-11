@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
+import { taskStatusValidator } from "./schema";
 
 const MAX_LISTED_TASKS = 50;
 const MAX_TASK_EVENTS = 10;
@@ -121,5 +122,28 @@ export const runningWithLatestEvent = internalQuery({
         };
       }),
     );
+  },
+});
+
+/**
+ * Admin escape hatch for repairing task state (e.g. after an event-ordering
+ * bug or a devbox lost mid-task):
+ *   npx convex run tasks:forceStatus '{"taskId": "...", "status": "completed"}'
+ */
+export const forceStatus = internalMutation({
+  args: { taskId: v.string(), status: taskStatusValidator },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (task === null) {
+      return { ok: false };
+    }
+    await ctx.db.patch(task._id, {
+      status: args.status,
+      updatedAt: Date.now(),
+    });
+    return { ok: true };
   },
 });
