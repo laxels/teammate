@@ -6,10 +6,8 @@ import {
   type DisplayInfo,
   modelToPoints,
   parseKeySpec,
+  SCREEN_POINT_SIZE_SCRIPT,
 } from "../src/computer/executor";
-
-const FINDER_BOUNDS_SCRIPT =
-  'tell application "Finder" to get bounds of window of desktop';
 
 type FakeScreen = {
   pixelWidth: number;
@@ -44,10 +42,10 @@ function createFakeRunner(screen: FakeScreen): {
       };
       return ok(`  pixelWidth: ${dims.width}\n  pixelHeight: ${dims.height}`);
     }
-    if (cmd[0] === "osascript" && cmd.includes(FINDER_BOUNDS_SCRIPT)) {
+    if (cmd[0] === "osascript" && cmd.includes(SCREEN_POINT_SIZE_SCRIPT)) {
       const width = screen.pointWidth ?? screen.pixelWidth;
       const height = screen.pointHeight ?? screen.pixelHeight;
-      return ok(`0, 0, ${width}, ${height}`);
+      return ok(`${width},${height}`);
     }
     return ok("");
   };

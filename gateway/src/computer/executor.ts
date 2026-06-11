@@ -177,6 +177,10 @@ export function parseModifierList(text: string): string[] | null {
   return modifiers;
 }
 
+/** JXA: point size of the primary display (the one `screencapture` grabs). */
+export const SCREEN_POINT_SIZE_SCRIPT =
+  'ObjC.import("AppKit"); const size = $.NSScreen.screens.js[0].frame.size; `${size.width},${size.height}`;';
+
 const APPLESCRIPT_MODIFIERS: Record<string, string> = {
   cmd: "command down",
   ctrl: "control down",
@@ -560,19 +564,25 @@ export class ComputerExecutor {
   }): Promise<[number, number]> {
     if (this.#pointSize !== null) return this.#pointSize;
     try {
+      // Primary display only: `screencapture` with one output file captures
+      // just the main display, so the point size must too. (Finder's desktop
+      // bounds span ALL displays and would skew the mapping on multi-monitor
+      // machines.)
       const { stdout } = await this.#exec([
         "osascript",
+        "-l",
+        "JavaScript",
         "-e",
-        'tell application "Finder" to get bounds of window of desktop',
+        SCREEN_POINT_SIZE_SCRIPT,
       ]);
       const parts = stdout
         .trim()
         .split(",")
         .map((part) => Number(part.trim()));
-      const pointWidth = parts[2];
-      const pointHeight = parts[3];
+      const pointWidth = parts[0];
+      const pointHeight = parts[1];
       if (
-        parts.length === 4 &&
+        parts.length === 2 &&
         pointWidth !== undefined &&
         Number.isFinite(pointWidth) &&
         pointWidth > 0 &&
