@@ -1,5 +1,6 @@
 import { httpRouter } from "convex/server";
-import { verifySlackSignature } from "../src/slack";
+import { parseDevboxEvent } from "../src/orchestration";
+import { timingSafeEqual, verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
 
@@ -61,6 +62,51 @@ http.route({
     }
 
     // Always ack within Slack's 3-second window.
+    return new Response(null, { status: 200 });
+  }),
+});
+
+// Gateway -> orchestrator lifecycle events (see shared/protocol.ts).
+// Authenticated by the shared secret, not by Slack signatures.
+http.route({
+  path: "/devbox/events",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(await request.text());
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    const event = parseDevboxEvent(payload);
+    if (event === null) {
+      return new Response("invalid devbox event", { status: 400 });
+    }
+
+    const { taskFound, applied } = await ctx.runMutation(
+      internal.devboxes.recordEvent,
+      event,
+    );
+    // Skip Slack noise for events that didn't change task state (e.g. a late
+    // progress event racing the completed event it duplicates).
+    if (taskFound && applied) {
+      await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
+        devboxId: event.devboxId,
+        taskId: event.taskId,
+        type: event.type,
+        summary: event.summary,
+      });
+    }
     return new Response(null, { status: 200 });
   }),
 });

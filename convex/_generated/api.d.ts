@@ -8,8 +8,15 @@
  * @module
  */
 
+import type * as commands from "../commands.js";
+import type * as crons from "../crons.js";
+import type * as devboxes from "../devboxes.js";
 import type * as http from "../http.js";
+import type * as notify from "../notify.js";
+import type * as orchestrator from "../orchestrator.js";
 import type * as slack from "../slack.js";
+import type * as staleness from "../staleness.js";
+import type * as tasks from "../tasks.js";
 
 import type {
   ApiFromModules,
@@ -18,8 +25,15 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  commands: typeof commands;
+  crons: typeof crons;
+  devboxes: typeof devboxes;
   http: typeof http;
+  notify: typeof notify;
+  orchestrator: typeof orchestrator;
   slack: typeof slack;
+  staleness: typeof staleness;
+  tasks: typeof tasks;
 }>;
 
 /**
