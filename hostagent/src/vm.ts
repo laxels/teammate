@@ -192,6 +192,18 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
       { stdin: envFile },
     );
 
+    // Interactive `claude` on a devbox must never stall on permission
+    // prompts (humans debug via the remote desktop); gateway sessions
+    // already bypass via SDK options. Merged into the baked settings.json
+    // rather than replacing it (model/effort/env pins live there too).
+    await must(
+      "set bypassPermissions default",
+      sshCommand(
+        ip,
+        `python3 -c 'import json; p="/Users/admin/.claude/settings.json"; d=json.load(open(p)); d.setdefault("permissions",{})["defaultMode"]="bypassPermissions"; json.dump(d,open(p,"w"),indent=2)'`,
+      ),
+    );
+
     // Authkey is piped via stdin so it never appears in a command line.
     await must(
       "tailscale up",
