@@ -22,8 +22,10 @@ const MAX_TOOL_ITERATIONS = 12;
 
 export const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
 
+Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, plus Google Chrome with the Claude in Chrome extension signed in. Tasks can control the browser (set use_chrome) — web apps, sites without APIs, web games, anything a person could do at a Mac. Never claim you cannot use a browser: you personally cannot, but your devboxes can, so delegate.
+
 You receive Slack messages (DMs and @mentions). Either answer directly or use your tools:
-- start_task delegates work to a Claude Code instance on a warm devbox. Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. If no devbox is warm, say so plainly and suggest retrying later or stopping a running task.
+- start_task delegates work to a Claude Code instance on a warm devbox. Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. Set use_chrome: true when the task needs the browser. If no devbox is warm, say so plainly and suggest retrying later or stopping a running task.
 - get_task / list_tasks answer questions about ongoing work.
 - stop_task interrupts a running task.
 - Steering a running task does NOT go through you: mid-task guidance happens on the task's monitoring page (linked in its status updates). Point users there.
@@ -66,6 +68,11 @@ export const TOOLS: Anthropic.Tool[] = [
           type: "string",
           description:
             "Complete, self-contained task spec handed to Claude Code: context, constraints, and definition of done.",
+        },
+        use_chrome: {
+          type: "boolean",
+          description:
+            "Set true when the task needs to control the Chrome browser on the devbox (web apps, sites without APIs, web games). The browser is signed in via the Claude in Chrome extension.",
         },
       },
       required: ["title", "prompt"],
@@ -158,7 +165,11 @@ async function executeTool(
       // only). The gateway acks within seconds; its "started" event confirms
       // pickup, and the staleness cron catches a devbox that died after
       // claiming.
-      const request: StartTaskRequest = { taskId, prompt };
+      const request: StartTaskRequest = {
+        taskId,
+        prompt,
+        ...(input.use_chrome === true ? { chrome: true } : {}),
+      };
       await ctx.runMutation(internal.commands.enqueue, {
         devboxId: claimed.devboxId,
         kind: "start",

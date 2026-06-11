@@ -53,10 +53,14 @@ function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
   if (candidate.cwd !== undefined && typeof candidate.cwd !== "string") {
     return null;
   }
+  if (candidate.chrome !== undefined && typeof candidate.chrome !== "boolean") {
+    return null;
+  }
   return {
     taskId: candidate.taskId,
     prompt: candidate.prompt,
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
+    ...(candidate.chrome === true ? { chrome: true } : {}),
   };
 }
 

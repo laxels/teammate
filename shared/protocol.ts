@@ -45,6 +45,9 @@ export type StartTaskRequest = {
   taskId: string;
   prompt: string;
   cwd?: string;
+  // When true the session runs with Claude in Chrome connected, so the task
+  // can control the VM's logged-in Chrome browser.
+  chrome?: boolean;
 };
 
 export type GatewayHealth = {

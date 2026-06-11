@@ -165,6 +165,9 @@ export class SessionManager {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       cwd: request.cwd ?? homedir(),
+      // Browser tasks connect to the VM's logged-in Claude in Chrome
+      // extension (equivalent to `claude --chrome`).
+      ...(request.chrome === true ? { extraArgs: { chrome: null } } : {}),
     };
     // Auth: CLAUDE_CODE_OAUTH_TOKEN is inherited from process.env (we do not
     // pass `options.env`, so the SDK subprocess inherits the full environment).
