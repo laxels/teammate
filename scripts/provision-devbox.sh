@@ -121,6 +121,12 @@ CONVEX_URL=$CONVEX_URL
 DEVBOX_SHARED_SECRET=$DEVBOX_SHARED_SECRET
 EOF
 
+# ------------------------------------------------- interactive claude config
+# Humans debugging via the remote desktop must never stall on permission
+# prompts; gateway sessions already bypass via SDK options.
+log "Setting bypassPermissions default for interactive claude"
+vm 'python3 -c '"'"'import json; p="/Users/admin/.claude/settings.json"; d=json.load(open(p)); d.setdefault("permissions",{})["defaultMode"]="bypassPermissions"; json.dump(d,open(p,"w"),indent=2)'"'"''
+
 # ------------------------------------------------------------- join tailnet
 log "Joining tailnet as $DEVBOX_ID"
 # Authkey is piped via stdin so it never appears in a local command line.

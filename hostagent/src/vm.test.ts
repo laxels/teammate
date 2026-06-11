@@ -90,6 +90,7 @@ test("provision runs the exact step sequence in order", async () => {
     `ssh admin@${IP}: true`,
     `rsync -az -e ${SSH_E} /Users/m1/ultraclaude-payload/ admin@${IP}:ultraclaude/`,
     `ssh admin@${IP}: umask 077; cat > ~/ultraclaude.env && chmod 600 ~/ultraclaude.env`,
+    `ssh admin@${IP}: python3 -c 'import json; p="/Users/admin/.claude/settings.json"; d=json.load(open(p)); d.setdefault("permissions",{})["defaultMode"]="bypassPermissions"; json.dump(d,open(p,"w"),indent=2)'`,
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale up --authkey="$(cat)" --hostname=dev-1`,
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale serve --bg 8787`,
     `ssh admin@${IP}: ${KICKSTART}`,
