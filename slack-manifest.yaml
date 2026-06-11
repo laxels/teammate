@@ -14,6 +14,11 @@ display_information:
   description: Virtual teammate — delegates tasks to Claude Code devboxes
   background_color: "#5c3b58"
 features:
+  app_home:
+    # Without these the Messages tab is disabled and users see
+    # "Sending messages to this app has been turned off."
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: ultraclaude
     always_online: true
