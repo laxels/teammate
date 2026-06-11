@@ -153,29 +153,17 @@ async function executeTool(
           "no warm devbox is available — all devboxes are busy or offline. Tell the user and suggest retrying later or stopping a running task.",
         );
       }
-      try {
-        const request: StartTaskRequest = { taskId, prompt };
-        const response = await fetch(new URL("/task", claimed.gatewayUrl), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(request),
-        });
-        if (response.status !== 202) {
-          await ctx.runMutation(internal.devboxes.release, {
-            devboxId: claimed.devboxId,
-          });
-          return toolError(
-            `devbox ${claimed.devboxId} rejected the task (HTTP ${response.status})`,
-          );
-        }
-      } catch (error) {
-        await ctx.runMutation(internal.devboxes.release, {
-          devboxId: claimed.devboxId,
-        });
-        return toolError(
-          `could not reach devbox ${claimed.devboxId}: ${String(error)}`,
-        );
-      }
+      // Devboxes live on the tailnet, which Convex cannot reach — delivery
+      // goes through the command queue the gateway subscribes to (outbound
+      // only). The gateway acks within seconds; its "started" event confirms
+      // pickup, and the staleness cron catches a devbox that died after
+      // claiming.
+      const request: StartTaskRequest = { taskId, prompt };
+      await ctx.runMutation(internal.commands.enqueue, {
+        devboxId: claimed.devboxId,
+        kind: "start",
+        payload: JSON.stringify(request),
+      });
       await ctx.runMutation(internal.tasks.create, {
         taskId,
         title,
@@ -213,26 +201,15 @@ async function executeTool(
       if (devbox === null) {
         return toolError(`devbox ${task.devboxId} is not registered`);
       }
-      try {
-        const response = await fetch(new URL("/interrupt", devbox.gatewayUrl), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
-        });
-        if (!response.ok) {
-          return toolError(
-            `devbox ${devbox.devboxId} rejected the interrupt (HTTP ${response.status})`,
-          );
-        }
-      } catch (error) {
-        return toolError(
-          `could not reach devbox ${devbox.devboxId}: ${String(error)}`,
-        );
-      }
+      await ctx.runMutation(internal.commands.enqueue, {
+        devboxId: devbox.devboxId,
+        kind: "interrupt",
+        payload: "{}",
+      });
       return JSON.stringify({
         ok: true,
         taskId,
-        note: "interrupt sent — a 'stopped' status update will follow in the task's conversation",
+        note: "interrupt queued — if a turn was in flight, a 'stopped' status update will follow in the task's conversation",
       });
     }
 

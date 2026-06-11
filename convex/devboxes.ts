@@ -61,11 +61,21 @@ export const getByDevboxId = internalQuery({
  * when no devbox is warm. Mutations are serialized, so two concurrent task
  * starts cannot claim the same devbox.
  */
+/**
+ * A devbox only counts as alive if its gateway heartbeated recently — task
+ * delivery is via the command queue, so a dead gateway would otherwise accept
+ * claims forever.
+ */
+export const HEARTBEAT_FRESHNESS_MS = 2 * 60_000;
+
 export const claimWarm = internalMutation({
   args: { taskId: v.string() },
   handler: async (ctx, args) => {
     const devboxes = await ctx.db.query("devboxes").collect();
-    const warm = devboxes.find((d) => d.status === "warm");
+    const cutoff = Date.now() - HEARTBEAT_FRESHNESS_MS;
+    const warm = devboxes.find(
+      (d) => d.status === "warm" && d.lastSeenAt >= cutoff,
+    );
     if (warm === undefined) {
       return null;
     }

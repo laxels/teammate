@@ -59,6 +59,21 @@ export default defineSchema({
     lastSeenAt: v.number(),
   }).index("by_devbox_id", ["devboxId"]),
 
+  // Control-plane command queue: the orchestrator enqueues, gateways
+  // subscribe and ack (outbound-only — Convex cloud cannot reach tailnet
+  // addresses, so gateways are never dialed into).
+  commands: defineTable({
+    commandId: v.string(),
+    devboxId: v.string(),
+    kind: v.union(v.literal("start"), v.literal("interrupt")),
+    // JSON payload: StartTaskRequest for "start", "{}" for "interrupt".
+    payload: v.string(),
+    status: v.union(v.literal("pending"), v.literal("acked")),
+    createdAt: v.number(),
+  })
+    .index("by_devbox_status", ["devboxId", "status"])
+    .index("by_command_id", ["commandId"]),
+
   // Lifecycle events posted by devbox gateways to /devbox/events.
   taskEvents: defineTable({
     taskId: v.string(),

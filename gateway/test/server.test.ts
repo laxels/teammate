@@ -16,6 +16,7 @@ const config: GatewayConfig = {
   devboxId: "devbox-test",
   port: 0,
   convexSiteUrl: "https://convex.example",
+  convexUrl: "https://convex-cloud.example",
   devboxSharedSecret: "shhh",
 };
 

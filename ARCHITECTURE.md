@@ -35,9 +35,11 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    deduped into `slackEvents`).
 2. Orchestrator action (Fable 5 `xhigh` + tools) decides: answer directly, or
    start/steer/stop a task on a devbox.
-3. Task start: orchestrator POSTs `/task` to the devbox gateway; gateway runs
-   an Agent SDK session (streaming input mode) and posts `DevboxEvent`s back
-   to Convex `/devbox/events`.
+3. Task start: the orchestrator enqueues a command row in Convex (it cannot
+   reach the tailnet); the gateway's outbound subscription picks it up within
+   seconds, runs an Agent SDK session (streaming input mode), and posts
+   `DevboxEvent`s back to Convex `/devbox/events`. Gateways heartbeat every
+   60s; `claimWarm` only assigns devboxes seen in the last 2 minutes.
 4. Orchestrator turns events into Slack updates (thread-aware) and posts the
    monitoring link `http://<devbox-tailnet-host>:8787/`.
 5. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus

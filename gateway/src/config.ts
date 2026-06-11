@@ -2,6 +2,8 @@ export type GatewayConfig = {
   devboxId: string;
   port: number;
   convexSiteUrl: string;
+  /** The deployment's .convex.cloud URL (Convex client / command queue). */
+  convexUrl: string;
   devboxSharedSecret: string;
 };
 
@@ -26,6 +28,7 @@ export function loadConfig(
 
   const devboxId = require("DEVBOX_ID");
   const convexSiteUrl = require("CONVEX_SITE_URL");
+  const convexUrl = require("CONVEX_URL");
   const devboxSharedSecret = require("DEVBOX_SHARED_SECRET");
   if (missing.length > 0) {
     throw new Error(
@@ -42,5 +45,5 @@ export function loadConfig(
     throw new Error(`gateway: invalid PORT value: ${JSON.stringify(rawPort)}`);
   }
 
-  return { devboxId, port, convexSiteUrl, devboxSharedSecret };
+  return { devboxId, port, convexSiteUrl, convexUrl, devboxSharedSecret };
 }

@@ -30,7 +30,14 @@ export type SteerServerMessage =
 // Binary RFB bridge to the VM's own Screen Sharing server (127.0.0.1:5900),
 // consumed by noVNC/react-vnc. No JSON framing — raw bytes both ways.
 
-// ---- Orchestrator -> gateway: HTTP ----
+// ---- Control plane: orchestrator -> gateway ----
+// Convex cloud cannot reach tailnet addresses, so the orchestrator never
+// dials a gateway. It enqueues rows in the Convex `commands` table
+// (kind "start" with a StartTaskRequest payload, or "interrupt"); the gateway
+// subscribes via an outbound Convex client connection, executes against its
+// own local HTTP surface, and acks.
+//
+// ---- Gateway HTTP surface (tailnet/local only) ----
 // POST /task       StartTaskRequest -> 202, or 409 if a task is running
 // POST /interrupt  {}               -> 200
 // GET  /health     -> GatewayHealth
