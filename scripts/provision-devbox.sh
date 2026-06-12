@@ -128,9 +128,27 @@ log "Setting bypassPermissions default for interactive claude"
 vm 'python3 -c '"'"'import json; p="/Users/admin/.claude/settings.json"; d=json.load(open(p)); d.setdefault("permissions",{})["defaultMode"]="bypassPermissions"; json.dump(d,open(p,"w"),indent=2)'"'"''
 
 # ------------------------------------------------------------- join tailnet
+# Clones inherit the golden image's tailscaled state (/Library/Tailscale,
+# machine key included): without a wipe every clone shares ONE tailnet
+# identity — each `tailscale up` re-keys and renames that single node,
+# knocking the previous holder offline. Wipe it with the daemon down so this
+# clone joins as a fresh node.
+log "Wiping inherited tailscaled state (fresh tailnet identity)"
+vm 'set -e
+sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true
+sudo rm -rf /Library/Tailscale
+sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist
+for i in $(seq 1 30); do
+  /opt/homebrew/bin/tailscale version --daemon >/dev/null 2>&1 && exit 0
+  sleep 1
+done
+echo "tailscaled did not come back after state wipe" >&2; exit 1'
+
 log "Joining tailnet as $DEVBOX_ID"
 # Authkey is piped via stdin so it never appears in a local command line.
-vm "sudo /opt/homebrew/bin/tailscale up --authkey=\"\$(cat)\" --hostname=$DEVBOX_ID" \
+# --accept-dns=false: VM egress is plain NAT through the host; MagicDNS
+# rewriting the VM's resolvers is pure risk (ts.net resolves publicly anyway).
+vm "sudo /opt/homebrew/bin/tailscale up --authkey=\"\$(cat)\" --hostname=$DEVBOX_ID --accept-dns=false" \
   <<<"$TAILSCALE_AUTHKEY"
 vm '/opt/homebrew/bin/tailscale ip -4'
 # HTTPS front for the monitoring page: noVNC needs a secure context
