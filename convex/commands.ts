@@ -1,6 +1,11 @@
 import { v } from "convex/values";
 import { timingSafeEqual } from "../src/slack";
-import { internalMutation, mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  type MutationCtx,
+  mutation,
+  query,
+} from "./_generated/server";
 
 export const commandKindValidator = v.union(
   v.literal("start"),
@@ -85,6 +90,24 @@ export const heartbeat = mutation({
   },
 });
 
+/** Plain-function form so other mutations (hosts.ts placement) can enqueue
+ * gateway commands inside their own transaction. */
+export async function enqueueCommandRow(
+  ctx: MutationCtx,
+  args: { devboxId: string; kind: "start" | "interrupt"; payload: string },
+): Promise<string> {
+  const commandId = `cmd-${crypto.randomUUID().slice(0, 8)}`;
+  await ctx.db.insert("commands", {
+    commandId,
+    devboxId: args.devboxId,
+    kind: args.kind,
+    payload: args.payload,
+    status: "pending",
+    createdAt: Date.now(),
+  });
+  return commandId;
+}
+
 export const enqueue = internalMutation({
   args: {
     devboxId: v.string(),
@@ -92,15 +115,6 @@ export const enqueue = internalMutation({
     payload: v.string(),
   },
   handler: async (ctx, args) => {
-    const commandId = `cmd-${crypto.randomUUID().slice(0, 8)}`;
-    await ctx.db.insert("commands", {
-      commandId,
-      devboxId: args.devboxId,
-      kind: args.kind,
-      payload: args.payload,
-      status: "pending",
-      createdAt: Date.now(),
-    });
-    return commandId;
+    return await enqueueCommandRow(ctx, args);
   },
 });

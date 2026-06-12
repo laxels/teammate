@@ -70,11 +70,18 @@ export type GatewayHealth = {
 // "retiring" (never back to warm) and is destroyed after a short grace
 // period, so no task ever runs on a previous task's VM.
 
-export type HostCommandKind = "provision_vm" | "destroy_vm";
+export type HostCommandKind = "provision_vm" | "destroy_vm" | "provision_host";
 
-// JSON payload for both host command kinds.
+// JSON payload for the VM command kinds.
 export type HostVmPayload = {
   devboxId: string;
+};
+
+// JSON payload for provision_host: a fleet host with provisioning capability
+// bootstraps a brand-new Scaleway Mac under this name (Scaleway server name,
+// tailnet hostname, and Convex hostId are all the same string).
+export type HostProvisionPayload = {
+  hostName: string;
 };
 
 /** How long a finished ephemeral devbox stays up (monitoring page, final

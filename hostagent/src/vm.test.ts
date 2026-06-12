@@ -20,7 +20,7 @@ const config: VmConfig = {
 const TART = config.tartBin;
 const IP = "192.168.64.9";
 const SSH_E =
-  "sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10";
+  "sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o PubkeyAuthentication=no -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=1";
 const KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
   "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
@@ -238,4 +238,32 @@ test("destroy keeps the devbox row when the VM survives tart delete", async () =
     "tart delete dev-1 failed",
   );
   expect(removed).toEqual([]);
+});
+
+test("transient ssh failures (exit 255) are retried, not fatal", async () => {
+  let bypassAttempts = 0;
+  const { calls, executors } = harness((command) => {
+    if (
+      command[0] === "sshpass" &&
+      remoteOf(command).includes("settings.json")
+    ) {
+      bypassAttempts++;
+      if (bypassAttempts === 1) {
+        return {
+          code: 255,
+          stderr:
+            "admin@192.168.64.3: Permission denied (publickey,password,keyboard-interactive).",
+        };
+      }
+      return {};
+    }
+    return happyHandler(command);
+  });
+  await executors.provision("dev-1");
+
+  expect(bypassAttempts).toBe(2);
+  // The rest of the sequence still completed.
+  expect(calls.some((c) => remoteOf(c.command).includes("tailscale up"))).toBe(
+    true,
+  );
 });

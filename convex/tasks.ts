@@ -57,7 +57,12 @@ export const create = internalMutation({
     taskId: v.string(),
     title: v.string(),
     prompt: v.string(),
-    devboxId: v.string(),
+    // Absent for ephemeral tasks: hosts.placeEphemeralTask assigns the devbox
+    // (immediately when a slot is free, or after a scale-up when not).
+    devboxId: v.optional(v.string()),
+    placement: v.optional(
+      v.union(v.literal("ephemeral"), v.literal("permanent")),
+    ),
     slackChannel: v.string(),
     slackThreadTs: v.optional(v.string()),
   },
@@ -68,7 +73,8 @@ export const create = internalMutation({
       title: args.title,
       prompt: args.prompt,
       status: "queued",
-      devboxId: args.devboxId,
+      ...(args.devboxId === undefined ? {} : { devboxId: args.devboxId }),
+      ...(args.placement === undefined ? {} : { placement: args.placement }),
       slackChannel: args.slackChannel,
       ...(args.slackThreadTs === undefined
         ? {}
@@ -76,6 +82,30 @@ export const create = internalMutation({
       createdAt: now,
       updatedAt: now,
     });
+  },
+});
+
+/**
+ * Cancels a task that is still waiting for ephemeral placement (no devbox
+ * assigned, nothing to interrupt). Returns false when the task has already
+ * been placed — the caller should interrupt the devbox instead.
+ */
+export const cancelQueued = internalMutation({
+  args: { taskId: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (
+      task === null ||
+      task.devboxId !== undefined ||
+      task.status !== "queued"
+    ) {
+      return false;
+    }
+    await ctx.db.patch(task._id, { status: "stopped", updatedAt: Date.now() });
+    return true;
   },
 });
 

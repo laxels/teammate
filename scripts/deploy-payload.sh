@@ -21,15 +21,24 @@ SSH_OPTS=(-o ConnectTimeout=10)
 
 log() { printf '\n==> %s\n' "$*"; }
 
-log "Building web UI locally"
-(cd "$REPO_ROOT/web" && bun run build >/dev/null)
+# Fleet hosts run this from the payload dir, which carries a prebuilt
+# web/dist but no web source.
+if [[ -d "$REPO_ROOT/web/src" ]]; then
+  log "Building web UI locally"
+  (cd "$REPO_ROOT/web" && bun run build >/dev/null)
+else
+  log "No web source here (payload context); shipping the prebuilt web/dist"
+fi
 
 for HOST_SSH in "$@"; do
   log "[$HOST_SSH] Syncing devbox payload to ~/ultraclaude-payload"
   # --relative from the repo root, mirroring provision-devbox.sh: the host
   # agent later rsyncs this directory verbatim into each VM's ~/ultraclaude/.
+  # scripts/ rides along so fleet hosts can bootstrap new hosts; secrets do
+  # NOT (the fleet env lives outside the payload — see ULTRACLAUDE_ENV).
   (cd "$REPO_ROOT" &&
     rsync -az --relative -e "ssh ${SSH_OPTS[*]}" gateway/src shared web/dist \
+      scripts gateway/package.json bun.lock \
       "$HOST_SSH:ultraclaude-payload/")
 
   log "[$HOST_SSH] Syncing host agent to ~/hostagent"

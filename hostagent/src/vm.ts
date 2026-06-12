@@ -67,7 +67,11 @@ const HEALTH_ATTEMPTS = 36; // 3 min
 const DEVBOX_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 // Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so
-// host-key pinning is meaningless; skip known_hosts entirely.
+// host-key pinning is meaningless; skip known_hosts entirely. Auth is
+// password-only and single-shot: host-side identities (e.g. the fleet SSH
+// key on provisioner hosts) must never be offered first — rejected pubkey
+// attempts count against the VM sshd's MaxAuthTries and intermittently
+// produce "Too many authentication failures" before the password is tried.
 const SSH_OPTS = [
   "-o",
   "StrictHostKeyChecking=no",
@@ -77,6 +81,12 @@ const SSH_OPTS = [
   "LogLevel=ERROR",
   "-o",
   "ConnectTimeout=10",
+  "-o",
+  "PubkeyAuthentication=no",
+  "-o",
+  "IdentitiesOnly=yes",
+  "-o",
+  "NumberOfPasswordPrompts=1",
 ];
 
 const SSH_BASE = ["sshpass", "-p", VM_PASSWORD, "ssh", ...SSH_OPTS];
@@ -100,12 +110,31 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const tart = config.tartBin;
 
+  // Freshly cloned VMs intermittently deny password auth for a short window
+  // after boot (new MAC -> OpenDirectory/auth settle): provisions fail at a
+  // RANDOM ssh step with exit 255 while neighboring steps succeed. Every
+  // provisioning step is idempotent, so ssh-layer failures (255) get retried.
+  const SSH_FAILURE_EXIT = 255;
+  const SSH_RETRY_ATTEMPTS = 4;
+  const SSH_RETRY_DELAY_MS = 5_000;
+
   const must = async (
     step: string,
     command: string[],
     runOptions?: RunOptions,
   ): Promise<RunResult> => {
-    const result = await run(command, runOptions);
+    let result = await run(command, runOptions);
+    for (
+      let attempt = 1;
+      result.code === SSH_FAILURE_EXIT && attempt < SSH_RETRY_ATTEMPTS;
+      attempt++
+    ) {
+      console.log(
+        `[hostagent] ${step}: ssh failure (exit 255), retry ${attempt}/${SSH_RETRY_ATTEMPTS - 1}`,
+      );
+      await sleep(SSH_RETRY_DELAY_MS);
+      result = await run(command, runOptions);
+    }
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim();
       throw new Error(`${step} failed (exit ${result.code}): ${detail}`);
