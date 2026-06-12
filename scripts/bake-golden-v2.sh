@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Bake the golden-v2 devbox image: clone golden-v1, install bun + the
-# ultraclaude gateway (with LaunchAgent), verify tailscale is logged out,
+# ultraclaude gateway (with LaunchAgent), wipe tailscaled's on-disk state,
 # then stop and rename the result to "golden-v2".
 #
 # Run from anywhere on the local machine; operates on the Tart host over SSH.
@@ -10,7 +10,9 @@
 # What the image deliberately does NOT contain:
 #   - ~/ultraclaude.env       (provisioning writes it; the gateway fails fast
 #                              without it and launchd KeepAlive retries)
-#   - a tailnet identity      (tailscale installed + daemon enabled, logged out)
+#   - a tailnet identity      (tailscale installed + daemon enabled, on-disk
+#                              state wiped — logged-out alone still leaves a
+#                              machine key that all clones would share)
 
 set -euo pipefail
 
@@ -141,21 +143,34 @@ vm 'plutil -lint ~/Library/LaunchAgents/com.ultraclaude.gateway.plist'
 vm 'rm -f ~/ultraclaude.env'
 
 # ------------------------------------------------------------ tailscale state
-log "Verifying tailscale is installed, daemon enabled, and logged OUT"
+log "Wiping tailscaled state (golden images must not carry a tailnet identity)"
 # Make sure tailscaled runs at boot (root LaunchDaemon via brew services) so
 # provision-devbox.sh can `tailscale up` without extra setup.
-if ! vm 'pgrep -x tailscaled >/dev/null'; then
+if ! vm 'test -f /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist'; then
   vm 'sudo /opt/homebrew/bin/brew services start tailscale'
   sleep 5
 fi
-ts_status="$(vm '/opt/homebrew/bin/tailscale status 2>&1 || true')"
+# A logged-out CHECK is not enough: tailscaled's on-disk state
+# (/Library/Tailscale) still carries the machine key, so every clone of the
+# image would share one tailnet identity (observed live 2026-06-12: each
+# ephemeral's `tailscale up` re-keyed and renamed the ONE shared node).
+# Wipe the state dir with the daemon down; provisioning wipes again per-clone
+# as a belt-and-suspenders.
+vm 'sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true
+sudo rm -rf /Library/Tailscale
+sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist'
+ts_status=""
+for i in $(seq 1 15); do
+  ts_status="$(vm '/opt/homebrew/bin/tailscale status 2>&1 || true')"
+  grep -qiE 'logged out|NeedsLogin' <<<"$ts_status" && break
+  sleep 2
+done
 echo "tailscale status: $ts_status"
-if grep -qiE 'logged out|NeedsLogin|Logged Out' <<<"$ts_status"; then
-  echo "OK: tailscale is logged out"
-else
-  echo "Tailscale appears logged in; logging out (golden images must not carry a tailnet identity)"
-  vm 'sudo /opt/homebrew/bin/tailscale logout'
-fi
+grep -qiE 'logged out|NeedsLogin' <<<"$ts_status" || {
+  echo "ERROR: tailscale not factory-fresh after state wipe" >&2
+  exit 1
+}
+echo "OK: tailscaled state wiped; daemon up and logged out"
 
 # --------------------------------------------------------- stop and rename
 log "Stopping $STAGING"

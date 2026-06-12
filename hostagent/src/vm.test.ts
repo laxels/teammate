@@ -25,6 +25,13 @@ const KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
   "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";
+const TAILSCALE_RESET =
+  "set -e; " +
+  "sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true; " +
+  "sudo rm -rf /Library/Tailscale; " +
+  "sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist; " +
+  "for i in $(seq 1 30); do /opt/homebrew/bin/tailscale version --daemon >/dev/null 2>&1 && exit 0; sleep 1; done; " +
+  'echo "tailscaled did not come back after state wipe" >&2; exit 1';
 
 type Call = { command: string[]; stdin: string | undefined };
 type Handler = (command: string[]) => Partial<RunResult> | undefined;
@@ -92,7 +99,8 @@ test("provision runs the exact step sequence in order", async () => {
     `ssh admin@${IP}: cd ~/ultraclaude && ~/.bun/bin/bun install --frozen-lockfile`,
     `ssh admin@${IP}: umask 077; cat > ~/ultraclaude.env && chmod 600 ~/ultraclaude.env`,
     `ssh admin@${IP}: python3 -c 'import json; p="/Users/admin/.claude/settings.json"; d=json.load(open(p)); d.setdefault("permissions",{})["defaultMode"]="bypassPermissions"; json.dump(d,open(p,"w"),indent=2)'`,
-    `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale up --authkey="$(cat)" --hostname=dev-1`,
+    `ssh admin@${IP}: ${TAILSCALE_RESET}`,
+    `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale up --authkey="$(cat)" --hostname=dev-1 --accept-dns=false`,
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale serve --bg 8787`,
     `ssh admin@${IP}: ${KICKSTART}`,
     `ssh admin@${IP}: curl -s http://127.0.0.1:8787/health`,

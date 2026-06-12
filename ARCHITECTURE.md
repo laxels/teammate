@@ -32,8 +32,11 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   keyboard autocorrect/smart-quotes off.
 - Provisioning (`scripts/provision-devbox.sh`) clones `golden-v2`: golden-v1
   plus the gateway and its LaunchAgent baked in.
-- Each devbox VM joins the tailnet with its own identity at provision time
-  (tailscale is installed in the image but deliberately logged out).
+- Each devbox VM joins the tailnet with its own identity at provision time:
+  tailscaled's on-disk state (`/Library/Tailscale`, machine key included) is
+  wiped — at bake time AND again per-clone before `tailscale up` — because a
+  merely logged-out image still bakes a machine key that every clone would
+  share, collapsing the whole fleet onto one tailnet node.
 - The monitoring page is fronted by Tailscale Serve (HTTPS on 443 → gateway
   port 8787): noVNC needs a secure context (`crypto.subtle`).
 - Devbox VM networking is host-NAT (192.168.64.x); nothing on the host proxies
