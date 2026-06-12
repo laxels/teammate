@@ -280,6 +280,14 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
       throw new Error(`gateway health check failed for ${devboxId}`);
     }
 
+    // Only now may the gateway consume commands (it polls for this marker):
+    // a gateway that boots mid-provision must never accept a task, because
+    // the kickstart above would kill it — and the task with it.
+    await must(
+      "write provision-ready marker",
+      sshCommand(ip, "touch ~/ultraclaude.ready"),
+    );
+
     // Best-effort TLS cert pre-warm: the first HTTPS request triggers
     // issuance (~30s), so the monitoring link works instantly when posted.
     await run(

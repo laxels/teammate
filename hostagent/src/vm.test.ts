@@ -96,6 +96,7 @@ test("provision runs the exact step sequence in order", async () => {
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale serve --bg 8787`,
     `ssh admin@${IP}: ${KICKSTART}`,
     `ssh admin@${IP}: curl -s http://127.0.0.1:8787/health`,
+    `ssh admin@${IP}: touch ~/ultraclaude.ready`,
     `ssh admin@${IP}: curl -fsS --max-time 60 https://dev-1.ts.example.com/health`,
   ]);
 
