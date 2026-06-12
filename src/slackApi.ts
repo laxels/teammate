@@ -191,6 +191,25 @@ export async function updateSlackMessage(
   );
 }
 
+/** Deletes one of the bot's own messages (duplicate status cards from a
+ * first-event race). Best-effort: never throws. */
+export async function deleteSlackMessage(
+  args: { botToken: string; channel: string; ts: string },
+  deps: SlackApiDeps = {},
+): Promise<boolean> {
+  try {
+    await callWithRetries(
+      "chat.delete",
+      { channel: args.channel, ts: args.ts },
+      args.botToken,
+      deps,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Adds an emoji reaction to a message (glanceable task status on the original
  * request). Best-effort: returns false on ANY failure — including

@@ -531,7 +531,11 @@ export const processSlackEvent = internalAction({
       }
     } catch (error) {
       // Best-effort: tell the user instead of failing silently, then rethrow
-      // so the failure is visible in the Convex logs.
+      // so the failure is visible in the Convex logs. Bystander channel-thread
+      // chatter gets no apology — nobody asked us anything.
+      if (trigger.channelThreadReply) {
+        throw error;
+      }
       await postSlackMessage({
         botToken,
         channel: target.channel,

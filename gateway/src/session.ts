@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import {
   type McpServerConfig,
   type Options,
+  type PermissionResult,
   type SDKMessage,
   type SDKUserMessage,
   type PermissionMode as SdkPermissionMode,
@@ -53,6 +54,9 @@ export type SessionManagerDeps = {
 };
 
 export const HISTORY_CAPACITY = 500;
+/** How long an AskUserQuestion waits for a human answer before the session
+ * is told to proceed on its own judgment. */
+const ANSWER_TIMEOUT_MS = 30 * 60_000;
 export const PROGRESS_INTERVAL_MS = 30_000;
 
 // Watchdog defaults: the SDK emits its init message within seconds of spawn
@@ -149,6 +153,12 @@ export class SessionManager {
   /** True once the current task reported a terminal status (the session may
    * outlive it as finished-but-steerable; see terminalEmitted()). */
   #terminalEmitted = false;
+  /** A blocked AskUserQuestion awaiting a human answer (canUseTool). */
+  #pendingQuestion: {
+    input: Record<string, unknown>;
+    resolve: (result: PermissionResult) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   #queue: AsyncQueue<SDKUserMessage> | null = null;
   #query: AgentQuery | null = null;
   #throttle: Throttler;
@@ -220,6 +230,16 @@ export class SessionManager {
       model: MODEL,
       effort: EFFORT,
       permissionMode: "bypassPermissions",
+      // AskUserQuestion is the one tool bypassPermissions can't auto-allow
+      // (requiresUserInteraction): without this callback the CLI fails the
+      // call instantly and the "answer by replying in the thread" flow is
+      // dead. Everything else passes straight through.
+      canUseTool: async (toolName, input) => {
+        if (toolName !== "AskUserQuestion") {
+          return { behavior: "allow", updatedInput: input };
+        }
+        return await this.#awaitAnswer(input);
+      },
       allowDangerouslySkipPermissions: true,
       cwd: request.cwd ?? homedir(),
       // Subprocess stderr into the gateway log: hung sessions must leave
@@ -255,6 +275,8 @@ export class SessionManager {
    * seconds and streams messages continuously thereafter. */
   #checkWatchdog(taskId: string): void {
     if (!this.#running) return;
+    // A session blocked on AskUserQuestion is waiting for a human, not hung.
+    if (this.#pendingQuestion !== null) return;
     const now = this.#deps.now();
     const sinceStart = now - this.#sessionStartedAt;
     const sinceLast =
@@ -297,9 +319,51 @@ export class SessionManager {
     hardExit.unref?.();
   }
 
-  /** Push a follow-up user message into the live session. */
+  /** Blocks an AskUserQuestion until a steered user message answers it (or
+   * the timeout tells the session to use its own judgment). The watchdog
+   * treats a pending question as healthy — waiting on a human is not a hang. */
+  #awaitAnswer(input: Record<string, unknown>): Promise<PermissionResult> {
+    return new Promise<PermissionResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#resolvePendingQuestion({
+          behavior: "deny",
+          message:
+            "No answer arrived within 30 minutes — proceed with your best judgment, or finish up and report what you'd need.",
+        });
+      }, ANSWER_TIMEOUT_MS);
+      timer.unref?.();
+      this.#pendingQuestion = {
+        input,
+        timer,
+        resolve: (result) => {
+          resolve(result);
+        },
+      };
+    });
+  }
+
+  #resolvePendingQuestion(result: PermissionResult): boolean {
+    const pending = this.#pendingQuestion;
+    if (pending === null) return false;
+    this.#pendingQuestion = null;
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+    return true;
+  }
+
+  /** Push a follow-up user message into the live session. A pending
+   * AskUserQuestion consumes the message as its answer instead of starting a
+   * new turn. */
   pushUserMessage(text: string): boolean {
     if (!this.#running || this.#queue === null) return false;
+    if (this.#pendingQuestion !== null) {
+      // Preserve the tool's original input (its schema requires `questions`)
+      // and attach the human's freeform answer.
+      return this.#resolvePendingQuestion({
+        behavior: "allow",
+        updatedInput: { ...this.#pendingQuestion.input, response: text },
+      });
+    }
     this.#turnInFlight = true;
     this.#queue.push(userMessage(text));
     return true;
@@ -321,6 +385,10 @@ export class SessionManager {
       return false;
     }
     this.#interrupted = true;
+    this.#resolvePendingQuestion({
+      behavior: "deny",
+      message: "The session is being stopped.",
+    });
     try {
       await this.#query.interrupt();
     } catch (error) {

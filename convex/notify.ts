@@ -16,6 +16,7 @@ import {
 } from "../src/orchestration";
 import {
   addSlackReaction,
+  deleteSlackMessage,
   postSlackMessage,
   updateSlackMessage,
 } from "../src/slackApi";
@@ -65,54 +66,97 @@ export const devboxEvent = internalAction({
     const monitorUrl =
       devbox === null ? null : monitoringUrl(devbox.gatewayUrl);
 
+    const renderCard = (row: typeof task) =>
+      buildStatusCard({
+        taskId: args.taskId,
+        title: row.title,
+        status: row.status,
+        summary: args.summary,
+        monitorUrl,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        replyHint: replyHintFor(row),
+      });
+
     // 1. The status card: posted on the task's first lifecycle event, then
     // chat.update'd in place — one glanceable message per task. The task row
     // already reflects this event (recordEvent ran before this action was
     // scheduled), so render from the row.
-    const card = buildStatusCard({
-      taskId: args.taskId,
-      title: task.title,
-      status: task.status,
-      summary: args.summary,
-      monitorUrl,
-      startedAt: task.startedAt,
-      finishedAt: task.finishedAt,
-      replyHint: replyHintFor(task),
-    });
-    // Concurrent first events can race to create the card; setSlackCard is
-    // set-if-absent, so the first writer wins and a losing duplicate post
-    // degrades to a plain status line.
     let threadTs = task.slackThreadTs;
-    if (task.slackCardTs === undefined) {
-      const cardTs = await postSlackMessage({
+    let cardTs = task.slackCardTs;
+    let adoptedThread = false;
+    if (cardTs === undefined) {
+      const postedTs = await postSlackMessage({
         botToken,
         channel: task.slackChannel,
-        text: card,
+        text: renderCard(task),
         threadTs,
       });
-      if (cardTs !== null) {
-        await ctx.runMutation(internal.tasks.setSlackCard, {
+      if (postedTs !== null) {
+        const claim = await ctx.runMutation(internal.tasks.setSlackCard, {
           taskId: args.taskId,
-          cardTs,
+          cardTs: postedTs,
         });
-        // Legacy threadless task: the card becomes the thread anchor.
-        threadTs = threadTs ?? cardTs;
+        if (claim !== null) {
+          cardTs = claim.cardTs;
+          adoptedThread = threadTs === undefined;
+          threadTs = claim.threadTs;
+          if (!claim.won) {
+            // Lost a concurrent first-event race: remove the stray duplicate
+            // and fall in line behind the winner's card.
+            await deleteSlackMessage({
+              botToken,
+              channel: task.slackChannel,
+              ts: postedTs,
+            });
+          }
+        }
       }
     } else {
-      // Card edits must not block the detail post below.
+      try {
+        await updateSlackMessage({
+          botToken,
+          channel: task.slackChannel,
+          ts: cardTs,
+          text: renderCard(task),
+        });
+      } catch (error) {
+        if (String(error).includes("message_not_found")) {
+          // Card deleted by a human: forget it so the next event re-creates.
+          await ctx.runMutation(internal.tasks.clearSlackCard, {
+            taskId: args.taskId,
+            cardTs,
+          });
+        } else {
+          console.error("status card update failed:", error);
+        }
+      }
+    }
+
+    // Self-heal a stale overwrite: if the task moved on (e.g. the terminal
+    // event applied while this delayed progress action was mid-flight), our
+    // edit just painted outdated state — re-render once from the fresh row.
+    const fresh = await ctx.runQuery(internal.tasks.getByTaskId, {
+      taskId: args.taskId,
+    });
+    if (
+      fresh !== null &&
+      cardTs !== undefined &&
+      fresh.status !== task.status
+    ) {
       await updateSlackMessage({
         botToken,
         channel: task.slackChannel,
-        ts: task.slackCardTs,
-        text: card,
-      }).catch((error) => {
-        console.error("status card update failed:", error);
-      });
+        ts: cardTs,
+        text: renderCard(fresh),
+      }).catch(() => undefined);
     }
 
     // 2. Detail thread replies for transitions worth a notification ping
     // (chat.update doesn't notify). progress only refreshes the card;
-    // started is fully covered by the card's creation.
+    // started is fully covered by the card's creation. When the thread was
+    // just adopted (legacy task: the card IS the anchor), the requester
+    // isn't a thread participant — @mention them so Slack notifies.
     if (args.type !== "progress" && args.type !== "started") {
       const text = buildDevboxEventMessage({
         type: args.type,
@@ -122,6 +166,11 @@ export const devboxEvent = internalAction({
         monitorUrl,
         replyHint: replyHintFor(task),
       });
+      const mention =
+        (adoptedThread || task.slackThreadTs === task.slackCardTs) &&
+        task.slackUser !== undefined
+          ? `<@${task.slackUser}> `
+          : "";
       // A terminal event sends an ephemeral devbox into "retiring": warn that
       // the monitoring page is about to disappear with the VM.
       const retireNote =
@@ -132,14 +181,14 @@ export const devboxEvent = internalAction({
       await postSlackMessage({
         botToken,
         channel: task.slackChannel,
-        text: `${text}${retireNote}`,
+        text: `${mention}${text}${retireNote}`,
         threadTs,
       });
     }
 
     // 3. Glanceable reaction on the anchor message (usually the user's
     // request). Reactions accumulate (👀 then ✅) — removal needs another
-    // scope and adds nothing.
+    // scope round-trip and adds little.
     const reaction = STATUS_REACTION[args.type];
     if (reaction !== undefined && threadTs !== undefined) {
       await addSlackReaction({

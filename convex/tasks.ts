@@ -202,8 +202,17 @@ export const setSlackCard = internalMutation({
       .query("tasks")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
       .unique();
-    if (task === null || task.slackCardTs !== undefined) {
-      return false;
+    if (task === null) {
+      return null;
+    }
+    if (task.slackCardTs !== undefined) {
+      // Lost the first-event race: report the winner's canonical anchors so
+      // the caller can delete its stray post and thread under the winner.
+      return {
+        won: false,
+        cardTs: task.slackCardTs,
+        threadTs: task.slackThreadTs ?? task.slackCardTs,
+      };
     }
     await ctx.db.patch(task._id, {
       slackCardTs: args.cardTs,
@@ -211,7 +220,26 @@ export const setSlackCard = internalMutation({
         ? { slackThreadTs: args.cardTs }
         : {}),
     });
-    return true;
+    return {
+      won: true,
+      cardTs: args.cardTs,
+      threadTs: task.slackThreadTs ?? args.cardTs,
+    };
+  },
+});
+
+/** A status-card edit hit message_not_found (card deleted by a human): clear
+ * the pointer so the next lifecycle event re-creates the card. */
+export const clearSlackCard = internalMutation({
+  args: { taskId: v.string(), cardTs: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (task !== null && task.slackCardTs === args.cardTs) {
+      await ctx.db.patch(task._id, { slackCardTs: undefined });
+    }
   },
 });
 

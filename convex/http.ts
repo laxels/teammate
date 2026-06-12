@@ -129,10 +129,13 @@ http.route({
       return new Response("unauthorized", { status: 401 });
     }
 
-    const raw = await request.text();
-    if (raw.length > MAX_TRANSCRIPT_BYTES + 10_000) {
+    // arrayBuffer first: the limit is BYTES (Convex's ~1 MiB document cap),
+    // and string .length undercounts multibyte content by up to 3x.
+    const rawBytes = await request.arrayBuffer();
+    if (rawBytes.byteLength > MAX_TRANSCRIPT_BYTES + 10_000) {
       return new Response("payload too large", { status: 413 });
     }
+    const raw = new TextDecoder().decode(rawBytes);
     let payload: { devboxId?: unknown; taskId?: unknown; messages?: unknown };
     try {
       payload = JSON.parse(raw) as typeof payload;

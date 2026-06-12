@@ -72,7 +72,16 @@ export type TranscriptSender = (
   messages: unknown[],
 ) => Promise<void>;
 
-/** Drops oldest messages until the payload serializes under the byte cap. */
+const utf8 = new TextEncoder();
+
+/**
+ * Drops oldest messages until the payload fits the byte cap. Measures UTF-8
+ * BYTES (TextEncoder), not string length — JSON.stringify leaves non-ASCII
+ * unescaped, so CJK/emoji-heavy transcripts are up to 3x their UTF-16 unit
+ * count on the wire (and in Convex's ~1 MiB document limit). If even the
+ * newest message alone is oversized, a small marker survives so the
+ * dashboard never renders an unexplained blank.
+ */
 export function fitTranscript(
   upload: TranscriptUpload,
   maxBytes: number = MAX_TRANSCRIPT_BYTES,
@@ -80,9 +89,17 @@ export function fitTranscript(
   let messages = upload.messages;
   while (
     messages.length > 0 &&
-    JSON.stringify({ ...upload, messages }).length > maxBytes
+    utf8.encode(JSON.stringify({ ...upload, messages })).byteLength > maxBytes
   ) {
     messages = messages.slice(Math.max(1, Math.floor(messages.length / 10)));
+  }
+  if (messages.length === 0 && upload.messages.length > 0) {
+    messages = [
+      {
+        type: "meta",
+        note: `transcript too large to persist (${upload.messages.length} messages dropped)`,
+      },
+    ];
   }
   return { ...upload, messages };
 }
