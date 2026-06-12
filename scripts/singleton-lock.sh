@@ -57,17 +57,28 @@ acquire() {
 }
 
 owner_pid() {
-  sed -n 's/^pid=//p' "$LOCK_DIR/owner" 2>/dev/null
+  # Never fails: a missing/unreadable owner file yields "" (set -e safety).
+  sed -n 's/^pid=//p' "$LOCK_DIR/owner" 2>/dev/null || true
 }
 
 if ! acquire; then
   pid="$(owner_pid)"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  if [[ -z "$pid" ]]; then
+    # No owner record: a rival is mid-acquire (the file lands microseconds
+    # after mkdir), or an acquire crashed at exactly that point. Stealing
+    # here could delete a live lock, so treat it as held.
+    echo "singleton-lock: '$NAME' lock exists but has no owner record (likely mid-acquire). If it is stale, remove it: rm -rf '$LOCK_DIR'" >&2
+    exit 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
     echo "singleton-lock: '$NAME' is held by pid $pid ($(sed -n 's/^command=//p' "$LOCK_DIR/owner" 2>/dev/null)). Try again when it finishes." >&2
     exit 1
   fi
-  # Owner is gone (crashed or unreadable): steal.
-  rm -rf "$LOCK_DIR"
+  # Owner is dead: steal. The rename is atomic, so exactly one contender
+  # clears the stale lock; everyone then races a fresh acquire fairly.
+  if mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
+    rm -rf "$LOCK_DIR.stale.$$"
+  fi
   if ! acquire; then
     echo "singleton-lock: lost the race re-acquiring '$NAME', try again" >&2
     exit 1
@@ -78,8 +89,25 @@ printf 'pid=%s\nstarted=%s\ncommand=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
 export SINGLETON_LOCK="$NAME"
+
+# Shepherd the command: run it as a child, forward fatal signals to it, and
+# only release the lock (EXIT trap) once it has actually finished — never
+# while it might still be touching the singleton. <&0 keeps stdin attached
+# for interactive commands (`convex dev` login). SIGKILL is the one escape:
+# it orphans the child and leaves the lock for the dead-owner steal path.
 set +e
-"$@"
+"$@" <&0 &
+CHILD=$!
+trap 'kill -HUP "$CHILD" 2>/dev/null' HUP
+trap 'kill -INT "$CHILD" 2>/dev/null' INT
+trap 'kill -TERM "$CHILD" 2>/dev/null' TERM
+wait "$CHILD"
 code=$?
+# A trapped signal interrupts `wait` with 128+sig; re-wait while the child
+# is still alive so we reap its real exit code.
+while (( code > 128 )) && kill -0 "$CHILD" 2>/dev/null; do
+  wait "$CHILD"
+  code=$?
+done
 set -e
 exit "$code"

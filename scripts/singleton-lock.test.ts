@@ -116,6 +116,36 @@ describe("singleton-lock.sh", () => {
     expect(result.stdout).toBe("ran\n");
   });
 
+  test("treats a lock with no owner record as held, never steals it", async () => {
+    await mkdir(lockDir(repo, "convex"), { recursive: true });
+    const result = await sh([SCRIPT, "convex", "true"], repo);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("no owner record");
+    const dir = await sh(["test", "-d", lockDir(repo, "convex")], repo);
+    expect(dir.exitCode).toBe(0);
+  });
+
+  test("exactly one of many contenders steals a stale lock", async () => {
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    await mkdir(lockDir(repo, "convex"), { recursive: true });
+    await writeFile(
+      join(lockDir(repo, "convex"), "owner"),
+      `pid=${dead.pid}\n`,
+    );
+    const ranFile = join(repo, "ran.txt");
+    const contenders = Array.from({ length: 5 }, () =>
+      sh(
+        [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 0.5`],
+        repo,
+      ),
+    );
+    const results = await Promise.all(contenders);
+    const winners = results.filter((r) => r.exitCode === 0);
+    expect(winners.length).toBe(1);
+    expect((await Bun.file(ranFile).text()).trim().split("\n")).toHaveLength(1);
+  });
+
   test("locks are shared across worktrees of the same repo", async () => {
     const wt = join(repo, "..", `${repo.split("/").pop()}-wt`);
     expect(
