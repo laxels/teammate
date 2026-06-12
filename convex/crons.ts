@@ -12,4 +12,13 @@ crons.interval(
   {},
 );
 
+// Dead-letter recovery: re-schedule Slack events whose processing action
+// died before claiming them (see slack.retryUnprocessed).
+crons.interval(
+  "retry stranded slack events",
+  { minutes: 5 },
+  internal.slack.retryUnprocessed,
+  {},
+);
+
 export default crons;

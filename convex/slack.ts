@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { shouldRetrySlackEvent } from "../src/orchestration";
 import { internal } from "./_generated/api";
 import { internalMutation, internalQuery } from "./_generated/server";
 
@@ -43,15 +44,60 @@ export const getEvent = internalQuery({
   },
 });
 
-export const markProcessed = internalMutation({
+/**
+ * Atomically claims an event for processing (processed false -> true).
+ * Returns false when the event is missing or already claimed, so racing
+ * invocations (the original schedule vs a dead-letter retry) can never both
+ * run the side-effecting tool loop for the same event.
+ */
+export const claimEvent = internalMutation({
   args: { eventId: v.string() },
   handler: async (ctx, args) => {
     const event = await ctx.db
       .query("slackEvents")
       .withIndex("by_event_id", (q) => q.eq("eventId", args.eventId))
       .unique();
-    if (event !== null && !event.processed) {
-      await ctx.db.patch(event._id, { processed: true });
+    if (event === null || event.processed) {
+      return false;
     }
+    await ctx.db.patch(event._id, { processed: true });
+    return true;
+  },
+});
+
+const MAX_RETRIES_PER_SWEEP = 10;
+
+/**
+ * Dead-letter recovery (cron): re-schedules processing for events whose
+ * action died before claiming them — a deploy restart, an OOM, a crash
+ * before the claim. Anything that reached the claim is marked processed and
+ * is never replayed, so this sweep can't duplicate tool side effects.
+ * Slack's own retries can't recover these rows: they dedupe on event_id
+ * without re-scheduling.
+ */
+export const retryUnprocessed = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const candidates = await ctx.db
+      .query("slackEvents")
+      .withIndex("by_processed", (q) => q.eq("processed", false))
+      .take(100);
+    const retryable = candidates
+      .filter((event) =>
+        shouldRetrySlackEvent({
+          nowMs: now,
+          receivedAtMs: event.receivedAt,
+          processed: event.processed,
+        }),
+      )
+      .slice(0, MAX_RETRIES_PER_SWEEP);
+    for (const event of retryable) {
+      console.log(`retrying stranded slack event ${event.eventId}`);
+      await ctx.scheduler.runAfter(0, internal.orchestrator.processSlackEvent, {
+        eventId: event.eventId,
+      });
+    }
+    return { retried: retryable.length };
   },
 });

@@ -355,6 +355,34 @@ export function monitoringUrl(gatewayUrl: string): string | null {
   return `https://${parsed.hostname}/`;
 }
 
+// ---- Slack-event dead-letter recovery predicate ----
+
+/** Old enough that the original scheduled run clearly isn't in flight. */
+export const SLACK_EVENT_RETRY_MIN_AGE_MS = 2 * 60_000;
+/** Too old to be worth replaying (and a backstop against infinite retry). */
+export const SLACK_EVENT_RETRY_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/**
+ * Whether a stored Slack event deserves a re-scheduled processing run.
+ * Events are claimed (marked processed) BEFORE any side-effecting work, so
+ * an unprocessed-but-old event means its action died before doing anything —
+ * replaying it is safe. Slack's own delivery retries can't recover these:
+ * they hit the event_id dedupe, which never re-schedules.
+ */
+export function shouldRetrySlackEvent(args: {
+  nowMs: number;
+  receivedAtMs: number;
+  processed: boolean;
+}): boolean {
+  if (args.processed) {
+    return false;
+  }
+  const age = args.nowMs - args.receivedAtMs;
+  return (
+    age >= SLACK_EVENT_RETRY_MIN_AGE_MS && age <= SLACK_EVENT_RETRY_MAX_AGE_MS
+  );
+}
+
 // ---- Staleness predicate ----
 
 export const STALE_AFTER_MS = 30 * 60 * 1000;

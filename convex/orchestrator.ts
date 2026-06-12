@@ -404,10 +404,12 @@ function finalTextOf(message: Anthropic.Message): string {
 }
 
 /**
- * Processes one ingested Slack event: filters out bot/self messages, runs the
- * Fable 5 tool loop, posts the final reply in a thread under the triggering
- * message, and marks the event processed. Replies inside a task's thread get
- * that task injected as context (see buildOrchestratorUserMessage).
+ * Processes one ingested Slack event: filters out bot/self messages, claims
+ * the event (at-most-once — see slack.claimEvent), runs the Fable 5 tool
+ * loop, and posts the final reply in a thread under the triggering message.
+ * Replies inside a task's thread get that task injected as context (see
+ * buildOrchestratorUserMessage). Events stranded before the claim are
+ * replayed by the slack.retryUnprocessed cron.
  */
 export const processSlackEvent = internalAction({
   args: { eventId: v.string() },
@@ -422,7 +424,7 @@ export const processSlackEvent = internalAction({
     const classification = classifySlackEvent(stored.payload);
     if (classification.kind === "ignore") {
       console.log(`ignoring ${args.eventId}: ${classification.reason}`);
-      await ctx.runMutation(internal.slack.markProcessed, {
+      await ctx.runMutation(internal.slack.claimEvent, {
         eventId: args.eventId,
       });
       return;
@@ -430,12 +432,25 @@ export const processSlackEvent = internalAction({
     const { trigger } = classification;
     const target = resolveThreadTarget(trigger);
 
+    // Deliberately BEFORE the claim: a config failure leaves the event
+    // unclaimed so the dead-letter sweep replays it once config is fixed.
     const botToken = process.env.SLACK_BOT_TOKEN;
     if (botToken === undefined) {
       throw new Error("SLACK_BOT_TOKEN is not set");
     }
     if (process.env.ANTHROPIC_API_KEY === undefined) {
       throw new Error("ANTHROPIC_API_KEY is not set");
+    }
+
+    // Claim before any side-effecting work. Processing is at-most-once: a
+    // crash after this point can lose the reply (the user gets the :warning:
+    // message), but a replay could double-run tools (duplicate tasks), which
+    // is worse. Unclaimed events are replayed by slack.retryUnprocessed.
+    const claimed = await ctx.runMutation(internal.slack.claimEvent, {
+      eventId: args.eventId,
+    });
+    if (!claimed) {
+      return;
     }
     const anthropic = new Anthropic();
 
@@ -509,9 +524,6 @@ export const processSlackEvent = internalAction({
       channel: target.channel,
       text: finalText,
       threadTs: target.threadTs,
-    });
-    await ctx.runMutation(internal.slack.markProcessed, {
-      eventId: args.eventId,
     });
   },
 });

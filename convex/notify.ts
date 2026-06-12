@@ -1,3 +1,7 @@
+// Node runtime: postSlackMessage's retry backoff sleeps via setTimeout,
+// which the default Convex runtime does not provide.
+"use node";
+
 import { v } from "convex/values";
 import {
   DEVBOX_EVENT_TO_TASK_STATUS,
@@ -12,7 +16,7 @@ import {
 import { postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
-import { devboxEventTypeValidator } from "./devboxes";
+import { devboxEventTypeValidator } from "./constants";
 
 const RETIRE_GRACE_MIN = Math.round(EPHEMERAL_RETIRE_GRACE_MS / 60_000);
 
