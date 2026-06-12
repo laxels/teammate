@@ -1,0 +1,535 @@
+/* ultraclaude fleet — phosphor ops console.
+   One commitment: everything reads like a maintained piece of equipment.
+   IBM Plex Mono for data, Chakra Petch only for the masthead + section IDs. */
+
+:root {
+  --bg: #060907;
+  --bg-raise: #0a0f0c;
+  --line: #1c2b21;
+  --line-bright: #2c4634;
+  --ink: #c8e6d0;
+  --ink-dim: #5d7a66;
+  --phosphor: #53f08d;
+  --phosphor-dim: #2e9e5b;
+  --amber: #e8b34b;
+  --cyan: #5bd6e8;
+  --red: #f06a5d;
+  --font-data: "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "Chakra Petch", var(--font-data);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-size: 13px;
+  line-height: 1.5;
+  /* faint engineering grid + corner glow: atmosphere without noise */
+  background:
+    radial-gradient(
+      1200px 500px at 18% -10%,
+      rgba(83, 240, 141, 0.07),
+      transparent 60%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 47px,
+      rgba(83, 240, 141, 0.045) 48px
+    ),
+    repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent 47px,
+      rgba(83, 240, 141, 0.03) 48px
+    ),
+    var(--bg);
+}
+
+/* scanlines, barely there */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.16) 0,
+    rgba(0, 0, 0, 0.16) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 24px 80px;
+}
+
+a.link {
+  color: var(--cyan);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--cyan) 50%, transparent);
+}
+
+a.link:hover {
+  color: #aef0fa;
+}
+
+/* ---- masthead ---- */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line-bright);
+  padding-bottom: 10px;
+  margin-bottom: 18px;
+}
+
+.masthead h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin: 0;
+  color: var(--phosphor);
+  text-shadow: 0 0 18px rgba(83, 240, 141, 0.35);
+}
+
+.mast-sep {
+  color: var(--ink-dim);
+  margin: 0 0.35em;
+}
+
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.3em;
+  background: var(--phosphor);
+  vertical-align: text-bottom;
+  animation: blink 1.1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.mast-clock {
+  color: var(--ink-dim);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+}
+
+/* ---- fleet annunciator strip ---- */
+
+.fleet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  margin-bottom: 26px;
+}
+
+.cell {
+  background: var(--bg-raise);
+  padding: 8px 14px 9px;
+  min-width: 150px;
+  flex: 1;
+}
+
+.cell-wide {
+  flex: 3;
+}
+
+.cell-label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: 2px;
+}
+
+.cell-value {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+.cell-dim {
+  color: var(--ink-dim);
+}
+
+.slots {
+  display: inline-flex;
+  gap: 3px;
+  margin-right: 8px;
+  vertical-align: -1px;
+}
+
+.slot {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--phosphor-dim);
+}
+
+.slot-busy {
+  background: var(--phosphor);
+  box-shadow: 0 0 6px rgba(83, 240, 141, 0.6);
+}
+
+/* ---- sections ---- */
+
+section {
+  margin-bottom: 30px;
+}
+
+h2 {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 5px;
+  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.count {
+  color: var(--phosphor);
+}
+
+.empty,
+.dim {
+  color: var(--ink-dim);
+  padding: 6px 2px;
+}
+
+/* ---- rows ---- */
+
+.row {
+  border-bottom: 1px solid var(--line);
+}
+
+.row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 4px;
+  width: 100%;
+}
+
+.row-toggle {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+}
+
+.row-main:hover {
+  background: rgba(83, 240, 141, 0.05);
+}
+
+.row-active .row-main {
+  padding: 10px 4px;
+}
+
+.row-title {
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-meta {
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+.elapsed {
+  color: var(--phosphor);
+  font-variant-numeric: tabular-nums;
+}
+
+.row-links,
+.row-actions {
+  display: inline-flex;
+  gap: 10px;
+  white-space: nowrap;
+  align-items: baseline;
+}
+
+.row-note {
+  padding: 2px 4px 8px 4px;
+  color: var(--amber);
+}
+
+/* ---- status tags ---- */
+
+.status {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 6px;
+  border: 1px solid;
+  flex: none;
+}
+
+.status::before {
+  content: "[";
+  opacity: 0.5;
+}
+
+.status::after {
+  content: "]";
+  opacity: 0.5;
+}
+
+.status-running,
+.status-ev-started,
+.status-ev-progress {
+  color: var(--phosphor);
+  border-color: var(--phosphor-dim);
+}
+
+.status-running {
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    box-shadow: 0 0 10px rgba(83, 240, 141, 0.45);
+  }
+}
+
+.status-queued {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 50%, transparent);
+}
+
+.status-needs_input,
+.status-ev-needs_input {
+  color: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 50%, transparent);
+}
+
+.status-completed,
+.status-ev-completed {
+  color: var(--phosphor-dim);
+  border-color: var(--line-bright);
+}
+
+.status-failed,
+.status-ev-failed {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+}
+
+.status-stopped,
+.status-ev-stopped {
+  color: var(--ink-dim);
+  border-color: var(--line-bright);
+}
+
+/* ---- buttons ---- */
+
+.act {
+  font-family: var(--font-data);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line-bright);
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+.act:hover {
+  border-color: var(--phosphor-dim);
+  color: var(--phosphor);
+}
+
+.act-danger:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.act-armed {
+  background: var(--red);
+  border-color: var(--red);
+  color: #160505;
+  animation: blink 0.9s steps(1) infinite;
+}
+
+.act-armed:hover {
+  color: #160505;
+}
+
+.load-more {
+  margin-top: 10px;
+}
+
+/* ---- filters ---- */
+
+.filters {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.chip {
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--ink-dim);
+  border: 1px solid transparent;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--ink);
+}
+
+.chip-on {
+  color: var(--phosphor);
+  border-color: var(--phosphor-dim);
+}
+
+/* ---- follow-up composer ---- */
+
+.followup {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.followup input {
+  font-family: var(--font-data);
+  font-size: 12px;
+  background: var(--bg-raise);
+  border: 1px solid var(--phosphor-dim);
+  color: var(--ink);
+  padding: 2px 8px;
+  width: 280px;
+  outline: none;
+}
+
+.followup input::placeholder {
+  color: var(--ink-dim);
+}
+
+/* ---- expanded detail ---- */
+
+.detail {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 18px;
+  padding: 10px 4px 16px;
+  border-top: 1px dashed var(--line);
+}
+
+.detail-prompt pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  margin: 4px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.event {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+
+.event-ts {
+  color: var(--ink-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- boot / error ---- */
+
+.boot-error {
+  max-width: 600px;
+  margin: 80px auto;
+  padding: 24px;
+  border: 1px solid var(--red);
+  color: var(--ink);
+  font-family: var(--font-data);
+}
+
+.boot-error h1 {
+  font-family: var(--font-display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+
+.boot-error code {
+  color: var(--amber);
+}
+
+@media (max-width: 760px) {
+  .detail {
+    grid-template-columns: 1fr;
+  }
+
+  .row-main,
+  .row-toggle {
+    flex-wrap: wrap;
+  }
+
+  /* Give titles their own line instead of crushing them to 2 characters. */
+  .row-title {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+}

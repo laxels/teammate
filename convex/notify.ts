@@ -71,12 +71,13 @@ export const devboxEvent = internalAction({
 });
 
 /**
- * Posts the terminal note for a task cancelled while still queued. Devbox-path
- * stops are announced via /devbox/events; queue cancellations have no devbox,
- * so without this the task's thread would dangle without an outcome.
+ * Posts an arbitrary note to a task's home thread — used for actions that
+ * never reach /devbox/events (queue cancellations) and for dashboard actions
+ * that should leave a trace in the durable Slack narrative (stop requests,
+ * follow-ups, retries). Callers compose the message text.
  */
-export const taskCancelled = internalAction({
-  args: { taskId: v.string() },
+export const taskNote = internalAction({
+  args: { taskId: v.string(), text: v.string() },
   handler: async (ctx, args) => {
     const botToken = process.env.SLACK_BOT_TOKEN;
     if (botToken === undefined) {
@@ -92,7 +93,7 @@ export const taskCancelled = internalAction({
     await postSlackMessage({
       botToken,
       channel: task.slackChannel,
-      text: `:octagonal_sign: *${task.title}* (\`${task.taskId}\`) was cancelled while still queued — no devbox had been assigned yet.`,
+      text: args.text,
       threadTs: task.slackThreadTs,
     });
   },

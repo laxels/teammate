@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import {
   DEVBOX_EVENT_TO_TASK_STATUS,
   EPHEMERAL_RETIRE_GRACE_MS,
+  isTerminalTaskStatus,
   shouldApplyTaskStatus,
 } from "../shared/protocol";
 import { shouldRetireEphemeralDevbox } from "../src/hostPool";
@@ -127,10 +128,20 @@ export const recordEvent = internalMutation({
     const applied =
       task !== null && shouldApplyTaskStatus(task.status, incomingStatus);
     if (task !== null && applied) {
+      const now = Date.now();
       await ctx.db.patch(task._id, {
         status: incomingStatus,
         devboxId: args.devboxId,
-        updatedAt: Date.now(),
+        updatedAt: now,
+        // Duration bookkeeping: first time running / first terminal status.
+        ...(incomingStatus === "running" && task.startedAt === undefined
+          ? { startedAt: args.ts }
+          : {}),
+        // finishedAt tracks the LATEST applied terminal status: terminal-to-
+        // terminal corrections (failed -> completed retry) must move it too.
+        ...(isTerminalTaskStatus(incomingStatus)
+          ? { finishedAt: args.ts }
+          : {}),
       });
     }
 

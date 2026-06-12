@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { postSlackMessage } from "./slackApi";
+import { getSlackPermalink, postSlackMessage } from "./slackApi";
 
 const args = {
   botToken: "xoxb-test",
@@ -121,5 +121,39 @@ describe("postSlackMessage retries", () => {
       postSlackMessage(args, { fetchFn: seq.fetchFn, sleep }),
     ).rejects.toThrow("500");
     expect(seq.calls).toBe(4);
+  });
+});
+
+describe("getSlackPermalink", () => {
+  const linkArgs = {
+    botToken: "xoxb-test",
+    channel: "D0DM",
+    messageTs: "1749500000.000100",
+  };
+
+  test("returns the permalink and passes channel + message_ts", async () => {
+    let requested = "";
+    const fetchFn = (async (url: unknown) => {
+      requested = String(url);
+      return Response.json({
+        ok: true,
+        permalink: "https://team.slack.com/archives/D0DM/p1749500000000100",
+      });
+    }) as unknown as typeof fetch;
+    const link = await getSlackPermalink(linkArgs, { fetchFn });
+    expect(link).toBe("https://team.slack.com/archives/D0DM/p1749500000000100");
+    expect(requested).toContain("channel=D0DM");
+    expect(requested).toContain("message_ts=1749500000.000100");
+  });
+
+  test("returns null on Slack errors and transport failures (best-effort)", async () => {
+    const apiError = fetchSequence([slackError("message_not_found")]);
+    expect(
+      await getSlackPermalink(linkArgs, { fetchFn: apiError.fetchFn }),
+    ).toBeNull();
+    const transport = fetchSequence([new Error("ECONNRESET")]);
+    expect(
+      await getSlackPermalink(linkArgs, { fetchFn: transport.fetchFn }),
+    ).toBeNull();
   });
 });

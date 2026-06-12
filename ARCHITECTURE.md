@@ -11,6 +11,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 | Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Fable 5 tool loop, staleness cron |
 | Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
+| Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
 | Shared contracts | `shared/` | imported by all three | Wire types (`shared/protocol.ts`) |
 
 ## Infrastructure

@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "run",
+        "--cwd",
+        "dashboard",
+        "dev",
+        "--port",
+        "5179",
+        "--strictPort"
+      ],
+      "port": 5179
+    }
+  ]
+}
