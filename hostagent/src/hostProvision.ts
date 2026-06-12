@@ -94,6 +94,11 @@ export function createHostProvisioner(
 
   const execute = async (hostName: string): Promise<void> => {
     const tail: string[] = [];
+    // The script prefixes fatal errors with "ERROR:". The first one is the
+    // root cause (later ones are cascade); it must lead the failure summary
+    // because the tail window and Convex's 500-char summary cap would
+    // otherwise drop it behind whatever noise (e.g. a traceback) follows.
+    let firstError: string | null = null;
     emit(
       hostName,
       "provision_started",
@@ -106,6 +111,9 @@ export function createHostProvisioner(
         onLine: (line) => {
           tail.push(line);
           if (tail.length > FAILURE_TAIL_LINES) tail.shift();
+          if (firstError === null && line.startsWith("ERROR:")) {
+            firstError = line;
+          }
           // The script logs step transitions as "==> step"; forward those as
           // progress events and keep the rest local (the full log stays in
           // the hostagent log for debugging).
@@ -124,10 +132,14 @@ export function createHostProvisioner(
           "Bootstrap script finished; waiting for the new host agent's first heartbeat.",
         );
       } else {
+        const lines =
+          firstError !== null && !tail.includes(firstError)
+            ? [firstError, ...tail]
+            : tail;
         emit(
           hostName,
           "provision_failed",
-          `Bootstrap exited ${code}: ${tail.join(" | ")}`,
+          `Bootstrap exited ${code}: ${lines.join(" | ")}`,
         );
       }
     } catch (error) {

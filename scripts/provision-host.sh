@@ -80,9 +80,16 @@ scw_api() { # <method> <path> [json-body]
 }
 
 json_get() { # <dot.path> — reads JSON on stdin, prints the value
+  # A traceback here would bury the real failure (e.g. the scw_api ERROR
+  # line) in the hostEvents summary, so bad input dies with one clear line.
   python3 -c '
 import json, sys
-value = json.load(sys.stdin)
+raw = sys.stdin.read()
+try:
+    value = json.loads(raw)
+except ValueError:
+    detail = repr(raw[:200]) if raw.strip() else "empty input (upstream command failed?)"
+    sys.exit("ERROR: json_get %s: not JSON: %s" % (sys.argv[1], detail))
 for key in sys.argv[1].split("."):
     value = value[key]
 print(value)
@@ -101,24 +108,29 @@ TAILSCALE_AUTHKEY="$(env_secret TAILSCALE_AUTHKEY)"
 env_secret DEVBOX_SHARED_SECRET >/dev/null # adopt-host.sh needs it; fail early
 
 # ------------------------------------------------------------ create server
+# scw_api results are captured before parsing (never piped into a parser):
+# in a pipeline a failed scw_api hands the parser empty stdin and the
+# resulting traceback drowns out the real API error; a plain assignment
+# under set -e stops the script with scw_api's ERROR line as the last word.
 log "Resolving Scaleway project id"
-PROJECT_ID="$(scw_api GET "/iam/v1alpha1/api-keys/$SCALEWAY_ACCESS_KEY_ID" \
-  | json_get default_project_id)"
+api_key_info="$(scw_api GET "/iam/v1alpha1/api-keys/$SCALEWAY_ACCESS_KEY_ID")"
+PROJECT_ID="$(json_get default_project_id <<<"$api_key_info")"
 
 log "Creating $SERVER_TYPE server '$HOST_NAME' in $ZONE (reused if it exists)"
-SERVER_ID="$(scw_api GET "$SERVERS_PATH" | python3 -c '
+server_list="$(scw_api GET "$SERVERS_PATH")"
+SERVER_ID="$(python3 -c '
 import json, sys
 for server in json.load(sys.stdin).get("servers") or []:
     if server["name"] == sys.argv[1]:
         print(server["id"])
         break
-' "$HOST_NAME")"
+' "$HOST_NAME" <<<"$server_list")"
 if [[ -n "$SERVER_ID" ]]; then
   echo "reusing existing server $SERVER_ID"
 else
-  SERVER_ID="$(scw_api POST "$SERVERS_PATH" \
-    "{\"name\": \"$HOST_NAME\", \"project_id\": \"$PROJECT_ID\", \"type\": \"$SERVER_TYPE\"}" \
-    | json_get id)"
+  created="$(scw_api POST "$SERVERS_PATH" \
+    "{\"name\": \"$HOST_NAME\", \"project_id\": \"$PROJECT_ID\", \"type\": \"$SERVER_TYPE\"}")"
+  SERVER_ID="$(json_get id <<<"$created")"
   echo "created server $SERVER_ID"
 fi
 
@@ -126,7 +138,8 @@ log "Waiting for the server to be ready (a fresh M2 can take ~15 min)"
 STATUS=""
 last_status=""
 for i in $(seq 1 120); do
-  STATUS="$(scw_api GET "$SERVERS_PATH/$SERVER_ID" | json_get status)"
+  server_state="$(scw_api GET "$SERVERS_PATH/$SERVER_ID")"
+  STATUS="$(json_get status <<<"$server_state")"
   if [[ "$STATUS" != "$last_status" ]]; then
     echo "server status: $STATUS"
     last_status="$STATUS"
