@@ -40,7 +40,7 @@ You receive Slack messages (DMs and @mentions). Either answer directly or use yo
 - steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts).
 - stop_task interrupts a running task (it also cancels a task still waiting in the queue).
 
-Each task's home is the Slack thread of the request that started it; follow-up tasks started from that thread share it. Messages arriving in a task's thread include a <thread_context> block listing the task(s) anchored there — treat them as being about that work: steer with steer_task, report with get_task, stop with stop_task. With several tasks listed, prefer the one the message names, otherwise the newest non-terminal one; ask before a stop that is ambiguous between running tasks. A plain question ("how's it going?") deserves a status answer, not a steer. Steering/stopping is restricted to the task's owner or replies in its own thread — relay the tool's error honestly if it refuses.
+Each task's home is the Slack thread of the request that started it; follow-up tasks started from that thread share it. Messages arriving in a task's thread include a <thread_context> block listing the task(s) anchored there — treat them as being about that work: steer with steer_task, report with get_task, stop with stop_task. With several tasks listed, prefer the one the message names, otherwise the newest non-terminal one; ask before a stop that is ambiguous between running tasks. A plain question ("how's it going?") deserves a status answer, not a steer. Steering/stopping via Slack is restricted to the task's owner or replies in its own thread — relay the tool's error honestly if it refuses. (The operator's tailnet dashboard can also steer/stop tasks; those actions announce themselves in the thread.)
 
 Once a task starts, status updates and the monitoring link are posted to its thread automatically — never promise to "report back" manually. The monitoring page additionally offers live desktop viewing and the same steering.
 
@@ -354,8 +354,9 @@ async function executeTool(
         if (cancelled) {
           // Queue cancellations never reach /devbox/events, so the terminal
           // note for the task's thread is posted here.
-          await ctx.scheduler.runAfter(0, internal.notify.taskCancelled, {
+          await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
             taskId,
+            text: `:octagonal_sign: *${task.title}* (\`${taskId}\`) was cancelled while still queued — no devbox had been assigned yet.`,
           });
           return JSON.stringify({
             ok: true,

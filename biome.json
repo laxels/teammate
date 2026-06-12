@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!convex/_generated"]
+    "includes": ["**", "!convex/_generated", "!web/dist", "!dashboard/dist"]
   },
   "formatter": {
     "enabled": true,

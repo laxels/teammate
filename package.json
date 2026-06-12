@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "convex dev",
     "validate": "concurrently --group --prefix-colors auto --names typecheck,lint,test \"bun run typecheck\" \"bun run lint\" \"bun run test\"",
-    "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p web --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p web --noEmit && tsc -p dashboard --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "bun test"
@@ -22,6 +22,7 @@
     "typescript": "6.0.3"
   },
   "workspaces": [
+    "dashboard",
     "gateway",
     "hostagent",
     "web"

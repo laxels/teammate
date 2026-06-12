@@ -137,8 +137,9 @@ export const recordEvent = internalMutation({
         ...(incomingStatus === "running" && task.startedAt === undefined
           ? { startedAt: args.ts }
           : {}),
-        ...(isTerminalTaskStatus(incomingStatus) &&
-        task.finishedAt === undefined
+        // finishedAt tracks the LATEST applied terminal status: terminal-to-
+        // terminal corrections (failed -> completed retry) must move it too.
+        ...(isTerminalTaskStatus(incomingStatus)
           ? { finishedAt: args.ts }
           : {}),
       });

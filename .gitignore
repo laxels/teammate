@@ -6,3 +6,6 @@ node_modules/
 .convex/
 
 .DS_Store
+dashboard/public/config.json
+web/dist/
+dashboard/dist/

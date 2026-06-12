@@ -60,6 +60,47 @@ function publicTask(task: Doc<"tasks">) {
 
 const MAX_DETAIL_EVENTS = 50;
 
+/** Every non-terminal task (queued/running/needs_input), newest first — the
+ * dashboard's live board. Unpaginated: bounded by fleet capacity in practice. */
+export const activeTasks = query({
+  args: { secret: v.string() },
+  handler: async (ctx, args) => {
+    if (!secretOk(args.secret)) {
+      return [];
+    }
+    const active = (
+      await Promise.all(
+        (["queued", "running", "needs_input"] as const).map((status) =>
+          ctx.db
+            .query("tasks")
+            .withIndex("by_status", (q) => q.eq("status", status))
+            .collect(),
+        ),
+      )
+    ).flat();
+    const sorted = active.sort((a, b) => b.createdAt - a.createdAt);
+    return await Promise.all(
+      sorted.map(async (task) => {
+        const devbox =
+          task.devboxId === undefined
+            ? null
+            : await ctx.db
+                .query("devboxes")
+                .withIndex("by_devbox_id", (q) =>
+                  q.eq("devboxId", task.devboxId as string),
+                )
+                .unique();
+        return {
+          ...publicTask(task),
+          monitoringUrl:
+            devbox === null ? null : monitoringUrl(devbox.gatewayUrl),
+          devboxStatus: devbox?.status ?? null,
+        };
+      }),
+    );
+  },
+});
+
 /** Paginated task list, newest first, optionally filtered by status. */
 export const listTasks = query({
   args: {
@@ -187,8 +228,9 @@ export const stopTask = mutation({
     }
     if (task.devboxId === undefined) {
       if (await cancelQueuedRow(ctx, args.taskId)) {
-        await ctx.scheduler.runAfter(0, internal.notify.taskCancelled, {
+        await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
           taskId: args.taskId,
+          text: `:octagonal_sign: *${task.title}* (\`${args.taskId}\`) was cancelled from the dashboard while still queued.`,
         });
         return {
           ok: true,
@@ -208,6 +250,12 @@ export const stopTask = mutation({
       devboxId: devbox.devboxId,
       kind: "interrupt",
       payload: JSON.stringify(payload),
+    });
+    // Attribute the stop in the thread — the eventual :octagonal_sign: update
+    // doesn't say who asked.
+    await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+      taskId: args.taskId,
+      text: `:octagonal_sign: Stop requested from the dashboard for *${task.title}* (\`${args.taskId}\`) — a stopped update follows if a turn was in flight.`,
     });
     return {
       ok: true,
@@ -248,6 +296,12 @@ export const steerTask = mutation({
       kind: "user_message",
       payload: JSON.stringify(payload),
     });
+    // Keep the Slack thread the durable narrative: dashboard steers must
+    // leave the same trace a thread-reply steer would.
+    await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+      taskId: args.taskId,
+      text: `:compass: Dashboard follow-up for *${task.title}* (\`${args.taskId}\`): ${args.text.slice(0, 300)}`,
+    });
     return {
       ok: true,
       taskId: args.taskId,
@@ -278,6 +332,24 @@ export const retryTask = mutation({
         reason: `task is still ${source.status} — stop it first or send a follow-up instead`,
       };
     }
+    if (source.placement === "permanent") {
+      // The permanent devbox is explicit-opt-in (state persists there); a
+      // dashboard retry must not silently convert it to an ephemeral VM.
+      return {
+        ok: false,
+        reason:
+          "this task ran on the permanent devbox (explicit opt-in, stateful) — re-ask in Slack so placement is chosen deliberately",
+      };
+    }
+    if (source.slackThreadTs === undefined) {
+      // Pre-threading rows have no home thread: the retry's updates would
+      // scatter as top-level messages. Re-asking in Slack creates an anchor.
+      return {
+        ok: false,
+        reason:
+          "this legacy task has no home Slack thread for the retry's updates — re-ask in Slack instead",
+      };
+    }
     const retryTaskId = `task-${crypto.randomUUID().slice(0, 8)}`;
     await insertTaskRow(ctx, {
       taskId: retryTaskId,
@@ -296,9 +368,9 @@ export const retryTask = mutation({
         : { slackPermalink: source.slackPermalink }),
     });
     const placement = await placeEphemeralTaskRow(ctx, retryTaskId);
-    await ctx.scheduler.runAfter(0, internal.notify.taskRetried, {
+    await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
       taskId: args.taskId,
-      retryTaskId,
+      text: `:repeat: *${source.title}* (\`${args.taskId}\`) is being retried from the dashboard as \`${retryTaskId}\` — fresh devbox, same prompt. Status updates will follow in this thread.`,
     });
     return {
       ok: true,

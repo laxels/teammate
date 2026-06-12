@@ -513,6 +513,9 @@ export async function fleetSnapshotData(ctx: QueryCtx) {
       vmsInUse: devboxes.filter((d) => d.hostId === host.hostId).length,
       maxVms: host.maxVms,
       secondsSinceSeen: Math.round((now - host.lastSeenAt) / 1000),
+      // Raw timestamp for reactive clients (the dashboard): a server-baked
+      // age freezes inside a Convex query result until other data changes.
+      lastSeenAt: host.lastSeenAt,
       ...(host.status === "provisioning"
         ? {
             provisioningForSeconds: Math.round(
