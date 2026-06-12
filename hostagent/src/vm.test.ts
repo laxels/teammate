@@ -251,7 +251,8 @@ test("transient ssh failures (exit 255) are retried, not fatal", async () => {
       if (bypassAttempts === 1) {
         return {
           code: 255,
-          stderr: "admin@192.168.64.3: Permission denied (publickey,password,keyboard-interactive).",
+          stderr:
+            "admin@192.168.64.3: Permission denied (publickey,password,keyboard-interactive).",
         };
       }
       return {};
@@ -262,7 +263,7 @@ test("transient ssh failures (exit 255) are retried, not fatal", async () => {
 
   expect(bypassAttempts).toBe(2);
   // The rest of the sequence still completed.
-  expect(
-    calls.some((c) => remoteOf(c.command).includes("tailscale up")),
-  ).toBe(true);
+  expect(calls.some((c) => remoteOf(c.command).includes("tailscale up"))).toBe(
+    true,
+  );
 });
