@@ -57,6 +57,23 @@ const VM_USER = "admin";
 const VM_PASSWORD = "admin";
 const TAILSCALE = "/opt/homebrew/bin/tailscale";
 
+// Every clone boots with the golden image's tailscaled state (brew tailscaled
+// keeps it in /Library/Tailscale, including the machine key), so without a
+// wipe ALL clones share ONE tailnet machine identity: each `tailscale up`
+// re-keys and renames that single node — knocking the previous holder off the
+// tailnet — and each destroy-time `tailscale logout` revokes the shared key
+// fleet-wide. Wiping the state dir while the daemon is down forces a fresh
+// identity before the clone joins. The daemon is the root LaunchDaemon
+// homebrew.mxcl.tailscale (brew services); `tailscale version --daemon`
+// exits 0 once the restarted daemon is reachable, even while logged out.
+const TAILSCALE_RESET =
+  "set -e; " +
+  "sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true; " +
+  "sudo rm -rf /Library/Tailscale; " +
+  "sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist; " +
+  `for i in $(seq 1 30); do ${TAILSCALE} version --daemon >/dev/null 2>&1 && exit 0; sleep 1; done; ` +
+  'echo "tailscaled did not come back after state wipe" >&2; exit 1';
+
 const POLL_INTERVAL_MS = 5_000;
 const IP_ATTEMPTS = 36; // 3 min
 const SSH_ATTEMPTS = 60; // 5 min
@@ -246,12 +263,17 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
       ),
     );
 
+    await must("tailscale state wipe", sshCommand(ip, TAILSCALE_RESET));
+
     // Authkey is piped via stdin so it never appears in a command line.
+    // --accept-dns=false: the VM's egress is plain NAT through the host, so
+    // letting MagicDNS rewrite its resolvers risks api.anthropic.com lookups
+    // for zero benefit (ts.net names resolve via public DNS anyway).
     await must(
       "tailscale up",
       sshCommand(
         ip,
-        `sudo ${TAILSCALE} up --authkey="$(cat)" --hostname=${devboxId}`,
+        `sudo ${TAILSCALE} up --authkey="$(cat)" --hostname=${devboxId} --accept-dns=false`,
       ),
       { stdin: config.tailscaleAuthkey },
     );
@@ -331,6 +353,8 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
       requireValidId(devboxId);
       console.log(`[hostagent] destroying ${devboxId}`);
       // Best-effort: release the tailnet identity while the VM is still up.
+      // Safe since the provision-time state wipe makes identities per-clone:
+      // logout revokes only THIS node's key, not a shared one.
       const ipResult = await run([tart, "ip", devboxId]);
       const ip = ipResult.code === 0 ? ipResult.stdout.trim() : "";
       if (ip !== "") {
