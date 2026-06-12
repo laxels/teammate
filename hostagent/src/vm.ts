@@ -67,7 +67,11 @@ const HEALTH_ATTEMPTS = 36; // 3 min
 const DEVBOX_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 // Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so
-// host-key pinning is meaningless; skip known_hosts entirely.
+// host-key pinning is meaningless; skip known_hosts entirely. Auth is
+// password-only and single-shot: host-side identities (e.g. the fleet SSH
+// key on provisioner hosts) must never be offered first — rejected pubkey
+// attempts count against the VM sshd's MaxAuthTries and intermittently
+// produce "Too many authentication failures" before the password is tried.
 const SSH_OPTS = [
   "-o",
   "StrictHostKeyChecking=no",
@@ -77,6 +81,12 @@ const SSH_OPTS = [
   "LogLevel=ERROR",
   "-o",
   "ConnectTimeout=10",
+  "-o",
+  "PubkeyAuthentication=no",
+  "-o",
+  "IdentitiesOnly=yes",
+  "-o",
+  "NumberOfPasswordPrompts=1",
 ];
 
 const SSH_BASE = ["sshpass", "-p", VM_PASSWORD, "ssh", ...SSH_OPTS];

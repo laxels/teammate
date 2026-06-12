@@ -20,7 +20,7 @@ const config: VmConfig = {
 const TART = config.tartBin;
 const IP = "192.168.64.9";
 const SSH_E =
-  "sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10";
+  "sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o PubkeyAuthentication=no -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=1";
 const KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
   "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
