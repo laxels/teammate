@@ -156,9 +156,18 @@ fi
 # ephemeral's `tailscale up` re-keyed and renamed the ONE shared node).
 # Wipe the state dir with the daemon down; provisioning wipes again per-clone
 # as a belt-and-suspenders.
+# launchd teardown is async: bootstrap right after bootout intermittently
+# fails with "Bootstrap failed: 5: Input/output error" — wait + retry.
 vm 'sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true
+for i in $(seq 1 15); do
+  sudo launchctl print system/homebrew.mxcl.tailscale >/dev/null 2>&1 || break
+  sleep 1
+done
 sudo rm -rf /Library/Tailscale
-sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist'
+for i in $(seq 1 10); do
+  sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist 2>/dev/null && break
+  sleep 2
+done'
 ts_status=""
 for i in $(seq 1 15); do
   ts_status="$(vm '/opt/homebrew/bin/tailscale status 2>&1 || true')"

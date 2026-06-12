@@ -134,10 +134,19 @@ vm 'python3 -c '"'"'import json; p="/Users/admin/.claude/settings.json"; d=json.
 # knocking the previous holder offline. Wipe it with the daemon down so this
 # clone joins as a fresh node.
 log "Wiping inherited tailscaled state (fresh tailnet identity)"
+# launchd teardown is async: bootstrap right after bootout intermittently
+# fails with "Bootstrap failed: 5: Input/output error" — wait + retry.
 vm 'set -e
 sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true
+for i in $(seq 1 15); do
+  sudo launchctl print system/homebrew.mxcl.tailscale >/dev/null 2>&1 || break
+  sleep 1
+done
 sudo rm -rf /Library/Tailscale
-sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist
+for i in $(seq 1 10); do
+  sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist 2>/dev/null && break
+  sleep 2
+done
 for i in $(seq 1 30); do
   /opt/homebrew/bin/tailscale version --daemon >/dev/null 2>&1 && exit 0
   sleep 1
