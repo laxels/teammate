@@ -20,7 +20,7 @@ export const commandKindValidator = v.union(
  * misconfigured gateway sees an empty queue instead of generating error spam.
  * A console.warn still records the mismatch for diagnosability.
  */
-function secretOk(secret: string): boolean {
+export function devboxSecretOk(secret: string): boolean {
   const expected = process.env.DEVBOX_SHARED_SECRET;
   const ok =
     expected !== undefined &&
@@ -38,7 +38,7 @@ function secretOk(secret: string): boolean {
 export const pendingFor = query({
   args: { devboxId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret)) {
       return [];
     }
     const rows = await ctx.db
@@ -61,7 +61,7 @@ export const pendingFor = query({
 export const ack = mutation({
   args: { commandId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret)) {
       return;
     }
     const row = await ctx.db
@@ -78,7 +78,7 @@ export const ack = mutation({
 export const heartbeat = mutation({
   args: { devboxId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret)) {
       return;
     }
     const devbox = await ctx.db

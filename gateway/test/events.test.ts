@@ -51,4 +51,27 @@ describe("createEventSender", () => {
     );
     await expect(send("task-1", "failed", "boom")).resolves.toBeUndefined();
   });
+
+  test("a blackholed POST times out instead of wedging the queue", async () => {
+    const urls: string[] = [];
+    const fetchStub: FetchLike = (url, init) => {
+      urls.push(String(url));
+      if (urls.length === 1) {
+        // Never settles on its own; only the abort signal can end it. A POST
+        // into a dead network behaves exactly like this.
+        return new Promise((_, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason ?? new Error("aborted")),
+          );
+        });
+      }
+      return Promise.resolve(new Response("ok"));
+    };
+
+    const send = createEventSender(config, fetchStub, Date.now, 20);
+    await send("task-1", "started", "into the void");
+    await send("task-1", "completed", "must still be delivered");
+
+    expect(urls).toHaveLength(2);
+  });
 });

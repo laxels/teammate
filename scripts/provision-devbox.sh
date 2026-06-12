@@ -162,6 +162,12 @@ if ! grep -q "\"devboxId\":\"$DEVBOX_ID\"" <<<"$health"; then
   exit 1
 fi
 
+# Only now may the gateway consume commands (it polls for this marker): a
+# gateway booting mid-provision must never accept a task — the kickstart
+# above would kill it, and the task with it.
+log "Writing provision-ready marker"
+vm 'touch ~/ultraclaude.ready'
+
 # -------------------------------------------------------- register in Convex
 log "Registering devbox in Convex"
 (cd "$REPO_ROOT" && bunx convex run devboxes:registerDevbox \
