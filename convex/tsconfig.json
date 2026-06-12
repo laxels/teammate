@@ -18,6 +18,8 @@
 
     "skipLibCheck": true
   },
+  /* Tests run under bun:test, not the Convex runtime; they get their own
+     tsconfig (tsconfig.test.json) so bun globals stay out of function code. */
   "include": ["./**/*"],
-  "exclude": ["./_generated"]
+  "exclude": ["./_generated", "./**/*.test.ts"]
 }

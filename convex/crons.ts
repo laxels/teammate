@@ -21,4 +21,13 @@ crons.interval(
   {},
 );
 
+// Retention: delete rows past their per-table window from the append-mostly
+// tables (see cleanup.pruneExpired for windows and reader audit).
+crons.daily(
+  "prune expired rows",
+  { hourUTC: 9, minuteUTC: 0 },
+  internal.cleanup.pruneExpired,
+  {},
+);
+
 export default crons;
