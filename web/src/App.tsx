@@ -74,6 +74,11 @@ function VncPane() {
         url={url}
         autoConnect
         scaleViewport
+        // macOS Screen Sharing never sends a visible cursor shape, so noVNC
+        // keeps its default zero-size cursor and the local pointer vanishes
+        // over the canvas. The dot fallback only applies while the server
+        // cursor is invisible.
+        showDotCursor
         retryDuration={VNC_RETRY_MS}
         background="#262522"
         style={{ width: "100%", height: "100%" }}
