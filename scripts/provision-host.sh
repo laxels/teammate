@@ -28,6 +28,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Fleet hosts run these scripts from the payload dir with secrets in a
 # separate file (never shipped into VMs): ULTRACLAUDE_ENV overrides.
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
+# Hostagent LaunchAgent PATH lacks homebrew (sshpass lives there).
+export PATH="/opt/homebrew/bin:$PATH"
 API="https://api.scaleway.com"
 ZONE="fr-par-1"
 SERVERS_PATH="/apple-silicon/v1alpha1/zones/$ZONE/servers"
@@ -147,6 +149,28 @@ if [[ -z "$ssh_ready" ]]; then
   exit 1
 fi
 ssh-keyscan -T 5 "$SERVER_IP" >>~/.ssh/known_hosts 2>/dev/null
+
+# ------------------------------------------------------------- key bootstrap
+# A new server only trusts the SSH keys registered in the Scaleway project,
+# and the IAM key quota may not include the caller's key (fleet hosts hit
+# this: IamSshKeys quota is 1). Fall back to the API-provided sudo password
+# to install the caller's pubkey on first contact. No-op when key auth
+# already works (e.g. running from a laptop whose key IS registered).
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_SSH" true 2>/dev/null; then
+  log "Key auth not yet accepted; installing our pubkey via the sudo password"
+  FLEET_PUBKEY_FILE="${FLEET_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
+  if [[ ! -f "$FLEET_PUBKEY_FILE" ]]; then
+    echo "ERROR: key auth failed and no pubkey at $FLEET_PUBKEY_FILE to install" >&2
+    exit 1
+  fi
+  if ! command -v sshpass >/dev/null; then
+    echo "ERROR: key auth failed and sshpass is not installed for the password fallback" >&2
+    exit 1
+  fi
+  SSHPASS="$SUDO_PASSWORD" sshpass -e ssh -o ConnectTimeout=10 "$HOST_SSH" \
+    'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' \
+    <"$FLEET_PUBKEY_FILE"
+fi
 host true
 
 # --------------------------------------------------------- passwordless sudo
