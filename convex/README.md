@@ -40,13 +40,19 @@ Re-running upserts and resets the devbox to `warm`.
    `orchestrator.processSlackEvent`.
 2. The orchestrator filters bot/self messages (`src/orchestration.ts`), then
    runs the Fable 5 loop with tools `list_tasks` / `get_task` / `start_task` /
-   `stop_task` (steering is via the monitoring page, not a tool). The final
-   reply is posted to the originating channel — threaded for channel mentions.
+   `steer_task` / `stop_task`. Every reply is threaded under the triggering
+   message (one request = one thread); a reply inside a task's thread gets
+   that task injected as `<thread_context>` (looked up via the tasks
+   `by_channel_thread` index), so thread replies steer, query, or stop their
+   task without naming it.
 3. `start_task` claims a warm devbox, enqueues a command in the `commands`
    table (gateways subscribe outbound — Convex cannot reach the tailnet), and
-   inserts a `tasks` row; the gateway then posts `DevboxEvent`s to
-   `/devbox/events`, which update task/devbox state and notify the task's
-   Slack thread (with the monitoring link `https://<devbox-host>/`).
+   inserts a `tasks` row anchored to the thread; the gateway then posts
+   `DevboxEvent`s to `/devbox/events`, which update task/devbox state and
+   notify the task's Slack thread (with the monitoring link
+   `https://<devbox-host>/`). `steer_task` enqueues a `user_message` command
+   that the gateway delivers to the live session (`POST /message`, taskId
+   guarded so a stale command never reaches a later task's session).
 4. Every 15 min, `crons.ts` → `staleness.checkStaleTasks`: active (queued or
    running) tasks with no event for 30+ min get a one-line check-in (devbox
    heartbeat freshness + monitoring link), at most once per 30 min per task

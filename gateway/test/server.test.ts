@@ -10,7 +10,12 @@ import type {
 import type { GatewayConfig } from "../src/config";
 import type { FetchLike } from "../src/events";
 import { createGatewayServer, type GatewayServer } from "../src/server";
-import { createEchoQueryFn, until } from "./helpers";
+import {
+  assistantMessage,
+  createEchoQueryFn,
+  resultSuccess,
+  until,
+} from "./helpers";
 
 const config: GatewayConfig = {
   devboxId: "devbox-test",
@@ -195,6 +200,132 @@ describe("HTTP API", () => {
       ).json()) as GatewayHealth;
       return !health.running;
     });
+  });
+
+  test("POST /message relays a user message into the live session", async () => {
+    // The initial prompt's turn stays open (no result), mirroring a real
+    // long-running task; the steered follow-up completes normally.
+    const { queryFn } = createEchoQueryFn((text) =>
+      text === "do the work"
+        ? [assistantMessage("working on: do the work")]
+        : [
+            assistantMessage(`working on: ${text}`),
+            resultSuccess(`done: ${text}`),
+          ],
+    );
+    const { base, events } = makeHarness({ queryFn });
+
+    // No session: nothing to deliver to.
+    const idle = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", text: "anyone home?" }),
+    });
+    expect(idle.status).toBe(409);
+
+    await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", prompt: "do the work" }),
+    });
+
+    // A message aimed at a different task (stale command from a previous
+    // session) must not leak into this session.
+    const mismatch = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-OLD", text: "stale steer" }),
+    });
+    expect(mismatch.status).toBe(409);
+
+    const ok = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", text: "also add tests" }),
+    });
+    expect(ok.status).toBe(200);
+    await until(() => events.some((e) => e.summary === "done: also add tests"));
+  });
+
+  test("POST /message after the task reported terminal is dropped", async () => {
+    const { base, events } = makeHarness();
+    await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", prompt: "do the work" }),
+    });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    // The session is still alive (finished-but-steerable for the monitoring
+    // page), but a Slack-relayed steer that lost the race against completion
+    // must not re-open the finished task.
+    const late = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", text: "too late" }),
+    });
+    expect(late.status).toBe(409);
+    expect(events.some((e) => e.summary === "done: too late")).toBe(false);
+  });
+
+  test("POST /interrupt with a taskId only stops that task's session", async () => {
+    const { base, control } = makeHarness();
+    await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", prompt: "work" }),
+    });
+
+    // A stale stop aimed at a previous occupant must not kill this session.
+    const stale = await fetch(`${base}/interrupt`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-OLD" }),
+    });
+    expect(stale.status).toBe(409);
+    expect(control.interrupts).toBe(0);
+    expect(
+      ((await (await fetch(`${base}/health`)).json()) as GatewayHealth).running,
+    ).toBe(true);
+
+    // A matching taskId stops it.
+    const matching = await fetch(`${base}/interrupt`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1" }),
+    });
+    expect(matching.status).toBe(200);
+    await until(() => control.interrupts === 1);
+    await until(async () => {
+      const health = (await (
+        await fetch(`${base}/health`)
+      ).json()) as GatewayHealth;
+      return !health.running;
+    });
+  });
+
+  test("POST /message validates the body and requires the secret", async () => {
+    const { base } = makeHarness();
+    const noAuth = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ taskId: "task-1", text: "hi" }),
+    });
+    expect(noAuth.status).toBe(401);
+
+    const missingText = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1" }),
+    });
+    expect(missingText.status).toBe(400);
+
+    const notJson = await fetch(`${base}/message`, {
+      method: "POST",
+      headers: auth,
+      body: "{",
+    });
+    expect(notJson.status).toBe(400);
   });
 
   test("unknown routes 404 when no web dist exists", async () => {

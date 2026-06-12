@@ -9,7 +9,7 @@ const heartbeatRef = makeFunctionReference<"mutation">("commands:heartbeat");
 
 export type PendingCommand = {
   commandId: string;
-  kind: "start" | "interrupt";
+  kind: "start" | "user_message" | "interrupt";
   payload: string;
   createdAt: number;
 };
