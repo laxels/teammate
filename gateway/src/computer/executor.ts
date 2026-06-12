@@ -201,7 +201,11 @@ export type ExecutorDeps = {
   sleep?: (ms: number) => Promise<void>;
   maxLongEdge?: number;
   settleMs?: number;
+  /** Absolute path: the gateway LaunchAgent's PATH lacks /usr/local/bin. */
+  cliclickPath?: string;
 };
+
+export const DEFAULT_CLICLICK_PATH = "/usr/local/bin/cliclick";
 
 export class ComputerExecutor {
   #run: CommandRunner;
@@ -210,6 +214,7 @@ export class ComputerExecutor {
   #sleep: (ms: number) => Promise<void>;
   #maxLongEdge: number;
   #settleMs: number;
+  #cliclickPath: string;
   #display: DisplayInfo | null = null;
   #pointSize: [number, number] | null = null;
   #tempCounter = 0;
@@ -227,6 +232,7 @@ export class ComputerExecutor {
       deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#maxLongEdge = deps.maxLongEdge ?? MAX_LONG_EDGE;
     this.#settleMs = deps.settleMs ?? SETTLE_MS;
+    this.#cliclickPath = deps.cliclickPath ?? DEFAULT_CLICLICK_PATH;
   }
 
   displayInfo(): DisplayInfo | null {
@@ -603,7 +609,7 @@ export class ComputerExecutor {
   }
 
   async #cliclick(commands: string[]): Promise<void> {
-    await this.#exec(["cliclick", ...commands]);
+    await this.#exec([this.#cliclickPath, ...commands]);
   }
 
   async #exec(cmd: string[]): Promise<RunResult> {

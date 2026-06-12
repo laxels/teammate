@@ -74,7 +74,7 @@ function makeExecutor(
 
 function cliclickCalls(calls: string[][]): string[][] {
   return calls
-    .filter((cmd) => cmd[0] === "cliclick")
+    .filter((cmd) => cmd[0]?.endsWith("cliclick"))
     .map((cmd) => cmd.slice(1));
 }
 
