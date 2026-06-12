@@ -57,6 +57,12 @@ Re-running upserts and resets the devbox to `warm`.
    running) tasks with no event for 30+ min get a one-line check-in (devbox
    heartbeat freshness + monitoring link), at most once per 30 min per task
    (`lastNudgedAt`).
+5. Delivery resilience: events are claimed (marked processed) atomically
+   BEFORE the tool loop, so processing is at-most-once and a crashed run can
+   never double-start tasks; events stranded before the claim are replayed by
+   the `slack.retryUnprocessed` cron (every 5 min, 2 min – 24 h old). Slack
+   posts retry transient failures (429/5xx/transport) inside
+   `postSlackMessage`, so rate-limited status updates aren't dropped.
 
 Pure logic (event filtering, thread targeting, monitoring-URL derivation,
 staleness predicate, DevboxEvent validation) lives in `src/orchestration.ts`

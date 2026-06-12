@@ -22,7 +22,7 @@ import {
   query,
 } from "./_generated/server";
 import { enqueueCommandRow } from "./commands";
-import { HEARTBEAT_FRESHNESS_MS } from "./devboxes";
+import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 export const hostCommandKindValidator = v.union(
   v.literal("provision_vm"),

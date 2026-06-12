@@ -1,8 +1,12 @@
+// Node runtime: postSlackMessage's retry backoff sleeps via setTimeout,
+// which the default Convex runtime does not provide.
+"use node";
+
 import { monitoringUrl, shouldNudge } from "../src/orchestration";
 import { postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
-import { HEARTBEAT_FRESHNESS_MS } from "./devboxes";
+import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 /**
  * Cron target: for active (queued or running) tasks with no devbox event in

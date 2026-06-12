@@ -8,6 +8,7 @@ import {
   replyHintFor,
   resolveThreadTarget,
   shouldNudge,
+  shouldRetrySlackEvent,
   steerRejection,
   stopRejection,
   taskActionAuthorization,
@@ -447,6 +448,51 @@ describe("taskActionAuthorization", () => {
         target: elsewhere,
       }),
     ).toBeNull();
+  });
+});
+
+describe("shouldRetrySlackEvent", () => {
+  const MIN = 60_000;
+  const now = 1_750_000_000_000;
+
+  test("retries an unprocessed event stranded for over 2 minutes", () => {
+    expect(
+      shouldRetrySlackEvent({
+        nowMs: now,
+        receivedAtMs: now - 3 * MIN,
+        processed: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("leaves fresh events alone (their scheduled run may be in flight)", () => {
+    expect(
+      shouldRetrySlackEvent({
+        nowMs: now,
+        receivedAtMs: now - 1 * MIN,
+        processed: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("never retries processed events", () => {
+    expect(
+      shouldRetrySlackEvent({
+        nowMs: now,
+        receivedAtMs: now - 10 * MIN,
+        processed: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("gives up on events older than a day (no infinite retry)", () => {
+    expect(
+      shouldRetrySlackEvent({
+        nowMs: now,
+        receivedAtMs: now - 25 * 60 * MIN,
+        processed: false,
+      }),
+    ).toBe(false);
   });
 });
 

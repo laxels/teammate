@@ -31,7 +31,10 @@ export default defineSchema({
     payload: v.string(),
     receivedAt: v.number(),
     processed: v.boolean(),
-  }).index("by_event_id", ["eventId"]),
+  })
+    .index("by_event_id", ["eventId"])
+    // Dead-letter sweep: find unprocessed events stranded by a crashed run.
+    .index("by_processed", ["processed", "receivedAt"]),
 
   // One row per delegated Claude Code task.
   tasks: defineTable({

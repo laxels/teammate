@@ -7,15 +7,7 @@ import {
 import { shouldRetireEphemeralDevbox } from "../src/hostPool";
 import { internal } from "./_generated/api";
 import { internalMutation, internalQuery } from "./_generated/server";
-
-export const devboxEventTypeValidator = v.union(
-  v.literal("started"),
-  v.literal("progress"),
-  v.literal("needs_input"),
-  v.literal("completed"),
-  v.literal("failed"),
-  v.literal("stopped"),
-);
+import { devboxEventTypeValidator, HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 /** Devbox statuses that mean "occupied by a task". */
 const BUSY_EVENT_TYPES = new Set(["started", "progress", "needs_input"]);
@@ -79,10 +71,8 @@ export const getByDevboxId = internalQuery({
 /**
  * A devbox only counts as alive if its gateway heartbeated recently — task
  * delivery is via the command queue, so a dead gateway would otherwise accept
- * claims forever.
+ * claims forever (freshness window: HEARTBEAT_FRESHNESS_MS in constants.ts).
  */
-export const HEARTBEAT_FRESHNESS_MS = 2 * 60_000;
-
 export const claimWarm = internalMutation({
   args: { taskId: v.string() },
   handler: async (ctx, args) => {
