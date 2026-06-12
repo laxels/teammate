@@ -3,7 +3,9 @@ import {
   internalMutation,
   internalQuery,
   type MutationCtx,
+  query,
 } from "./_generated/server";
+import { devboxSecretOk } from "./commands";
 import { taskStatusValidator } from "./schema";
 
 const MAX_LISTED_TASKS = 50;
@@ -239,6 +241,29 @@ export const activeWithLatestEvent = internalQuery({
         };
       }),
     );
+  },
+});
+
+/**
+ * Boot-time orphan check for gateways: tasks Convex still considers running
+ * on a devbox. A freshly started gateway owns no sessions, so anything this
+ * returns was lost with the previous gateway process (its start command is
+ * already acked and will never be redelivered) — the gateway fails these
+ * loudly instead of letting them hang silently.
+ */
+export const runningForDevbox = query({
+  args: { devboxId: v.string(), secret: v.string() },
+  handler: async (ctx, args) => {
+    if (!devboxSecretOk(args.secret)) {
+      return [];
+    }
+    const running = await ctx.db
+      .query("tasks")
+      .withIndex("by_status", (q) => q.eq("status", "running"))
+      .collect();
+    return running
+      .filter((task) => task.devboxId === args.devboxId)
+      .map((task) => ({ taskId: task.taskId, title: task.title }));
   },
 });
 

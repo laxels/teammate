@@ -24,6 +24,7 @@ export function createEventSender(
   config: EventSenderConfig,
   fetchFn: FetchLike = fetch,
   now: () => number = Date.now,
+  timeoutMs = 10_000,
 ): EventSender {
   const endpoint = new URL("/devbox/events", config.convexSiteUrl).toString();
   // Deliveries are serialized: adjacent events (e.g. the final progress and
@@ -40,6 +41,8 @@ export function createEventSender(
     };
     queue = queue.then(async () => {
       try {
+        // Without the timeout, one POST into a dead network never settles
+        // and the serialized queue wedges every later event silently.
         const response = await fetchFn(endpoint, {
           method: "POST",
           headers: {
@@ -47,6 +50,7 @@ export function createEventSender(
             "x-devbox-secret": config.devboxSharedSecret,
           },
           body: JSON.stringify(event),
+          signal: AbortSignal.timeout(timeoutMs),
         });
         if (!response.ok) {
           const body = await response.text().catch(() => "");
