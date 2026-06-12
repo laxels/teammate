@@ -12,6 +12,10 @@ const heartbeatRef = makeFunctionReference<"mutation">("hosts:heartbeat");
 /** Deletes a devbox row after the host agent tart-deletes its VM. */
 export const removeDevboxRef =
   makeFunctionReference<"mutation">("hosts:removeDevbox");
+/** Posts fleet lifecycle events (host bootstrap progress/failures). */
+export const recordHostEventRef = makeFunctionReference<"mutation">(
+  "hosts:recordHostEvent",
+);
 
 export type PendingHostCommand = {
   commandId: string;
@@ -54,6 +58,8 @@ export type HostConsumerOptions = {
   hostId: string;
   secret: string;
   execute: HostCommandExecutor;
+  /** Advertised in every heartbeat (fleet-provisioner role). */
+  canProvisionHosts?: boolean;
   heartbeatIntervalMs?: number;
 };
 
@@ -107,19 +113,25 @@ export function startHostConsumer(options: HostConsumerOptions): () => void {
   // log for that line; later heartbeats stay quiet to avoid log spam.
   let firstHeartbeatLogged = false;
   const sendHeartbeat = () => {
-    client.mutation(heartbeatRef, { hostId: options.hostId, ...auth }).then(
-      () => {
-        if (!firstHeartbeatLogged) {
-          firstHeartbeatLogged = true;
-          console.log(
-            `[hostagent] first heartbeat acknowledged for ${options.hostId}`,
-          );
-        }
-      },
-      (error) => {
-        console.error("[hostagent] heartbeat failed:", error);
-      },
-    );
+    client
+      .mutation(heartbeatRef, {
+        hostId: options.hostId,
+        canProvisionHosts: options.canProvisionHosts === true,
+        ...auth,
+      })
+      .then(
+        () => {
+          if (!firstHeartbeatLogged) {
+            firstHeartbeatLogged = true;
+            console.log(
+              `[hostagent] first heartbeat acknowledged for ${options.hostId}`,
+            );
+          }
+        },
+        (error) => {
+          console.error("[hostagent] heartbeat failed:", error);
+        },
+      );
   };
   sendHeartbeat();
   const heartbeatTimer = setInterval(

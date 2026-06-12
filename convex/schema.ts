@@ -40,6 +40,12 @@ export default defineSchema({
     prompt: v.string(),
     status: taskStatusValidator,
     devboxId: v.optional(v.string()),
+    // Requested placement. "ephemeral" tasks with no devboxId are waiting for
+    // a VM slot (placed by hosts.placeQueuedEphemeralTasks when one frees up
+    // or a new host comes online). Absent on pre-placement-era rows.
+    placement: v.optional(
+      v.union(v.literal("ephemeral"), v.literal("permanent")),
+    ),
     slackChannel: v.string(),
     slackThreadTs: v.optional(v.string()),
     createdAt: v.number(),
@@ -74,27 +80,56 @@ export default defineSchema({
   // Mac hosts running the host agent (self-registered on first heartbeat).
   // Each host runs Tart VMs; Apple's EULA caps maxVms at 2 concurrent macOS
   // VMs per host. "draining" excludes a host from new allocations without
-  // touching its running VMs.
+  // touching its running VMs. "provisioning" rows are pre-created by
+  // hosts.requestHostProvision while a provisioner host bootstraps the new
+  // Mac; the new host's first heartbeat flips it to "active".
   hosts: defineTable({
     hostId: v.string(),
     maxVms: v.number(),
-    status: v.union(v.literal("active"), v.literal("draining")),
+    status: v.union(
+      v.literal("active"),
+      v.literal("draining"),
+      v.literal("provisioning"),
+    ),
     lastSeenAt: v.number(),
+    // The host holds fleet credentials (Scaleway API, ghcr, fleet SSH key)
+    // and can bootstrap new Mac hosts. Reported in its heartbeat.
+    canProvisionHosts: v.optional(v.boolean()),
+    // For "provisioning" rows: when the bootstrap was requested (staleness
+    // cutoff) and which host is running it (debugging).
+    provisionRequestedAt: v.optional(v.number()),
+    provisionedBy: v.optional(v.string()),
   }).index("by_host_id", ["hostId"]),
 
-  // Host-level command queue (VM lifecycle), mirroring `commands`: the
-  // orchestrator enqueues, host agents subscribe and ack (outbound-only).
+  // Host-level command queue (VM lifecycle + fleet scaling), mirroring
+  // `commands`: the orchestrator enqueues, host agents subscribe and ack
+  // (outbound-only).
   hostCommands: defineTable({
     commandId: v.string(),
     hostId: v.string(),
-    kind: v.union(v.literal("provision_vm"), v.literal("destroy_vm")),
-    // JSON payload: HostVmPayload for both kinds.
+    kind: v.union(
+      v.literal("provision_vm"),
+      v.literal("destroy_vm"),
+      v.literal("provision_host"),
+    ),
+    // JSON payload: HostVmPayload for the vm kinds, HostProvisionPayload for
+    // provision_host.
     payload: v.string(),
     status: v.union(v.literal("pending"), v.literal("acked")),
     createdAt: v.number(),
   })
     .index("by_host_status", ["hostId", "status"])
     .index("by_command_id", ["commandId"]),
+
+  // Fleet-level lifecycle events (host provisioning progress, failures),
+  // posted by host agents. The orchestrator's get_fleet tool surfaces the
+  // recent tail so ultraclaude can monitor and debug scale-ups.
+  hostEvents: defineTable({
+    hostId: v.string(),
+    type: v.string(),
+    summary: v.string(),
+    ts: v.number(),
+  }).index("by_host_id", ["hostId"]),
 
   // Control-plane command queue: the orchestrator enqueues, gateways
   // subscribe and ack (outbound-only — Convex cloud cannot reach tailnet

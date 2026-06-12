@@ -17,6 +17,15 @@ export type HostAgentConfig = {
   payloadDir: string;
   /** Absolute path to the tart binary. */
   tartBin: string;
+  /**
+   * Fleet-provisioner role (FLEET_PROVISIONER=1): this host holds the fleet
+   * .env (Scaleway keys, ghcr PAT, fleet SSH key) and accepts provision_host
+   * commands, bootstrapping new Mac hosts via provisionScriptPath.
+   */
+  canProvisionHosts: boolean;
+  provisionScriptPath: string;
+  /** Fleet secrets file (outside the payload dir, which is rsynced into VMs). */
+  fleetEnvFile: string;
 };
 
 /**
@@ -51,6 +60,7 @@ export function loadConfig(
   }
 
   const home = env.HOME ?? homedir();
+  const payloadDir = env.PAYLOAD_DIR || `${home}/ultraclaude-payload`;
   return {
     hostId,
     convexUrl,
@@ -59,7 +69,11 @@ export function loadConfig(
     tailscaleAuthkey,
     tailnetSuffix,
     goldenImage: env.GOLDEN_IMAGE || "golden-v3",
-    payloadDir: env.PAYLOAD_DIR || `${home}/ultraclaude-payload`,
+    payloadDir,
     tartBin: env.TART_BIN || `${home}/tart.app/Contents/MacOS/tart`,
+    canProvisionHosts: env.FLEET_PROVISIONER === "1",
+    provisionScriptPath:
+      env.PROVISION_SCRIPT || `${payloadDir}/scripts/provision-host.sh`,
+    fleetEnvFile: env.FLEET_ENV_FILE || `${home}/fleet.env`,
   };
 }

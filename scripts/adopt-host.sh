@@ -25,6 +25,9 @@ if [[ -z "$HOST_SSH" || ! "$HOST_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Fleet hosts run these scripts from the payload dir with secrets in a
+# separate file (never shipped into VMs): ULTRACLAUDE_ENV overrides.
+ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 TAILNET_SUFFIX="tail4d21c4.ts.net"
 CONVEX_SITE_URL="https://zealous-robin-941.convex.site"
 CONVEX_URL="https://zealous-robin-941.convex.cloud"
@@ -35,9 +38,9 @@ host() { ssh -o ConnectTimeout=10 "$HOST_SSH" "$@"; }
 
 env_secret() { # <KEY> -> value from repo .env, never echoed
   local val
-  val="$(grep "^$1=" "$REPO_ROOT/.env" | head -1 | cut -d= -f2-)"
+   val="$(grep "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
   if [[ -z "$val" ]]; then
-    echo "ERROR: $1 missing from $REPO_ROOT/.env" >&2
+    echo "ERROR: $1 missing from $ENV_FILE" >&2
     return 1
   fi
   printf '%s' "$val"

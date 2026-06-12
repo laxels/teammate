@@ -2,8 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { TaskStatus } from "../shared/protocol";
 import {
   ephemeralGatewayUrl,
+  HOST_PROVISION_STALE_MS,
   type HostRow,
+  inflightProvision,
+  nextHostName,
   pickHost,
+  pickProvisioner,
   shouldRetireEphemeralDevbox,
 } from "./hostPool";
 import { monitoringUrl } from "./orchestration";
@@ -187,5 +191,96 @@ describe("shouldRetireEphemeralDevbox", () => {
         incomingStatus: "completed",
       }),
     ).toBe(false);
+  });
+});
+
+describe("nextHostName", () => {
+  test("numbers sequentially from the highest fleet host", () => {
+    expect(nextHostName([])).toBe("ultraclaude-host-1");
+    expect(nextHostName(["ultraclaude-host-1"])).toBe("ultraclaude-host-2");
+    expect(nextHostName(["ultraclaude-host-2", "ultraclaude-host-7"])).toBe(
+      "ultraclaude-host-8",
+    );
+  });
+
+  test("ignores names outside the fleet convention", () => {
+    expect(nextHostName(["maxs-macbook", "ultraclaude-host-3"])).toBe(
+      "ultraclaude-host-4",
+    );
+  });
+});
+
+describe("inflightProvision", () => {
+  const provisioning = (requestedAt: number): HostRow => ({
+    hostId: "ultraclaude-host-2",
+    maxVms: 2,
+    status: "provisioning",
+    lastSeenAt: requestedAt,
+    provisionRequestedAt: requestedAt,
+  });
+
+  test("returns the fresh in-flight bootstrap", () => {
+    const row = provisioning(1_000_000);
+    expect(inflightProvision([row], 1_000_000 + 60_000)).toEqual(row);
+  });
+
+  test("ignores stale bootstraps so a dead one cannot wedge scaling", () => {
+    const row = provisioning(0);
+    expect(inflightProvision([row], HOST_PROVISION_STALE_MS + 1)).toBeNull();
+  });
+
+  test("ignores active hosts", () => {
+    expect(
+      inflightProvision(
+        [{ hostId: "h", maxVms: 2, status: "active", lastSeenAt: 5 }],
+        10,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("pickProvisioner", () => {
+  const base = { maxVms: 2, lastSeenAt: 1_000 };
+
+  test("picks a fresh, active, credential-holding host", () => {
+    expect(
+      pickProvisioner({
+        hosts: [
+          { hostId: "plain", status: "active", ...base },
+          {
+            hostId: "fleet",
+            status: "active",
+            canProvisionHosts: true,
+            ...base,
+          },
+        ],
+        nowMs: 1_500,
+        freshnessMs: 1_000,
+      }),
+    ).toBe("fleet");
+  });
+
+  test("rejects stale, draining, and provisioning hosts", () => {
+    expect(
+      pickProvisioner({
+        hosts: [
+          {
+            hostId: "stale",
+            status: "active",
+            canProvisionHosts: true,
+            maxVms: 2,
+            lastSeenAt: 0,
+          },
+          {
+            hostId: "draining",
+            status: "draining",
+            canProvisionHosts: true,
+            ...base,
+          },
+        ],
+        nowMs: 10_000,
+        freshnessMs: 1_000,
+      }),
+    ).toBeNull();
   });
 });
