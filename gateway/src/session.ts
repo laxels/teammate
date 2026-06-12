@@ -272,10 +272,14 @@ export class SessionManager {
   }
 
   /** Hang detection: a healthy session emits its SDK init message within
-   * seconds and streams messages continuously thereafter. */
+   * seconds and streams messages continuously thereafter. Only turns in
+   * flight are policed: a finished-but-steerable session sits legitimately
+   * silent (permanent devboxes idle indefinitely), and its task already
+   * reported a terminal status that a late "failed" would regress. */
   #checkWatchdog(taskId: string): void {
-    if (!this.#running) return;
-    // A session blocked on AskUserQuestion is waiting for a human, not hung.
+    if (!this.#running || !this.#turnInFlight) return;
+    // A session blocked on AskUserQuestion is waiting for a human, not hung
+    // (the turn IS in flight while canUseTool blocks).
     if (this.#pendingQuestion !== null) return;
     const now = this.#deps.now();
     const sinceStart = now - this.#sessionStartedAt;
@@ -365,6 +369,10 @@ export class SessionManager {
       });
     }
     this.#turnInFlight = true;
+    // Restart the stall clock: the previous turn may have finished long ago,
+    // and the new turn earns a fresh stallMs budget. Leave a null untouched
+    // so a steer before the first SDK message keeps init-hang detection.
+    if (this.#lastMessageAt !== null) this.#lastMessageAt = this.#deps.now();
     this.#queue.push(userMessage(text));
     return true;
   }

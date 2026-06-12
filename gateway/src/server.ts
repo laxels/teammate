@@ -6,6 +6,8 @@ import type {
   SteerServerMessage,
   UserMessagePayload,
 } from "../../shared/protocol";
+import { BrowserSession } from "./browser/executor";
+import { createBrowserMcpServer } from "./browser/mcp";
 import { ComputerExecutor } from "./computer/executor";
 import { createComputerUseMcpServer } from "./computer/mcp";
 import type { GatewayConfig } from "./config";
@@ -40,6 +42,8 @@ export type GatewayServerOptions = {
   now?: () => number;
   /** Override the listen port (tests use 0). Defaults to config.port. */
   port?: number;
+  /** Inject the Playwright browser session (index.ts owns its shutdown). */
+  browserSession?: BrowserSession;
   vncHost?: string;
   vncPort?: number;
   webDistDir?: string;
@@ -116,11 +120,17 @@ export function createGatewayServer(
     options.fetchFn ?? fetch,
   );
 
+  // One browser for the gateway's lifetime, shared across tasks like the rest
+  // of the desktop: Chrome launches lazily on first use and stays open, with
+  // logins persisting in its profile. (Construction never launches anything.)
+  const browserSession = options.browserSession ?? new BrowserSession();
+
   const session = new SessionManager({
     emitEvent,
     uploadTranscript,
     createMcpServers: () => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
+      browser: createBrowserMcpServer(browserSession),
     }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),

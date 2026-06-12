@@ -9,7 +9,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 | Component | Dir | Runs on | Role |
 |---|---|---|---|
 | Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Fable 5 tool loop, staleness cron |
-| Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
+| Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`) and Playwright browser MCP tools (`gateway/src/browser/`: aria snapshots + ref-targeted actions in a gateway-owned headed Chrome — see "Browser automation" below), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
 | Shared contracts | `shared/` | imported by all three | Wire types (`shared/protocol.ts`) |
@@ -80,6 +80,33 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    from either surface appear in the page's transcript.
 9. A Convex cron flags tasks with no events for >30 min and the orchestrator
    checks on them proactively.
+
+## Browser automation
+
+- Devbox sessions get two complementary browser paths: Playwright `browser_*`
+  MCP tools (`gateway/src/browser/`) for everything inside a web page, and the
+  pixel computer-use tools for native dialogs, browser UI outside the page,
+  and sites that defeat DOM automation.
+- The gateway owns one Chrome instance for its lifetime, launched lazily by
+  `playwright-core` over a stdio pipe (`launchPersistentContext`) — NOT
+  attached over CDP: playwright's bundled WebSocket client never completes its
+  HTTP upgrade under Bun, while the pipe transport works. A CDP port would
+  also require a non-default profile since Chrome 136 ignores
+  `--remote-debugging-port` on the default user-data-dir.
+- The window is headed on the devbox desktop (visible over VNC, reachable by
+  the pixel tools) and uses a persistent profile at
+  `~/.ultraclaude/chrome-profile`, so logins performed in it survive across
+  tasks and gateway restarts. This is a separate instance from the golden
+  image's default-profile Chrome; sites needing auth must be logged in once in
+  the automation profile.
+- Tools snapshot the page as an accessibility tree (`ariaSnapshot(mode:"ai")`)
+  and target elements by `[ref=eN]`; every action returns a fresh snapshot,
+  and `browser_batch` chains several actions in one round trip. No screenshots
+  needed for most steps — faster and far less error-prone than pixel clicks.
+- Crash recovery: on shutdown the gateway closes Chrome (3s cap); after a hard
+  kill, the next launch evicts an orphaned Chrome holding the profile's
+  ProcessSingleton lock and retries. If Chrome quits out from under the
+  gateway (VNC user, crash), the next tool call relaunches it.
 
 ## Conventions
 

@@ -12,6 +12,7 @@ import {
   resultError,
   resultSuccess,
   until,
+  userMessageText,
 } from "./helpers";
 
 function makeSession(
@@ -449,6 +450,70 @@ describe("SessionManager", () => {
     );
     await until(() => !session.status().running);
     expect(events.some((e) => e.type === "stopped")).toBe(false);
+  });
+
+  test("stall watchdog does not fail a finished-but-steerable idle session", async () => {
+    const clock = { t: 0 };
+    const { queryFn } = createEchoQueryFn();
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn,
+      now: () => clock.t,
+      watchdog: { initMs: 60_000, stallMs: 1_000, intervalMs: 5 },
+    });
+
+    session.start({ taskId: "task-1", prompt: "quick job" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    // A permanent devbox idles finished-but-steerable far past stallMs; the
+    // completed task must not be regressed to failed.
+    clock.t = 5_000;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(events.some((e) => e.type === "failed")).toBe(false);
+    expect(session.status().running).toBe(true);
+  });
+
+  test("a steer after a long finished idle gets a fresh stall budget", async () => {
+    const clock = { t: 0 };
+    const gate = Promise.withResolvers<void>();
+    let turns = 0;
+    const gatedSecondTurn: QueryFn = (params) => {
+      async function* generate(): AsyncGenerator<SDKMessage, void> {
+        for await (const message of params.prompt) {
+          turns += 1;
+          // The steered turn starts "thinking" without emitting anything yet.
+          if (turns === 2) await gate.promise;
+          yield resultSuccess(`done: ${userMessageText(message)}`);
+        }
+      }
+      return Object.assign(generate(), {
+        interrupt: async () => {},
+        setPermissionMode: async () => {},
+      });
+    };
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn: gatedSecondTurn,
+      now: () => clock.t,
+      watchdog: { initMs: 60_000, stallMs: 1_000, intervalMs: 5 },
+    });
+
+    session.start({ taskId: "task-1", prompt: "first" });
+    await until(() => events.some((e) => e.summary === "done: first"));
+
+    // Steer long after the previous turn's last message: the stall clock must
+    // restart at the steer, not measure from the stale timestamp.
+    clock.t = 5_000;
+    expect(session.pushUserMessage("follow-up")).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(events.some((e) => e.type === "failed")).toBe(false);
+
+    gate.resolve();
+    await until(() => events.some((e) => e.summary === "done: follow-up"));
+    expect(events.some((e) => e.type === "failed")).toBe(false);
   });
 
   test("watchdog stays quiet on a healthy session", async () => {
