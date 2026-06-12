@@ -1,3 +1,4 @@
+import { BrowserSession } from "./browser/executor";
 import { startCommandConsumer } from "./commands";
 import { loadConfig } from "./config";
 import { createEventSender } from "./events";
@@ -14,7 +15,20 @@ if (
   );
 }
 
-const server = createGatewayServer({ config });
+const browserSession = new BrowserSession();
+const server = createGatewayServer({ config, browserSession });
+
+// Close Chrome cleanly on shutdown so the profile unlocks for the next boot;
+// cap the wait so a wedged browser can't hang gateway restarts. (After a hard
+// kill, BrowserSession's launch recovery evicts the orphan instead.)
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    void Promise.race([
+      browserSession.close(),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]).finally(() => process.exit(0));
+  });
+}
 
 // Orchestrator commands arrive via the Convex queue (outbound subscription)
 // and are executed against this gateway's own HTTP surface, reusing the
