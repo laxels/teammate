@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { getSlackPermalink, postSlackMessage } from "./slackApi";
+import {
+  addSlackReaction,
+  getSlackPermalink,
+  postSlackMessage,
+  updateSlackMessage,
+} from "./slackApi";
 
 const args = {
   botToken: "xoxb-test",
@@ -31,8 +36,8 @@ function fetchSequence(responses: CannedResponse[]): {
   };
 }
 
-function ok(): Response {
-  return Response.json({ ok: true });
+function ok(ts = "1749500001.000200"): Response {
+  return Response.json({ ok: true, ts });
 }
 
 function slackError(error: string): Response {
@@ -57,10 +62,11 @@ function sleepRecorder(): {
 }
 
 describe("postSlackMessage retries", () => {
-  test("succeeds first try without sleeping", async () => {
-    const seq = fetchSequence([ok()]);
+  test("succeeds first try, returns the posted message ts", async () => {
+    const seq = fetchSequence([ok("1749500009.000900")]);
     const { sleeps, sleep } = sleepRecorder();
-    await postSlackMessage(args, { fetchFn: seq.fetchFn, sleep });
+    const ts = await postSlackMessage(args, { fetchFn: seq.fetchFn, sleep });
+    expect(ts).toBe("1749500009.000900");
     expect(seq.calls).toBe(1);
     expect(sleeps).toEqual([]);
   });
@@ -155,5 +161,66 @@ describe("getSlackPermalink", () => {
     expect(
       await getSlackPermalink(linkArgs, { fetchFn: transport.fetchFn }),
     ).toBeNull();
+  });
+});
+
+describe("updateSlackMessage", () => {
+  const updateArgs = {
+    botToken: "xoxb-test",
+    channel: "D0DM",
+    ts: "1749500001.000200",
+    text: "updated card",
+  };
+
+  test("calls chat.update and retries transient failures", async () => {
+    const seq = fetchSequence([http(429, { "retry-after": "1" }), ok()]);
+    const { sleep } = sleepRecorder();
+    await updateSlackMessage(updateArgs, { fetchFn: seq.fetchFn, sleep });
+    expect(seq.calls).toBe(2);
+  });
+
+  test("permanent errors throw immediately", async () => {
+    const seq = fetchSequence([slackError("message_not_found")]);
+    const { sleep } = sleepRecorder();
+    await expect(
+      updateSlackMessage(updateArgs, { fetchFn: seq.fetchFn, sleep }),
+    ).rejects.toThrow("message_not_found");
+    expect(seq.calls).toBe(1);
+  });
+});
+
+describe("addSlackReaction", () => {
+  const reactionArgs = {
+    botToken: "xoxb-test",
+    channel: "D0DM",
+    messageTs: "1749500000.000100",
+    name: "white_check_mark",
+  };
+
+  test("returns true on success", async () => {
+    const seq = fetchSequence([ok()]);
+    expect(await addSlackReaction(reactionArgs, { fetchFn: seq.fetchFn })).toBe(
+      true,
+    );
+  });
+
+  test("best-effort: missing scope or transport errors return false", async () => {
+    const { sleep } = sleepRecorder();
+    const noScope = fetchSequence([slackError("missing_scope")]);
+    expect(
+      await addSlackReaction(reactionArgs, { fetchFn: noScope.fetchFn, sleep }),
+    ).toBe(false);
+    const transport = fetchSequence([
+      new Error("ECONNRESET"),
+      new Error("ECONNRESET"),
+      new Error("ECONNRESET"),
+      new Error("ECONNRESET"),
+    ]);
+    expect(
+      await addSlackReaction(reactionArgs, {
+        fetchFn: transport.fetchFn,
+        sleep,
+      }),
+    ).toBe(false);
   });
 });

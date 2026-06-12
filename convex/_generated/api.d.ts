@@ -20,6 +20,7 @@ import type * as orchestrator from "../orchestrator.js";
 import type * as slack from "../slack.js";
 import type * as staleness from "../staleness.js";
 import type * as tasks from "../tasks.js";
+import type * as transcripts from "../transcripts.js";
 
 import type {
   ApiFromModules,
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   slack: typeof slack;
   staleness: typeof staleness;
   tasks: typeof tasks;
+  transcripts: typeof transcripts;
 }>;
 
 /**

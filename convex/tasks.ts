@@ -190,6 +190,61 @@ export const cancelQueued = internalMutation({
   },
 });
 
+/**
+ * Records the task's status-card message. Set-if-absent: concurrent lifecycle
+ * notifications can race to post the first card; the first writer wins and
+ * later updates all edit that one. A legacy task with no home thread adopts
+ * the card as its thread anchor, so subsequent updates (and user replies)
+ * finally thread.
+ */
+export const setSlackCard = internalMutation({
+  args: { taskId: v.string(), cardTs: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (task === null) {
+      return null;
+    }
+    if (task.slackCardTs !== undefined) {
+      // Lost the first-event race: report the winner's canonical anchors so
+      // the caller can delete its stray post and thread under the winner.
+      return {
+        won: false,
+        cardTs: task.slackCardTs,
+        threadTs: task.slackThreadTs ?? task.slackCardTs,
+      };
+    }
+    await ctx.db.patch(task._id, {
+      slackCardTs: args.cardTs,
+      ...(task.slackThreadTs === undefined
+        ? { slackThreadTs: args.cardTs }
+        : {}),
+    });
+    return {
+      won: true,
+      cardTs: args.cardTs,
+      threadTs: task.slackThreadTs ?? args.cardTs,
+    };
+  },
+});
+
+/** A status-card edit hit message_not_found (card deleted by a human): clear
+ * the pointer so the next lifecycle event re-creates the card. */
+export const clearSlackCard = internalMutation({
+  args: { taskId: v.string(), cardTs: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (task !== null && task.slackCardTs === args.cardTs) {
+      await ctx.db.patch(task._id, { slackCardTs: undefined });
+    }
+  },
+});
+
 export const markNudged = internalMutation({
   args: { taskId: v.string(), nudgedAt: v.number() },
   handler: async (ctx, args) => {

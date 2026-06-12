@@ -33,6 +33,7 @@ oauth_config:
       - channels:history # read thread context around mentions (public)
       - groups:history # same for private channels the bot is added to
       - mpim:history # same for group DMs
+      - reactions:write # glanceable status reactions on request messages
       - users:read # resolve user IDs to names
       - files:write # attach files (logs, screenshots) to updates
       - files:read # read files users share with the bot
@@ -42,6 +43,11 @@ settings:
     bot_events:
       - app_mention
       - message.im
+      # Un-mentioned replies inside channel threads: needed so replies in a
+      # task's thread steer it without an @mention. The orchestrator drops
+      # any that don't land in one of our task threads.
+      - message.channels
+      - message.groups
   interactivity:
     is_enabled: false
   org_deploy_enabled: false

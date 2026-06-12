@@ -157,8 +157,13 @@ export const taskDetail = query({
               q.eq("devboxId", task.devboxId as string),
             )
             .unique();
+    const transcriptRow = await ctx.db
+      .query("transcripts")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
     return {
       task: { ...publicTask(task), prompt: task.prompt },
+      hasTranscript: transcriptRow !== null,
       events: events.reverse().map((e) => ({
         type: e.type,
         summary: e.summary,
@@ -169,6 +174,22 @@ export const taskDetail = query({
       monitoringUrl: devbox === null ? null : monitoringUrl(devbox.gatewayUrl),
       devboxStatus: devbox?.status ?? null,
     };
+  },
+});
+
+/** The persisted transcript JSON for a finished task, or null. Loaded only
+ * when the operator expands it (the payload can approach 1 MB). */
+export const transcript = query({
+  args: { secret: v.string(), taskId: v.string() },
+  handler: async (ctx, args) => {
+    if (!secretOk(args.secret)) {
+      return null;
+    }
+    const row = await ctx.db
+      .query("transcripts")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    return row === null ? null : { json: row.json, uploadedAt: row.uploadedAt };
   },
 });
 

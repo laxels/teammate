@@ -5,6 +5,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { type QueryFn, SessionManager } from "../src/session";
 import {
+  askUserQuestionMessage,
   assistantMessage,
   createEchoQueryFn,
   createEventRecorder,
@@ -34,6 +35,21 @@ function makeSession(
 }
 
 describe("SessionManager", () => {
+  test("AskUserQuestion emits needs_input with the question, bypassing the progress throttle", async () => {
+    const { queryFn } = createEchoQueryFn((text) => [
+      assistantMessage(`working on: ${text}`),
+      askUserQuestionMessage("Should I use staging or prod?"),
+      resultSuccess(`done: ${text}`),
+    ]);
+    const { session, events } = makeSession(queryFn);
+    session.start({ taskId: "task-1", prompt: "deploy" });
+    await until(() => events.some((e) => e.type === "completed"));
+    const needsInput = events.find((e) => e.type === "needs_input");
+    expect(needsInput?.summary).toBe("Should I use staging or prod?");
+    // The progress event from the same turn still flowed (throttle untouched).
+    expect(events.some((e) => e.type === "progress")).toBe(true);
+  });
+
   test("start feeds the prompt through streaming input and reports lifecycle events", async () => {
     const { queryFn, control } = createEchoQueryFn();
     const { session, events, broadcasts } = makeSession(queryFn);
@@ -272,6 +288,94 @@ describe("SessionManager", () => {
     await until(() => !session.status().running);
     session.start({ taskId: "task-2", prompt: "second" });
     expect(factoryCalls).toBe(2);
+  });
+
+  test("a steered reply answers a pending AskUserQuestion instead of starting a turn", async () => {
+    const { queryFn, control } = createEchoQueryFn();
+    const { session, events } = makeSession(queryFn);
+    session.start({ taskId: "task-1", prompt: "work" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    const canUseTool = control.calls[0]?.options?.canUseTool;
+    if (canUseTool === undefined) throw new Error("canUseTool not wired");
+    const input = { questions: [{ question: "Which env?" }] };
+    const pending = canUseTool("AskUserQuestion", input, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_test",
+    });
+
+    const eventsBefore = events.length;
+    expect(session.pushUserMessage("use staging")).toBe(true);
+    expect(await pending).toEqual({
+      behavior: "allow",
+      updatedInput: {
+        questions: [{ question: "Which env?" }],
+        response: "use staging",
+      },
+    });
+    // The answer fed the tool call — it must not have queued a new turn.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(events.length).toBe(eventsBefore);
+  });
+
+  test("canUseTool passes every other tool straight through", async () => {
+    const { queryFn, control } = createEchoQueryFn();
+    const { session, events } = makeSession(queryFn);
+    session.start({ taskId: "task-1", prompt: "work" });
+    await until(() => events.some((e) => e.type === "completed"));
+    const canUseTool = control.calls[0]?.options?.canUseTool;
+    if (canUseTool === undefined) throw new Error("canUseTool not wired");
+    expect(
+      await canUseTool(
+        "Bash",
+        { command: "ls" },
+        { signal: new AbortController().signal, toolUseID: "toolu_test" },
+      ),
+    ).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+  });
+
+  test("stall watchdog treats a session blocked on AskUserQuestion as healthy", async () => {
+    const clock = { t: 0 };
+    const gate = Promise.withResolvers<void>();
+    let captured: Parameters<QueryFn>[0] | null = null;
+    const oneMessageThenSilence: QueryFn = (params) => {
+      captured = params;
+      async function* generate(): AsyncGenerator<SDKMessage, void> {
+        yield assistantMessage("starting");
+        await gate.promise; // mid-task silence (waiting on the human)
+      }
+      return Object.assign(generate(), {
+        interrupt: async () => {},
+        setPermissionMode: async () => {},
+      });
+    };
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn: oneMessageThenSilence,
+      now: () => clock.t,
+      watchdog: { initMs: 60_000, stallMs: 1_000, intervalMs: 5 },
+    });
+    session.start({ taskId: "task-1", prompt: "ask me things" });
+    await until(() => events.some((e) => e.type === "started"));
+
+    // Block on a question, then push the clock far past stallMs.
+    const canUseTool = (captured as Parameters<QueryFn>[0] | null)?.options
+      ?.canUseTool;
+    if (canUseTool === undefined) throw new Error("canUseTool not wired");
+    const pending = canUseTool(
+      "AskUserQuestion",
+      { questions: [{ question: "Proceed?" }] },
+      { signal: new AbortController().signal, toolUseID: "toolu_test" },
+    );
+    clock.t = 10_000;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(events.some((e) => e.type === "failed")).toBe(false);
+
+    // The answer unblocks; after that the stall clock applies again.
+    session.pushUserMessage("yes");
+    await pending;
+    gate.resolve();
   });
 
   test("init watchdog fails a session with no SDK messages and recycles it", async () => {

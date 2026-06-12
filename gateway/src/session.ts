@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import {
   type McpServerConfig,
   type Options,
+  type PermissionResult,
   type SDKMessage,
   type SDKUserMessage,
   type PermissionMode as SdkPermissionMode,
@@ -10,7 +11,12 @@ import {
 import type { PermissionMode, StartTaskRequest } from "../../shared/protocol";
 import type { EventSender } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
-import { excerpt, extractAssistantText, mapResultMessage } from "./summary";
+import {
+  excerpt,
+  extractAskUserQuestion,
+  extractAssistantText,
+  mapResultMessage,
+} from "./summary";
 import { createThrottler, type Throttler } from "./throttle";
 
 /**
@@ -40,11 +46,17 @@ export type SessionManagerDeps = {
   now?: () => number;
   progressIntervalMs?: number;
   historyCapacity?: number;
+  /** Persists the task's transcript when it reaches a terminal status, so
+   * the session record outlives the ephemeral VM. Best-effort. */
+  uploadTranscript?: (taskId: string, messages: unknown[]) => Promise<void>;
   /** Hang detection thresholds (tests tighten these). */
   watchdog?: { initMs?: number; stallMs?: number; intervalMs?: number };
 };
 
 export const HISTORY_CAPACITY = 500;
+/** How long an AskUserQuestion waits for a human answer before the session
+ * is told to proceed on its own judgment. */
+const ANSWER_TIMEOUT_MS = 30 * 60_000;
 export const PROGRESS_INTERVAL_MS = 30_000;
 
 // Watchdog defaults: the SDK emits its init message within seconds of spawn
@@ -128,6 +140,10 @@ export class SessionManager {
   #createMcpServers: (() => Record<string, McpServerConfig>) | null;
   #progressIntervalMs: number;
   #history: RingBuffer<SDKMessage>;
+  #historyCapacity: number = HISTORY_CAPACITY;
+  #uploadTranscript:
+    | ((taskId: string, messages: unknown[]) => Promise<void>)
+    | null = null;
 
   #running = false;
   #taskId: string | null = null;
@@ -137,6 +153,12 @@ export class SessionManager {
   /** True once the current task reported a terminal status (the session may
    * outlive it as finished-but-steerable; see terminalEmitted()). */
   #terminalEmitted = false;
+  /** A blocked AskUserQuestion awaiting a human answer (canUseTool). */
+  #pendingQuestion: {
+    input: Record<string, unknown>;
+    resolve: (result: PermissionResult) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   #queue: AsyncQueue<SDKUserMessage> | null = null;
   #query: AgentQuery | null = null;
   #throttle: Throttler;
@@ -156,9 +178,9 @@ export class SessionManager {
     this.#queryFn = deps.queryFn ?? (sdkQuery as QueryFn);
     this.#createMcpServers = deps.createMcpServers ?? null;
     this.#progressIntervalMs = deps.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
-    this.#history = createRingBuffer<SDKMessage>(
-      deps.historyCapacity ?? HISTORY_CAPACITY,
-    );
+    this.#historyCapacity = deps.historyCapacity ?? HISTORY_CAPACITY;
+    this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
+    this.#uploadTranscript = deps.uploadTranscript ?? null;
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
     this.#watchdogConfig = {
       initMs: deps.watchdog?.initMs ?? INIT_WATCHDOG_MS,
@@ -195,6 +217,9 @@ export class SessionManager {
     this.#interrupted = false;
     this.#turnInFlight = true;
     this.#terminalEmitted = false;
+    // Per-task transcript: a fresh buffer means history replay (and the
+    // persisted transcript) never carries a previous task's tail.
+    this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
 
     const queue = createAsyncQueue<SDKUserMessage>();
@@ -205,6 +230,16 @@ export class SessionManager {
       model: MODEL,
       effort: EFFORT,
       permissionMode: "bypassPermissions",
+      // AskUserQuestion is the one tool bypassPermissions can't auto-allow
+      // (requiresUserInteraction): without this callback the CLI fails the
+      // call instantly and the "answer by replying in the thread" flow is
+      // dead. Everything else passes straight through.
+      canUseTool: async (toolName, input) => {
+        if (toolName !== "AskUserQuestion") {
+          return { behavior: "allow", updatedInput: input };
+        }
+        return await this.#awaitAnswer(input);
+      },
       allowDangerouslySkipPermissions: true,
       cwd: request.cwd ?? homedir(),
       // Subprocess stderr into the gateway log: hung sessions must leave
@@ -243,6 +278,9 @@ export class SessionManager {
    * reported a terminal status that a late "failed" would regress. */
   #checkWatchdog(taskId: string): void {
     if (!this.#running || !this.#turnInFlight) return;
+    // A session blocked on AskUserQuestion is waiting for a human, not hung
+    // (the turn IS in flight while canUseTool blocks).
+    if (this.#pendingQuestion !== null) return;
     const now = this.#deps.now();
     const sinceStart = now - this.#sessionStartedAt;
     const sinceLast =
@@ -268,6 +306,7 @@ export class SessionManager {
     this.#turnInFlight = false;
     this.#terminalEmitted = true;
     this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
+    this.#sendTranscript(taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
     // interrupt, leaving #run blocked forever — which would wedge a permanent
@@ -284,9 +323,51 @@ export class SessionManager {
     hardExit.unref?.();
   }
 
-  /** Push a follow-up user message into the live session. */
+  /** Blocks an AskUserQuestion until a steered user message answers it (or
+   * the timeout tells the session to use its own judgment). The watchdog
+   * treats a pending question as healthy — waiting on a human is not a hang. */
+  #awaitAnswer(input: Record<string, unknown>): Promise<PermissionResult> {
+    return new Promise<PermissionResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#resolvePendingQuestion({
+          behavior: "deny",
+          message:
+            "No answer arrived within 30 minutes — proceed with your best judgment, or finish up and report what you'd need.",
+        });
+      }, ANSWER_TIMEOUT_MS);
+      timer.unref?.();
+      this.#pendingQuestion = {
+        input,
+        timer,
+        resolve: (result) => {
+          resolve(result);
+        },
+      };
+    });
+  }
+
+  #resolvePendingQuestion(result: PermissionResult): boolean {
+    const pending = this.#pendingQuestion;
+    if (pending === null) return false;
+    this.#pendingQuestion = null;
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+    return true;
+  }
+
+  /** Push a follow-up user message into the live session. A pending
+   * AskUserQuestion consumes the message as its answer instead of starting a
+   * new turn. */
   pushUserMessage(text: string): boolean {
     if (!this.#running || this.#queue === null) return false;
+    if (this.#pendingQuestion !== null) {
+      // Preserve the tool's original input (its schema requires `questions`)
+      // and attach the human's freeform answer.
+      return this.#resolvePendingQuestion({
+        behavior: "allow",
+        updatedInput: { ...this.#pendingQuestion.input, response: text },
+      });
+    }
     this.#turnInFlight = true;
     // Restart the stall clock: the previous turn may have finished long ago,
     // and the new turn earns a fresh stallMs budget. Leave a null untouched
@@ -312,6 +393,10 @@ export class SessionManager {
       return false;
     }
     this.#interrupted = true;
+    this.#resolvePendingQuestion({
+      behavior: "deny",
+      message: "The session is being stopped.",
+    });
     try {
       await this.#query.interrupt();
     } catch (error) {
@@ -344,6 +429,7 @@ export class SessionManager {
           ),
           taskId,
         );
+        this.#sendTranscript(taskId);
       }
     } finally {
       // Only report "stopped" when the interrupt actually cut a turn short;
@@ -351,6 +437,7 @@ export class SessionManager {
       // the task's terminal status.
       if (this.#interrupted && this.#turnInFlight) {
         this.#emit("stopped", "Stopped by interrupt.", taskId);
+        this.#sendTranscript(taskId);
       }
       if (this.#watchdogTimer !== null) {
         clearInterval(this.#watchdogTimer);
@@ -364,10 +451,24 @@ export class SessionManager {
     }
   }
 
+  /** Persist the current transcript snapshot (latest write wins server-side,
+   * so a steered follow-up turn after completion refreshes the record). */
+  #sendTranscript(taskId: string | null = this.#taskId): void {
+    if (this.#uploadTranscript === null || taskId === null) return;
+    void this.#uploadTranscript(taskId, this.#history.snapshot());
+  }
+
   #handleLifecycle(message: SDKMessage): void {
     if (message.type === "assistant") {
       // Skip subagent chatter; progress summaries come from the main thread.
       if (message.parent_tool_use_id !== null) return;
+      // AskUserQuestion = the session is blocked on a human answer. Bypasses
+      // the progress throttle: this is exactly the event the user must see.
+      const question = extractAskUserQuestion(message);
+      if (question !== null && !this.#interrupted) {
+        this.#emit("needs_input", excerpt(question));
+        return;
+      }
       const text = extractAssistantText(message);
       if (text !== null && !this.#interrupted && this.#throttle.tryAcquire()) {
         this.#emit("progress", excerpt(text));
@@ -380,6 +481,7 @@ export class SessionManager {
       this.#terminalEmitted = true;
       const terminal = mapResultMessage(message);
       this.#emit(terminal.type, terminal.summary);
+      this.#sendTranscript();
     }
   }
 

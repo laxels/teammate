@@ -56,16 +56,29 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 4. Orchestrator turns events into Slack updates posted to the task's thread,
    with the monitoring link `https://<devbox-tailnet-host>/` (Tailscale
    Serve).
-5. Replies in a task's thread reach the orchestrator with that task injected
+5. Each task gets a **status card**: the bot's first lifecycle message in the
+   thread, chat.update'd in place on every event (status, latest summary,
+   duration, monitoring link). Detail events that deserve a notification ping
+   (needs_input/terminal) still arrive as fresh thread replies; progress only
+   refreshes the card. Status reactions (👀/✅/❌/🛑) land on the request
+   message. Legacy threadless tasks adopt their card as the thread anchor.
+6. Replies in a task's thread reach the orchestrator with that task injected
    as context: `steer_task` relays guidance into the live session via a
    `user_message` command (gateway `POST /message`, taskId-guarded so stale
    commands never reach a later task's session); `stop_task` interrupts,
    refusing terminal tasks and devboxes that moved on to other work.
-6. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
+7. Un-mentioned replies inside a channel task-thread also reach the
+   orchestrator (message.channels/message.groups subscriptions); replies in
+   threads that aren't ours are dropped pre-LLM, and the model answers
+   NO_REPLY to bystander chatter. The gateway emits `needs_input` when the
+   session calls AskUserQuestion, and uploads the session transcript to
+   Convex (`/devbox/transcript`, `transcripts` table) at terminal status so
+   the record outlives the VM (browsable from the dashboard).
+8. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
    steering sidebar (`/ws/steer` → Agent SDK streaming input / `interrupt()`)
    — the same `pushUserMessage` primitive Slack thread replies use, so steers
    from either surface appear in the page's transcript.
-7. A Convex cron flags tasks with no events for >30 min and the orchestrator
+9. A Convex cron flags tasks with no events for >30 min and the orchestrator
    checks on them proactively.
 
 ## Browser automation
@@ -96,6 +109,13 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   gateway (VNC user, crash), the next tool call relaunches it.
 
 ## Conventions
+
+- **UI branding invariant**: every ultraclaude UI surface (fleet dashboard,
+  monitoring page, anything future) matches Anthropic's styling/theme/branding
+  as closely as possible without claiming to be official — warm ivory paper,
+  terracotta accent, serif display type (canonical tokens in
+  dashboard/src/styles.css and web/src/styles.css). Never introduce a
+  divergent theme.
 
 - Secrets: local `.env` (never committed); Convex env vars for the deployment;
   `DEVBOX_SHARED_SECRET` authenticates gateway→Convex posts.

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildDevboxEventMessage,
   buildOrchestratorUserMessage,
+  buildStatusCard,
   classifySlackEvent,
   monitoringUrl,
   parseDevboxEvent,
@@ -63,6 +64,7 @@ describe("classifySlackEvent", () => {
       ts: "1749500000.000100",
       threadTs: undefined,
       fileCount: 0,
+      channelThreadReply: false,
     });
   });
 
@@ -195,6 +197,39 @@ describe("classifySlackEvent", () => {
     expect(result.kind).toBe("ignore");
   });
 
+  test("accepts an un-mentioned reply inside a channel thread, flagged", () => {
+    const result = classifySlackEvent(
+      envelope({
+        type: "message",
+        channel: "C0GENERAL",
+        user: "U0HUMAN",
+        text: "actually, use the staging database",
+        ts: "1749500007.000800",
+        thread_ts: "1749400000.000001",
+        channel_type: "channel",
+      }),
+    );
+    expect(result.kind).toBe("trigger");
+    if (result.kind !== "trigger") throw new Error("unreachable");
+    expect(result.trigger.channelThreadReply).toBe(true);
+    expect(result.trigger.threadTs).toBe("1749400000.000001");
+  });
+
+  test("a mentioned channel-thread reply defers to app_mention (no double-processing)", () => {
+    const result = classifySlackEvent(
+      envelope({
+        type: "message",
+        channel: "C0GENERAL",
+        user: "U0HUMAN",
+        text: `<@${BOT_USER_ID}> status?`,
+        ts: "1749500008.000900",
+        thread_ts: "1749400000.000001",
+        channel_type: "channel",
+      }),
+    );
+    expect(result.kind).toBe("ignore");
+  });
+
   test("ignores non-DM plain messages (channel chatter without a mention)", () => {
     const result = classifySlackEvent(
       envelope({
@@ -258,6 +293,7 @@ describe("resolveThreadTarget", () => {
     user: "U0HUMAN",
     text: "hi",
     ts: "1749500000.000100",
+    channelThreadReply: false,
   };
 
   test("DM: replies in a thread anchored at the triggering message", () => {
@@ -319,6 +355,7 @@ describe("buildOrchestratorUserMessage", () => {
     ts: "1749500010.000100",
     threadTs: "1749400000.000001",
     fileCount: 0,
+    channelThreadReply: false,
   };
 
   test("carries the source, user, and text", () => {
@@ -626,6 +663,51 @@ describe("shouldNudge", () => {
         lastNudgedAtMs: now - 31 * MIN,
       }),
     ).toBe(true);
+  });
+});
+
+describe("buildStatusCard", () => {
+  const base = {
+    taskId: "task-123",
+    title: "Fix login bug",
+    summary: "Cloned the repo.",
+    monitorUrl: "https://devbox-1.tail1234.ts.net/",
+    replyHint: "dm" as const,
+  };
+
+  test("running card carries status, latest summary, monitor link, steer hint", () => {
+    const card = buildStatusCard({ ...base, status: "running" });
+    expect(card).toContain("Fix login bug");
+    expect(card).toContain("running");
+    expect(card).toContain("Cloned the repo.");
+    expect(card).toContain("https://devbox-1.tail1234.ts.net/");
+    expect(card.toLowerCase()).toContain("reply in this thread");
+  });
+
+  test("terminal card shows the run duration and drops live affordances", () => {
+    const card = buildStatusCard({
+      ...base,
+      status: "completed",
+      startedAt: 1_750_000_000_000,
+      finishedAt: 1_750_000_242_000,
+    });
+    expect(card).toContain("Ran 4m 02s");
+    expect(card).not.toContain("Monitor & steer");
+    expect(card.toLowerCase()).not.toContain("reply in this thread to steer");
+  });
+
+  test("channel tasks are told to mention the bot", () => {
+    const card = buildStatusCard({
+      ...base,
+      status: "running",
+      replyHint: "channel",
+    });
+    expect(card).toContain("(mention me)");
+  });
+
+  test("needs_input renders without underscore", () => {
+    const card = buildStatusCard({ ...base, status: "needs_input" });
+    expect(card).toContain("needs input");
   });
 });
 

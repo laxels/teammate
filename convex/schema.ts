@@ -59,6 +59,9 @@ export default defineSchema({
     slackUser: v.optional(v.string()),
     // Deep link to the task's Slack thread (chat.getPermalink at creation).
     slackPermalink: v.optional(v.string()),
+    // ts of the task's status card (the bot's first lifecycle message,
+    // chat.update'd in place on every later event).
+    slackCardTs: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
     // First applied "started" event / first applied terminal event. updatedAt
@@ -167,6 +170,17 @@ export default defineSchema({
   })
     .index("by_devbox_status", ["devboxId", "status"])
     .index("by_command_id", ["commandId"]),
+
+  // Terminal-task transcripts posted by gateways to /devbox/transcript: the
+  // session's SDK messages, so the record outlives the ephemeral VM. One row
+  // per task (latest upload wins); JSON-serialized, capped under the ~1 MB
+  // document limit by the gateway (MAX_TRANSCRIPT_BYTES).
+  transcripts: defineTable({
+    taskId: v.string(),
+    devboxId: v.string(),
+    json: v.string(),
+    uploadedAt: v.number(),
+  }).index("by_task_id", ["taskId"]),
 
   // Lifecycle events posted by devbox gateways to /devbox/events, plus
   // orchestrator-recorded events for tasks that never reached a devbox
