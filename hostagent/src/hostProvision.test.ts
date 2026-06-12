@@ -124,6 +124,29 @@ describe("host provisioner", () => {
     expect(failed?.summary).toContain("after 30 min");
   });
 
+  test("a failure summary leads with the first ERROR line even when a traceback floods the tail", async () => {
+    const h = createHarness();
+    h.provisioner.start("ultraclaude-host-2");
+    await until(() => h.runs.length === 1);
+
+    const realError =
+      "ERROR: Scaleway API POST /apple-silicon/v1alpha1/zones/fr-par-1/servers -> HTTP 403: quota exceeded";
+    h.emitLine(realError);
+    // A json.load-on-empty-stdin traceback is longer than the tail window.
+    h.emitLine("Traceback (most recent call last):");
+    for (let frame = 0; frame < 8; frame++) {
+      h.emitLine(`  File "json/decoder.py", line ${frame}, in <module>`);
+    }
+    h.emitLine(
+      "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+    );
+    h.finish(1);
+    await until(() => h.provisioner.inFlight() === null);
+
+    const failed = h.events.find((e) => e.type === "provision_failed");
+    expect(failed?.summary).toStartWith(`Bootstrap exited 1: ${realError}`);
+  });
+
   test("serializes: a second start while one is in flight is dropped", async () => {
     const h = createHarness();
     expect(h.provisioner.start("ultraclaude-host-2")).toBe(true);
