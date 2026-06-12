@@ -21,10 +21,10 @@ const MAX_TOOL_ITERATIONS = 12;
 
 const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
 
-Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, plus Google Chrome with the Claude in Chrome extension signed in. Tasks can control the browser (set use_chrome) — web apps, sites without APIs, web games, anything a person could do at a Mac. Never claim you cannot use a browser: you personally cannot, but your devboxes can, so delegate.
+Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, plus complete GUI control of the desktop (screenshots, mouse, keyboard) via built-in computer-use tools. Every task can drive the browser and native apps — web apps, sites without APIs, web games, anything a person could do at a Mac — with no special flag. Never claim you cannot use a browser or a GUI: you personally cannot, but your devboxes can, so delegate.
 
 You receive Slack messages (DMs and @mentions). Either answer directly or use your tools:
-- start_task delegates work to a Claude Code instance on a devbox: a warm devbox when one is free, otherwise a fresh devbox VM is provisioned automatically (takes ~1-2 min before work starts). Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. Set use_chrome: true when the task needs the browser. If there is no capacity at all, say so plainly and relay the tool's suggestions.
+- start_task delegates work to a Claude Code instance on a devbox: a warm devbox when one is free, otherwise a fresh devbox VM is provisioned automatically (takes ~1-2 min before work starts). Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. When the task involves the browser or another GUI app, say so in the prompt — the devbox decides on its own when to use its computer-use tools. If there is no capacity at all, say so plainly and relay the tool's suggestions.
 - get_task / list_tasks answer questions about ongoing work.
 - stop_task interrupts a running task.
 - Steering a running task does NOT go through you: mid-task guidance happens on the task's monitoring page (linked in its status updates). Point users there.
@@ -67,11 +67,6 @@ const TOOLS: Anthropic.Tool[] = [
           type: "string",
           description:
             "Complete, self-contained task spec handed to Claude Code: context, constraints, and definition of done.",
-        },
-        use_chrome: {
-          type: "boolean",
-          description:
-            "Set true when the task needs to control the Chrome browser on the devbox (web apps, sites without APIs, web games). The browser is signed in via the Claude in Chrome extension.",
         },
       },
       required: ["title", "prompt"],
@@ -173,11 +168,7 @@ async function executeTool(
       // subscription. The gateway's "started" event confirms pickup, and the
       // staleness cron catches a devbox that died (or never booted) after
       // assignment.
-      const request: StartTaskRequest = {
-        taskId,
-        prompt,
-        ...(input.use_chrome === true ? { chrome: true } : {}),
-      };
+      const request: StartTaskRequest = { taskId, prompt };
       await ctx.runMutation(internal.commands.enqueue, {
         devboxId: allocated.devboxId,
         kind: "start",

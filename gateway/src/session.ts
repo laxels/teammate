@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import {
+  type McpServerConfig,
   type Options,
   type SDKMessage,
   type SDKUserMessage,
@@ -33,6 +34,8 @@ export type SessionManagerDeps = {
   /** Called for every SDK message (broadcast to steer clients). */
   onMessage?: (message: SDKMessage) => void;
   onStatusChange?: (status: SessionStatus) => void;
+  /** Built fresh per task so in-process MCP servers carry no session state. */
+  createMcpServers?: () => Record<string, McpServerConfig>;
   queryFn?: QueryFn;
   now?: () => number;
   progressIntervalMs?: number;
@@ -109,6 +112,7 @@ export class SessionManager {
   #deps: Required<Pick<SessionManagerDeps, "emitEvent" | "now">> &
     Pick<SessionManagerDeps, "onMessage" | "onStatusChange">;
   #queryFn: QueryFn;
+  #createMcpServers: (() => Record<string, McpServerConfig>) | null;
   #progressIntervalMs: number;
   #history: RingBuffer<SDKMessage>;
 
@@ -129,6 +133,7 @@ export class SessionManager {
       ...(deps.onStatusChange ? { onStatusChange: deps.onStatusChange } : {}),
     };
     this.#queryFn = deps.queryFn ?? (sdkQuery as QueryFn);
+    this.#createMcpServers = deps.createMcpServers ?? null;
     this.#progressIntervalMs = deps.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
     this.#history = createRingBuffer<SDKMessage>(
       deps.historyCapacity ?? HISTORY_CAPACITY,
@@ -164,9 +169,11 @@ export class SessionManager {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       cwd: request.cwd ?? homedir(),
-      // Browser tasks connect to the VM's logged-in Claude in Chrome
-      // extension (equivalent to `claude --chrome`).
-      ...(request.chrome === true ? { extraArgs: { chrome: null } } : {}),
+      // In-process MCP servers (desktop computer use) — every task gets GUI
+      // control; no per-task flag.
+      ...(this.#createMcpServers !== null
+        ? { mcpServers: this.#createMcpServers() }
+        : {}),
     };
     // Auth: CLAUDE_CODE_OAUTH_TOKEN is inherited from process.env (we do not
     // pass `options.env`, so the SDK subprocess inherits the full environment).

@@ -9,19 +9,26 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 | Component | Dir | Runs on | Role |
 |---|---|---|---|
 | Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Fable 5 tool loop, staleness cron |
-| Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK, exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
-| Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + Claude-in-Chrome-style steering sidebar + Stop Claude button |
+| Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
+| Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Shared contracts | `shared/` | imported by all three | Wire types (`shared/protocol.ts`) |
 
 ## Infrastructure
 
 - Host: Scaleway Mac mini M2-L (`ultraclaude-host-1`, tailnet 100.121.13.107),
   running Tart VMs (max 2 concurrent macOS VMs per Apple EULA).
-- Golden image: `golden-v1` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v1`) —
-  macOS Sequoia with Chrome + Claude in Chrome (logged in), Claude desktop
-  (logged in), Claude Code ≥2.1.172 pinned to `claude-fable-5` at `xhigh`
-  (`~/.claude/settings.json`), `switchModelsOnFlag: false`, subscription OAuth
-  token at `~/claude-oauth-token.txt`.
+- Golden image: `golden-v3` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v3`) —
+  macOS Sequoia with Chrome (logged in, default browser, Claude-in-Chrome
+  extension removed), Claude desktop (logged in), Claude Code pinned to
+  `claude-fable-5` at `xhigh` (`~/.claude/settings.json`, which also carries
+  `autoCompactWindow`, BASH timeout env, `cleanupPeriodDays`),
+  `switchModelsOnFlag: false`, subscription OAuth token at
+  `~/claude-oauth-token.txt`. Computer-use prerequisites baked in: `cliclick`
+  at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
+  (SIP is disabled in the guest; grants persist across clones), 1920x1080
+  display (1:1 points==pixels), `en-US` locale, never-sleep/no-screen-lock,
+  notifications under an always-on DND schedule, automatic macOS updates off,
+  keyboard autocorrect/smart-quotes off.
 - Provisioning (`scripts/provision-devbox.sh`) clones `golden-v2`: golden-v1
   plus the gateway and its LaunchAgent baked in.
 - Each devbox VM joins the tailnet with its own identity at provision time

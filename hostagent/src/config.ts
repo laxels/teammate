@@ -58,7 +58,7 @@ export function loadConfig(
     devboxSharedSecret,
     tailscaleAuthkey,
     tailnetSuffix,
-    goldenImage: env.GOLDEN_IMAGE || "golden-v2",
+    goldenImage: env.GOLDEN_IMAGE || "golden-v3",
     payloadDir: env.PAYLOAD_DIR || `${home}/ultraclaude-payload`,
     tartBin: env.TART_BIN || `${home}/tart.app/Contents/MacOS/tart`,
   };
