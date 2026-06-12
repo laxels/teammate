@@ -42,9 +42,15 @@ for HOST_SSH in "$@"; do
   # agent later rsyncs this directory verbatim into each VM's ~/ultraclaude/.
   # scripts/ rides along so fleet hosts can bootstrap new hosts; secrets do
   # NOT (the fleet env lives outside the payload — see ULTRACLAUDE_ENV).
+  # The full workspace-manifest skeleton rides along (root + every member
+  # listed in "workspaces"): provisioning runs `bun install --frozen-lockfile`
+  # inside each VM, and bun refuses to install when a listed member's
+  # package.json is missing.
   (cd "$REPO_ROOT" &&
     rsync -az --relative -e "ssh ${SSH_OPTS[*]}" gateway/src shared web/dist \
       scripts gateway/package.json bun.lock \
+      package.json bunfig.toml dashboard/package.json hostagent/package.json \
+      web/package.json \
       "$HOST_SSH:ultraclaude-payload/")
 
   log "[$HOST_SSH] Syncing host agent to ~/hostagent"
