@@ -7,7 +7,12 @@ export type HostAgentConfig = {
   /** The deployment's .convex.site URL (passed into each VM's gateway env). */
   convexSiteUrl: string;
   devboxSharedSecret: string;
-  /** Joins each freshly cloned VM to the tailnet under its devbox id. */
+  /**
+   * Joins each freshly cloned VM to the tailnet under its devbox id. Must be
+   * a REUSABLE+EPHEMERAL authkey: hostagents only enroll ephemeral VMs, and
+   * ephemeral nodes auto-purge from the tailnet when they go offline
+   * (non-ephemeral keys leak offline node entries on every crashed VM).
+   */
   tailscaleAuthkey: string;
   /** e.g. "tail4d21c4.ts.net" — used for the deterministic gateway hostname. */
   tailnetSuffix: string;

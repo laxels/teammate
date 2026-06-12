@@ -12,7 +12,9 @@
 # Usage: scripts/provision-host.sh <host-name>
 #
 # Requires in the repo-root .env: SCALEWAY_ACCESS_KEY_ID, SCALEWAY_SECRET_KEY,
-# GITHUB_PAT, TAILSCALE_AUTHKEY, DEVBOX_SHARED_SECRET. Never prints secrets.
+# GITHUB_PAT, TAILSCALE_AUTHKEY (non-ephemeral; joins the HOST itself),
+# TAILSCALE_EPHEMERAL_AUTHKEY (consumed by adopt-host.sh for the hostagent),
+# DEVBOX_SHARED_SECRET. Never prints secrets.
 # Idempotent where cheap: reuses an existing server with the same name and
 # skips already-completed bootstrap steps.
 
