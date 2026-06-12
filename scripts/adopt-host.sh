@@ -11,8 +11,8 @@
 # Usage: scripts/adopt-host.sh <host-ssh> <host-name>
 #        e.g. scripts/adopt-host.sh m1@100.121.13.107 ultraclaude-host-1
 #
-# Requires in the repo-root .env: TAILSCALE_AUTHKEY, DEVBOX_SHARED_SECRET.
-# Secret values are never printed.
+# Requires in the repo-root .env: TAILSCALE_EPHEMERAL_AUTHKEY,
+# DEVBOX_SHARED_SECRET. Secret values are never printed.
 
 set -euo pipefail
 
@@ -54,7 +54,12 @@ env_secret() { # <KEY> -> value from repo .env, never echoed
 
 # ---------------------------------------------------------------- preflight
 log "Preflight checks"
-TAILSCALE_AUTHKEY="$(env_secret TAILSCALE_AUTHKEY)"
+# The hostagent enrolls EPHEMERAL VMs, so its authkey must be the
+# reusable+ephemeral one (nodes auto-purge from the tailnet when they go
+# offline). The non-ephemeral TAILSCALE_AUTHKEY is only for permanent
+# enrollments: hosts (provision-host.sh) and permanent devboxes
+# (provision-devbox.sh) — never give it to a hostagent.
+TAILSCALE_EPHEMERAL_AUTHKEY="$(env_secret TAILSCALE_EPHEMERAL_AUTHKEY)"
 DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
 host true
 
@@ -74,7 +79,7 @@ HOST_ID=$HOST_NAME
 CONVEX_URL=$CONVEX_URL
 CONVEX_SITE_URL=$CONVEX_SITE_URL
 DEVBOX_SHARED_SECRET=$DEVBOX_SHARED_SECRET
-TAILSCALE_AUTHKEY=$TAILSCALE_AUTHKEY
+TAILSCALE_AUTHKEY=$TAILSCALE_EPHEMERAL_AUTHKEY
 TAILNET_SUFFIX=$TAILNET_SUFFIX
 EOF
 
