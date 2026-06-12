@@ -19,6 +19,7 @@ import {
   internalQuery,
   type MutationCtx,
   mutation,
+  type QueryCtx,
   query,
 } from "./_generated/server";
 import { enqueueCommandRow } from "./commands";
@@ -369,26 +370,34 @@ export type PlacementResult =
  * Places a task on an ephemeral devbox, or — when every slot is taken —
  * leaves it queued and (idempotently) kicks off a new-host bootstrap. The
  * scale-up is serialized: one new Mac at a time; queued bursts ride the same
- * bootstrap.
+ * bootstrap. Plain-function form so other mutations (dashboard retry) can
+ * place inside their own transaction.
  */
+export async function placeEphemeralTaskRow(
+  ctx: MutationCtx,
+  taskId: string,
+): Promise<PlacementResult> {
+  const task = await ctx.db
+    .query("tasks")
+    .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
+    .unique();
+  if (task === null) {
+    throw new Error(`placeEphemeralTask: no task ${taskId}`);
+  }
+  const slot = await allocateEphemeralSlot(ctx, taskId);
+  if (slot !== null) {
+    await dispatchTaskToSlot(ctx, task, slot);
+    return { placed: true, devboxId: slot.devboxId, hostId: slot.hostId };
+  }
+  const scaling = await requestHostProvisionRow(ctx);
+  const queued = await queuedEphemeralTasks(ctx);
+  return { placed: false, scaling, queuedTasks: queued.length };
+}
+
 export const placeEphemeralTask = internalMutation({
   args: { taskId: v.string() },
   handler: async (ctx, args): Promise<PlacementResult> => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
-    if (task === null) {
-      throw new Error(`placeEphemeralTask: no task ${args.taskId}`);
-    }
-    const slot = await allocateEphemeralSlot(ctx, args.taskId);
-    if (slot !== null) {
-      await dispatchTaskToSlot(ctx, task, slot);
-      return { placed: true, devboxId: slot.devboxId, hostId: slot.hostId };
-    }
-    const scaling = await requestHostProvisionRow(ctx);
-    const queued = await queuedEphemeralTasks(ctx);
-    return { placed: false, scaling, queuedTasks: queued.length };
+    return await placeEphemeralTaskRow(ctx, args.taskId);
   },
 });
 
@@ -483,54 +492,59 @@ async function requestHostProvisionRow(
 const RECENT_HOST_EVENTS = 15;
 
 /** Fleet snapshot for the orchestrator's get_fleet tool. */
+/** Plain-function form shared with the dashboard's fleet query. */
+export async function fleetSnapshotData(ctx: QueryCtx) {
+  const hosts = await ctx.db.query("hosts").collect();
+  const devboxes = await ctx.db.query("devboxes").collect();
+  const queuedTasks = await ctx.db
+    .query("tasks")
+    .withIndex("by_status", (q) => q.eq("status", "queued"))
+    .collect();
+  const events = await ctx.db
+    .query("hostEvents")
+    .order("desc")
+    .take(RECENT_HOST_EVENTS);
+  const now = Date.now();
+  return {
+    hosts: hosts.map((host) => ({
+      hostId: host.hostId,
+      status: host.status,
+      canProvisionHosts: host.canProvisionHosts === true,
+      vmsInUse: devboxes.filter((d) => d.hostId === host.hostId).length,
+      maxVms: host.maxVms,
+      secondsSinceSeen: Math.round((now - host.lastSeenAt) / 1000),
+      ...(host.status === "provisioning"
+        ? {
+            provisioningForSeconds: Math.round(
+              (now - (host.provisionRequestedAt ?? now)) / 1000,
+            ),
+            provisionedBy: host.provisionedBy,
+          }
+        : {}),
+    })),
+    devboxes: devboxes.map((d) => ({
+      devboxId: d.devboxId,
+      status: d.status,
+      ephemeral: d.ephemeral === true,
+      taskId: d.taskId,
+      hostId: d.hostId,
+    })),
+    queuedEphemeralTasks: queuedTasks
+      .filter((t) => t.placement === "ephemeral" && t.devboxId === undefined)
+      .map((t) => ({ taskId: t.taskId, title: t.title })),
+    recentHostEvents: events.reverse().map((e) => ({
+      hostId: e.hostId,
+      type: e.type,
+      summary: e.summary,
+      ts: e.ts,
+    })),
+  };
+}
+
 export const fleetSnapshot = internalQuery({
   args: {},
   handler: async (ctx) => {
-    const hosts = await ctx.db.query("hosts").collect();
-    const devboxes = await ctx.db.query("devboxes").collect();
-    const queuedTasks = await ctx.db
-      .query("tasks")
-      .withIndex("by_status", (q) => q.eq("status", "queued"))
-      .collect();
-    const events = await ctx.db
-      .query("hostEvents")
-      .order("desc")
-      .take(RECENT_HOST_EVENTS);
-    const now = Date.now();
-    return {
-      hosts: hosts.map((host) => ({
-        hostId: host.hostId,
-        status: host.status,
-        canProvisionHosts: host.canProvisionHosts === true,
-        vmsInUse: devboxes.filter((d) => d.hostId === host.hostId).length,
-        maxVms: host.maxVms,
-        secondsSinceSeen: Math.round((now - host.lastSeenAt) / 1000),
-        ...(host.status === "provisioning"
-          ? {
-              provisioningForSeconds: Math.round(
-                (now - (host.provisionRequestedAt ?? now)) / 1000,
-              ),
-              provisionedBy: host.provisionedBy,
-            }
-          : {}),
-      })),
-      devboxes: devboxes.map((d) => ({
-        devboxId: d.devboxId,
-        status: d.status,
-        ephemeral: d.ephemeral === true,
-        taskId: d.taskId,
-        hostId: d.hostId,
-      })),
-      queuedEphemeralTasks: queuedTasks
-        .filter((t) => t.placement === "ephemeral" && t.devboxId === undefined)
-        .map((t) => ({ taskId: t.taskId, title: t.title })),
-      recentHostEvents: events.reverse().map((e) => ({
-        hostId: e.hostId,
-        type: e.type,
-        summary: e.summary,
-        ts: e.ts,
-      })),
-    };
+    return await fleetSnapshotData(ctx);
   },
 });
 

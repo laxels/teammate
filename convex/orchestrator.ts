@@ -18,7 +18,7 @@ import {
   type ThreadTarget,
   taskActionAuthorization,
 } from "../src/orchestration";
-import { postSlackMessage } from "../src/slackApi";
+import { getSlackPermalink, postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { type ActionCtx, internalAction } from "./_generated/server";
 
@@ -189,6 +189,15 @@ async function executeTool(
         return toolError("title (string) and prompt (string) are required");
       }
       const taskId = `task-${crypto.randomUUID().slice(0, 8)}`;
+      // Deep link to the task's home thread, for the dashboard. Best-effort:
+      // getSlackPermalink returns null on any failure.
+      const permalink = await getSlackPermalink({
+        botToken: process.env.SLACK_BOT_TOKEN ?? "",
+        channel: target.channel,
+        messageTs: target.threadTs,
+      });
+      const permalinkArgs =
+        permalink === null ? {} : { slackPermalink: permalink };
 
       // Explicit opt-in: the always-on permanent devbox. State can persist
       // between tasks there, so this path is never chosen silently.
@@ -216,6 +225,7 @@ async function executeTool(
           slackChannel: target.channel,
           slackThreadTs: target.threadTs,
           slackUser: requester,
+          ...permalinkArgs,
         });
         return JSON.stringify({
           ok: true,
@@ -241,6 +251,7 @@ async function executeTool(
         slackChannel: target.channel,
         slackThreadTs: target.threadTs,
         slackUser: requester,
+        ...permalinkArgs,
       });
       const placement = await ctx.runMutation(
         internal.hosts.placeEphemeralTask,

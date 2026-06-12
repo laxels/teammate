@@ -57,8 +57,14 @@ export default defineSchema({
     // Who asked (Slack user id). Steer/stop authorization: the owner from
     // anywhere, anyone from inside the task's thread. Absent on legacy rows.
     slackUser: v.optional(v.string()),
+    // Deep link to the task's Slack thread (chat.getPermalink at creation).
+    slackPermalink: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
+    // First applied "started" event / first applied terminal event. updatedAt
+    // is clobbered by any patch, so durations need their own fields.
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
   })

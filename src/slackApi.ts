@@ -88,6 +88,38 @@ async function attemptPost(
 }
 
 /**
+ * Resolves a message's Slack permalink via chat.getPermalink (no extra
+ * scopes required). Best-effort: returns null on any failure — a permalink
+ * is a nice-to-have and must never block or delay task creation.
+ */
+export async function getSlackPermalink(
+  args: { botToken: string; channel: string; messageTs: string },
+  deps: SlackApiDeps = {},
+): Promise<string | null> {
+  const fetchFn = deps.fetchFn ?? fetch;
+  try {
+    const url = new URL("https://slack.com/api/chat.getPermalink");
+    url.searchParams.set("channel", args.channel);
+    url.searchParams.set("message_ts", args.messageTs);
+    const response = await fetchFn(url.toString(), {
+      headers: { authorization: `Bearer ${args.botToken}` },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const result = (await response.json()) as {
+      ok?: boolean;
+      permalink?: string;
+    };
+    return result.ok === true && typeof result.permalink === "string"
+      ? result.permalink
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Posts a message via chat.postMessage. Transient failures (429 honoring
  * Retry-After, 5xx, transport errors) are retried with bounded backoff;
  * permanent Slack errors (channel_not_found, ...) throw immediately so

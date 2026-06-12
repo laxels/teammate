@@ -97,3 +97,30 @@ export const taskCancelled = internalAction({
     });
   },
 });
+
+/**
+ * Announces a dashboard-initiated retry in the original task's thread (the
+ * retry shares it, so its own status updates land there too).
+ */
+export const taskRetried = internalAction({
+  args: { taskId: v.string(), retryTaskId: v.string() },
+  handler: async (ctx, args) => {
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    if (botToken === undefined) {
+      console.error("SLACK_BOT_TOKEN is not set; dropping notification");
+      return;
+    }
+    const task = await ctx.runQuery(internal.tasks.getByTaskId, {
+      taskId: args.taskId,
+    });
+    if (task === null) {
+      return;
+    }
+    await postSlackMessage({
+      botToken,
+      channel: task.slackChannel,
+      text: `:repeat: *${task.title}* (\`${args.taskId}\`) is being retried from the dashboard as \`${args.retryTaskId}\` — fresh devbox, same prompt. Status updates will follow in this thread.`,
+      threadTs: task.slackThreadTs,
+    });
+  },
+});
