@@ -134,15 +134,32 @@ describe("singleton-lock.sh", () => {
       `pid=${dead.pid}\n`,
     );
     const ranFile = join(repo, "ran.txt");
-    // The winner must hold the lock until the slowest contender has tried:
-    // one whose spawn lags past the release would win legitimately. 1.5s
-    // covers process-spawn skew on loaded CI runners.
+    const releaseFile = join(repo, "release");
+    // The winner holds the lock until the test releases it, and the release
+    // happens only once the losers have exited — so a contender with slow
+    // startup still contends against a held lock instead of acquiring
+    // legitimately after an early release.
+    let settledCount = 0;
     const contenders = Array.from({ length: 5 }, () =>
       sh(
-        [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 1.5`],
+        [
+          SCRIPT,
+          "convex",
+          "sh",
+          "-c",
+          `echo ran >> ${ranFile}; while [ ! -e ${releaseFile} ]; do sleep 0.02; done`,
+        ],
         repo,
-      ),
+      ).then((result) => {
+        settledCount += 1;
+        return result;
+      }),
     );
+    try {
+      await until(async () => settledCount >= 4);
+    } finally {
+      await writeFile(releaseFile, "");
+    }
     const results = await Promise.all(contenders);
     const winners = results.filter((r) => r.exitCode === 0);
     expect(winners.length).toBe(1);
@@ -158,25 +175,42 @@ describe("singleton-lock.sh", () => {
       `pid=${dead.pid}\n`,
     );
     const ranFile = join(repo, "ran.txt");
-    // Both contenders observe the dead owner before either steals; the fast
-    // one then steals and holds the lock, while the slow one acts a second
-    // later on stale knowledge. It must not remove the now-live lock.
-    const fast = sh(
-      [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 3`],
-      repo,
-      { SINGLETON_LOCK_TEST_STEAL_DELAY: "0.5" },
-    );
-    const slow = sh(
-      [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}`],
-      repo,
-      { SINGLETON_LOCK_TEST_STEAL_DELAY: "1.5" },
-    );
-    const [fastResult, slowResult] = await Promise.all([fast, slow]);
-    expect(fastResult.exitCode).toBe(0);
-    expect(slowResult.exitCode).not.toBe(0);
-    expect(slowResult.stderr).toContain("held");
+    const releaseFile = join(repo, "release");
+    const gateA = join(repo, "gate-a");
+    const gateB = join(repo, "gate-b");
+    await writeFile(gateA, "");
+    await writeFile(gateB, "");
+    const cmd = `echo ran >> ${ranFile}; while [ ! -e ${releaseFile} ]; do sleep 0.02; done`;
+    const a = sh([SCRIPT, "convex", "sh", "-c", cmd], repo, {
+      SINGLETON_LOCK_TEST_STEAL_GATE: gateA,
+    });
+    const b = sh([SCRIPT, "convex", "sh", "-c", cmd], repo, {
+      SINGLETON_LOCK_TEST_STEAL_GATE: gateB,
+    });
+    try {
+      // Both contenders see the dead owner and park just before stealing.
+      await until(() => Bun.file(`${gateA}.waiting`).exists());
+      await until(() => Bun.file(`${gateB}.waiting`).exists());
+      // A completes its steal and is now the live holder...
+      await rm(gateA);
+      await until(() => Bun.file(ranFile).exists());
+      // ...then B resumes with its stale dead-owner observation. It must
+      // fail closed, not displace A's live lock and run concurrently.
+      await rm(gateB);
+      const bResult = await b;
+      expect(bResult.exitCode).not.toBe(0);
+      expect(bResult.stderr).toContain("try again");
+    } finally {
+      await writeFile(releaseFile, "");
+    }
+    const aResult = await a;
+    expect(aResult.exitCode).toBe(0);
     expect((await Bun.file(ranFile).text()).trim().split("\n")).toHaveLength(1);
-  }, 10_000);
+    // A's release must remove its own lock — not survive B having renamed it.
+    expect(
+      await Bun.file(join(lockDir(repo, "convex"), "owner")).exists(),
+    ).toBe(false);
+  });
 
   test("locks are shared across worktrees of the same repo", async () => {
     const wt = join(repo, "..", `${repo.split("/").pop()}-wt`);

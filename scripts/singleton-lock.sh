@@ -50,8 +50,6 @@ EOF
 fi
 
 LOCK_DIR="$COMMON_DIR/singleton-locks/$NAME"
-STEAL_DIR="$LOCK_DIR.steal"
-stole=""
 mkdir -p "$(dirname "$LOCK_DIR")"
 
 acquire() {
@@ -60,11 +58,11 @@ acquire() {
 
 owner_pid() {
   # Never fails: a missing/unreadable owner file yields "" (set -e safety).
-  sed -n 's/^pid=//p' "$LOCK_DIR/owner" 2>/dev/null || true
+  sed -n 's/^pid=//p' "$1" 2>/dev/null || true
 }
 
 if ! acquire; then
-  pid="$(owner_pid)"
+  pid="$(owner_pid "$LOCK_DIR/owner")"
   if [[ -z "$pid" ]]; then
     # No owner record: a rival is mid-acquire (the file lands microseconds
     # after mkdir), or an acquire crashed at exactly that point. Stealing
@@ -76,43 +74,42 @@ if ! acquire; then
     echo "singleton-lock: '$NAME' is held by pid $pid ($(sed -n 's/^command=//p' "$LOCK_DIR/owner" 2>/dev/null)). Try again when it finishes." >&2
     exit 1
   fi
-  # Test seam: widens the window between the dead-owner check above and the
-  # steal below so the race is reproducible. No-op outside tests.
-  if [[ -n "${SINGLETON_LOCK_TEST_STEAL_DELAY:-}" ]]; then
-    sleep "$SINGLETON_LOCK_TEST_STEAL_DELAY"
+  # Test hook: park between the liveness check and the steal so tests can
+  # widen this race window deterministically. Inert outside tests.
+  if [[ -n "${SINGLETON_LOCK_TEST_STEAL_GATE:-}" ]]; then
+    : > "$SINGLETON_LOCK_TEST_STEAL_GATE.waiting"
+    while [[ -e "$SINGLETON_LOCK_TEST_STEAL_GATE" ]]; do sleep 0.01; done
   fi
-  # Owner is dead: steal. The dead-owner check and the removal must hold
-  # together: between them a rival may have stolen the stale lock and
-  # re-acquired it alive, and removing THAT lock would let two holders run
-  # concurrently. A mutex dir serializes stealers and the owner is re-checked
-  # under it; the mutex is held only across the lines through the owner
-  # write below, never across the wrapped command.
-  if ! mkdir "$STEAL_DIR" 2>/dev/null; then
-    echo "singleton-lock: a rival contender is stealing the stale '$NAME' lock; try again. (Only if no contender is running: rm -rf '$STEAL_DIR')" >&2
+  # Owner is dead: steal by claiming the owner record, not by replacing the
+  # directory. The rename is atomic, so exactly one contender wins the claim,
+  # and the liveness re-check below reads the claimed inode — which no rival
+  # can swap — so a steal can never be finalized against a lock that a rival
+  # stole and re-owned between the check above and the claim. The winner
+  # adopts the directory in place; the dir itself is only ever created by
+  # acquire() and only removed by its live holder's EXIT trap, so a running
+  # command's lock is never yanked out from under it.
+  CLAIM="$LOCK_DIR/owner.claim.$$"
+  if ! mv "$LOCK_DIR/owner" "$CLAIM" 2>/dev/null; then
+    echo "singleton-lock: '$NAME' stale lock was claimed by another contender first, try again" >&2
     exit 1
   fi
-  stole=1
-  trap 'rmdir "$STEAL_DIR" 2>/dev/null' EXIT
-  pid="$(owner_pid)"
-  if [[ -d "$LOCK_DIR" && -z "$pid" ]]; then
-    echo "singleton-lock: '$NAME' lock exists but has no owner record (likely mid-acquire). If it is stale, remove it: rm -rf '$LOCK_DIR'" >&2
+  claimed_pid="$(owner_pid "$CLAIM")"
+  if [[ -z "$claimed_pid" ]] || kill -0 "$claimed_pid" 2>/dev/null; then
+    # The record changed hands after our liveness check: a rival completed
+    # its own steal and is alive (or mid-write). Restore it and fail closed —
+    # never steal a live lock. While we hold the claim nothing can recreate
+    # the owner path (claims need it present, mkdir needs the dir absent),
+    # so the restore cannot clobber anything; if the holder released in the
+    # window the dir — claim included — is already gone and there is nothing
+    # to restore.
+    mv "$CLAIM" "$LOCK_DIR/owner" 2>/dev/null || true
+    echo "singleton-lock: '$NAME' was stolen and re-acquired by another contender, backing off; try again" >&2
     exit 1
   fi
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    echo "singleton-lock: '$NAME' is held by pid $pid ($(sed -n 's/^command=//p' "$LOCK_DIR/owner" 2>/dev/null)). Try again when it finishes." >&2
-    exit 1
-  fi
-  rm -rf "$LOCK_DIR"
-  if ! acquire; then
-    echo "singleton-lock: lost the race re-acquiring '$NAME', try again" >&2
-    exit 1
-  fi
+  rm -f "$CLAIM"
 fi
 
 printf 'pid=%s\nstarted=%s\ncommand=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" > "$LOCK_DIR/owner"
-if [[ -n "$stole" ]]; then
-  rmdir "$STEAL_DIR" 2>/dev/null || true
-fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
 export SINGLETON_LOCK="$NAME"
