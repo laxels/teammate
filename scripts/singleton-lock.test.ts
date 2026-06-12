@@ -134,9 +134,12 @@ describe("singleton-lock.sh", () => {
       `pid=${dead.pid}\n`,
     );
     const ranFile = join(repo, "ran.txt");
+    // The winner must hold the lock until the slowest contender has tried:
+    // one whose spawn lags past the release would win legitimately. 1.5s
+    // covers process-spawn skew on loaded CI runners.
     const contenders = Array.from({ length: 5 }, () =>
       sh(
-        [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 0.5`],
+        [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 1.5`],
         repo,
       ),
     );
@@ -145,6 +148,35 @@ describe("singleton-lock.sh", () => {
     expect(winners.length).toBe(1);
     expect((await Bun.file(ranFile).text()).trim().split("\n")).toHaveLength(1);
   });
+
+  test("a contender that pauses mid-steal cannot yank a fresh live lock", async () => {
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    await mkdir(lockDir(repo, "convex"), { recursive: true });
+    await writeFile(
+      join(lockDir(repo, "convex"), "owner"),
+      `pid=${dead.pid}\n`,
+    );
+    const ranFile = join(repo, "ran.txt");
+    // Both contenders observe the dead owner before either steals; the fast
+    // one then steals and holds the lock, while the slow one acts a second
+    // later on stale knowledge. It must not remove the now-live lock.
+    const fast = sh(
+      [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}; sleep 3`],
+      repo,
+      { SINGLETON_LOCK_TEST_STEAL_DELAY: "0.5" },
+    );
+    const slow = sh(
+      [SCRIPT, "convex", "sh", "-c", `echo ran >> ${ranFile}`],
+      repo,
+      { SINGLETON_LOCK_TEST_STEAL_DELAY: "1.5" },
+    );
+    const [fastResult, slowResult] = await Promise.all([fast, slow]);
+    expect(fastResult.exitCode).toBe(0);
+    expect(slowResult.exitCode).not.toBe(0);
+    expect(slowResult.stderr).toContain("held");
+    expect((await Bun.file(ranFile).text()).trim().split("\n")).toHaveLength(1);
+  }, 10_000);
 
   test("locks are shared across worktrees of the same repo", async () => {
     const wt = join(repo, "..", `${repo.split("/").pop()}-wt`);
