@@ -14,6 +14,12 @@
 
 set -euo pipefail
 
+# Singleton lane: one fleet operation at a time, from the primary checkout
+# (scripts/singleton-lock.sh; no-ops on fleet hosts, which have no git).
+if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
+  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
+fi
+
 HOST_SSH="m1@100.121.13.107"
 TART='~/tart.app/Contents/MacOS/tart'
 SOURCE_IMAGE="golden-v1"

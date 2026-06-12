@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "convex dev",
+    "dev": "scripts/singleton-lock.sh convex convex dev",
+    "deploy:convex": "scripts/singleton-lock.sh convex convex dev --once",
+    "worktree-setup": "scripts/worktree-setup.sh",
     "validate": "concurrently --group --prefix-colors auto --names typecheck,lint,test \"bun run typecheck\" \"bun run lint\" \"bun run test\"",
     "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p web --noEmit && tsc -p dashboard --noEmit",
     "lint": "biome check .",
