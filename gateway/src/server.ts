@@ -9,7 +9,11 @@ import type {
 import { ComputerExecutor } from "./computer/executor";
 import { createComputerUseMcpServer } from "./computer/mcp";
 import type { GatewayConfig } from "./config";
-import { createEventSender, type FetchLike } from "./events";
+import {
+  createEventSender,
+  createTranscriptSender,
+  type FetchLike,
+} from "./events";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
 import { serveStatic } from "./static";
 import { dispatchSteerMessage } from "./steer";
@@ -107,8 +111,14 @@ export function createGatewayServer(
   // `server` is assigned below; the callbacks only run once it is listening.
   let server: Server<WsData>;
 
+  const uploadTranscript = createTranscriptSender(
+    config,
+    options.fetchFn ?? fetch,
+  );
+
   const session = new SessionManager({
     emitEvent,
+    uploadTranscript,
     createMcpServers: () => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
     }),

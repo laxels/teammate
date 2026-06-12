@@ -1,4 +1,9 @@
-import type { DevboxEvent, DevboxEventType } from "../../shared/protocol";
+import {
+  type DevboxEvent,
+  type DevboxEventType,
+  MAX_TRANSCRIPT_BYTES,
+  type TranscriptUpload,
+} from "../../shared/protocol";
 
 export type EventSender = (
   taskId: string,
@@ -59,5 +64,65 @@ export function createEventSender(
       }
     });
     return queue;
+  };
+}
+
+export type TranscriptSender = (
+  taskId: string,
+  messages: unknown[],
+) => Promise<void>;
+
+/** Drops oldest messages until the payload serializes under the byte cap. */
+export function fitTranscript(
+  upload: TranscriptUpload,
+  maxBytes: number = MAX_TRANSCRIPT_BYTES,
+): TranscriptUpload {
+  let messages = upload.messages;
+  while (
+    messages.length > 0 &&
+    JSON.stringify({ ...upload, messages }).length > maxBytes
+  ) {
+    messages = messages.slice(Math.max(1, Math.floor(messages.length / 10)));
+  }
+  return { ...upload, messages };
+}
+
+/**
+ * POSTs the task's transcript to {CONVEX_SITE_URL}/devbox/transcript once a
+ * task ends, so the session record outlives the VM. Best-effort: failures are
+ * logged and swallowed.
+ */
+export function createTranscriptSender(
+  config: EventSenderConfig,
+  fetchFn: FetchLike = fetch,
+): TranscriptSender {
+  const endpoint = new URL(
+    "/devbox/transcript",
+    config.convexSiteUrl,
+  ).toString();
+  return async (taskId, messages) => {
+    const upload = fitTranscript({
+      devboxId: config.devboxId,
+      taskId,
+      messages,
+    });
+    try {
+      const response = await fetchFn(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-devbox-secret": config.devboxSharedSecret,
+        },
+        body: JSON.stringify(upload),
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        console.error(
+          `[gateway] transcript POST failed (${response.status}): ${body}`,
+        );
+      }
+    } catch (error) {
+      console.error("[gateway] transcript POST error:", error);
+    }
   };
 }

@@ -10,7 +10,12 @@ import {
 import type { PermissionMode, StartTaskRequest } from "../../shared/protocol";
 import type { EventSender } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
-import { excerpt, extractAssistantText, mapResultMessage } from "./summary";
+import {
+  excerpt,
+  extractAskUserQuestion,
+  extractAssistantText,
+  mapResultMessage,
+} from "./summary";
 import { createThrottler, type Throttler } from "./throttle";
 
 /**
@@ -40,6 +45,9 @@ export type SessionManagerDeps = {
   now?: () => number;
   progressIntervalMs?: number;
   historyCapacity?: number;
+  /** Persists the task's transcript when it reaches a terminal status, so
+   * the session record outlives the ephemeral VM. Best-effort. */
+  uploadTranscript?: (taskId: string, messages: unknown[]) => Promise<void>;
   /** Hang detection thresholds (tests tighten these). */
   watchdog?: { initMs?: number; stallMs?: number; intervalMs?: number };
 };
@@ -128,6 +136,10 @@ export class SessionManager {
   #createMcpServers: (() => Record<string, McpServerConfig>) | null;
   #progressIntervalMs: number;
   #history: RingBuffer<SDKMessage>;
+  #historyCapacity: number = HISTORY_CAPACITY;
+  #uploadTranscript:
+    | ((taskId: string, messages: unknown[]) => Promise<void>)
+    | null = null;
 
   #running = false;
   #taskId: string | null = null;
@@ -156,9 +168,9 @@ export class SessionManager {
     this.#queryFn = deps.queryFn ?? (sdkQuery as QueryFn);
     this.#createMcpServers = deps.createMcpServers ?? null;
     this.#progressIntervalMs = deps.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
-    this.#history = createRingBuffer<SDKMessage>(
-      deps.historyCapacity ?? HISTORY_CAPACITY,
-    );
+    this.#historyCapacity = deps.historyCapacity ?? HISTORY_CAPACITY;
+    this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
+    this.#uploadTranscript = deps.uploadTranscript ?? null;
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
     this.#watchdogConfig = {
       initMs: deps.watchdog?.initMs ?? INIT_WATCHDOG_MS,
@@ -195,6 +207,9 @@ export class SessionManager {
     this.#interrupted = false;
     this.#turnInFlight = true;
     this.#terminalEmitted = false;
+    // Per-task transcript: a fresh buffer means history replay (and the
+    // persisted transcript) never carries a previous task's tail.
+    this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
 
     const queue = createAsyncQueue<SDKUserMessage>();
@@ -265,6 +280,7 @@ export class SessionManager {
     this.#turnInFlight = false;
     this.#terminalEmitted = true;
     this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
+    this.#sendTranscript(taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
     // interrupt, leaving #run blocked forever — which would wedge a permanent
@@ -337,6 +353,7 @@ export class SessionManager {
           ),
           taskId,
         );
+        this.#sendTranscript(taskId);
       }
     } finally {
       // Only report "stopped" when the interrupt actually cut a turn short;
@@ -344,6 +361,7 @@ export class SessionManager {
       // the task's terminal status.
       if (this.#interrupted && this.#turnInFlight) {
         this.#emit("stopped", "Stopped by interrupt.", taskId);
+        this.#sendTranscript(taskId);
       }
       if (this.#watchdogTimer !== null) {
         clearInterval(this.#watchdogTimer);
@@ -357,10 +375,24 @@ export class SessionManager {
     }
   }
 
+  /** Persist the current transcript snapshot (latest write wins server-side,
+   * so a steered follow-up turn after completion refreshes the record). */
+  #sendTranscript(taskId: string | null = this.#taskId): void {
+    if (this.#uploadTranscript === null || taskId === null) return;
+    void this.#uploadTranscript(taskId, this.#history.snapshot());
+  }
+
   #handleLifecycle(message: SDKMessage): void {
     if (message.type === "assistant") {
       // Skip subagent chatter; progress summaries come from the main thread.
       if (message.parent_tool_use_id !== null) return;
+      // AskUserQuestion = the session is blocked on a human answer. Bypasses
+      // the progress throttle: this is exactly the event the user must see.
+      const question = extractAskUserQuestion(message);
+      if (question !== null && !this.#interrupted) {
+        this.#emit("needs_input", excerpt(question));
+        return;
+      }
       const text = extractAssistantText(message);
       if (text !== null && !this.#interrupted && this.#throttle.tryAcquire()) {
         this.#emit("progress", excerpt(text));
@@ -373,6 +405,7 @@ export class SessionManager {
       this.#terminalEmitted = true;
       const terminal = mapResultMessage(message);
       this.#emit(terminal.type, terminal.summary);
+      this.#sendTranscript();
     }
   }
 

@@ -3,6 +3,7 @@ import type { FunctionReturnType } from "convex/server";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { useDashboardSecret } from "./config";
+import { extractTranscriptLines } from "./transcriptView";
 
 type ActiveTask = FunctionReturnType<typeof api.dashboard.activeTasks>[number];
 type HistoryTask = FunctionReturnType<
@@ -96,7 +97,11 @@ function MastClock() {
 }
 
 function StatusTag({ status }: { status: TaskStatus }) {
-  return <span className={`status status-${status}`}>{status}</span>;
+  return (
+    <span className={`status status-${status}`}>
+      {status.replace("_", " ")}
+    </span>
+  );
 }
 
 // ---- fleet annunciator strip ----
@@ -335,6 +340,43 @@ function ActiveRow({
   );
 }
 
+function TranscriptPanel({ taskId }: { taskId: string }) {
+  const secret = useDashboardSecret();
+  const [open, setOpen] = useState(false);
+  // The payload can approach 1 MB — fetch only on explicit request.
+  const transcript = useQuery(
+    api.dashboard.transcript,
+    open ? { secret, taskId } : "skip",
+  );
+  if (!open) {
+    return (
+      <button type="button" className="act" onClick={() => setOpen(true)}>
+        show transcript
+      </button>
+    );
+  }
+  if (transcript === undefined) {
+    return <div className="dim">loading transcript…</div>;
+  }
+  if (transcript === null) {
+    return <div className="dim">no transcript stored</div>;
+  }
+  return (
+    <div className="transcript">
+      {extractTranscriptLines(transcript.json).map((line, i) => (
+        <div
+          className={`transcript-line transcript-${line.role}`}
+          // biome-ignore lint/suspicious/noArrayIndexKey: static render of an immutable list
+          key={i}
+        >
+          <span className="transcript-role">{line.role}</span>
+          <span className="transcript-text">{line.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function HistoryDetail({ taskId }: { taskId: string }) {
   const secret = useDashboardSecret();
   const detail = useQuery(api.dashboard.taskDetail, { secret, taskId });
@@ -354,11 +396,17 @@ function HistoryDetail({ taskId }: { taskId: string }) {
           <div className="event" key={`${event.ts}-${event.type}`}>
             <span className="event-ts">{calendar(event.ts)}</span>
             <span className={`status status-ev-${event.type}`}>
-              {event.type}
+              {event.type.replace("_", " ")}
             </span>
             <span className="event-summary">{event.summary}</span>
           </div>
         ))}
+        {detail.hasTranscript && (
+          <div className="detail-transcript">
+            <span className="cell-label">session transcript</span>
+            <TranscriptPanel taskId={taskId} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -464,8 +512,7 @@ export function App() {
     <main>
       <header className="masthead">
         <h1>
-          ultraclaude<span className="mast-sep">{"//"}</span>fleet
-          <span className="cursor" aria-hidden="true" />
+          Ultraclaude<span className="mast-sep">·</span>Fleet
         </h1>
         <MastClock />
       </header>
@@ -518,7 +565,7 @@ export function App() {
                     className={`chip ${filter === f ? "chip-on" : ""}`}
                     onClick={() => setFilter(f)}
                   >
-                    {f}
+                    {f.replace("_", " ")}
                   </button>
                 ))}
               </span>

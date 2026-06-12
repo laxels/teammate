@@ -53,3 +53,26 @@ export function mapResultMessage(result: SDKResultMessage): TerminalEvent {
     summary: excerpt(`Task failed (${result.subtype})${detail}`),
   };
 }
+
+/**
+ * The question text when an assistant message calls AskUserQuestion, else
+ * null. The devbox session is blocked on a human answer at that point — the
+ * gateway emits needs_input so the Slack thread (and dashboard) can surface
+ * it; the user answers by steering.
+ */
+export function extractAskUserQuestion(
+  message: SDKAssistantMessage,
+): string | null {
+  for (const block of message.message.content) {
+    if (block.type === "tool_use" && block.name === "AskUserQuestion") {
+      const input = block.input as {
+        questions?: { question?: unknown }[];
+      } | null;
+      const question = input?.questions?.[0]?.question;
+      return typeof question === "string" && question.length > 0
+        ? question
+        : "The session is asking for your input.";
+    }
+  }
+  return null;
+}

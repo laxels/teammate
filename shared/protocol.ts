@@ -112,6 +112,21 @@ export const EPHEMERAL_RETIRE_GRACE_MS = 5 * 60_000;
 // Auth: `x-devbox-secret` header must equal the DEVBOX_SHARED_SECRET env var
 // on both sides.
 
+// ---- Gateway -> orchestrator: POST {CONVEX_SITE_URL}/devbox/transcript ----
+// Sent once per task when it reaches a terminal status: the session's SDK
+// message transcript, so history outlives the ephemeral VM. Oldest messages
+// are dropped until the serialized payload fits MAX_TRANSCRIPT_BYTES
+// (Convex documents cap at ~1 MB).
+
+export type TranscriptUpload = {
+  devboxId: string;
+  taskId: string;
+  // Raw SDKMessages, JSON-serializable, oldest first.
+  messages: unknown[];
+};
+
+export const MAX_TRANSCRIPT_BYTES = 900_000;
+
 export type DevboxEventType =
   | "started"
   | "progress"

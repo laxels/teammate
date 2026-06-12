@@ -5,6 +5,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { type QueryFn, SessionManager } from "../src/session";
 import {
+  askUserQuestionMessage,
   assistantMessage,
   createEchoQueryFn,
   createEventRecorder,
@@ -33,6 +34,21 @@ function makeSession(
 }
 
 describe("SessionManager", () => {
+  test("AskUserQuestion emits needs_input with the question, bypassing the progress throttle", async () => {
+    const { queryFn } = createEchoQueryFn((text) => [
+      assistantMessage(`working on: ${text}`),
+      askUserQuestionMessage("Should I use staging or prod?"),
+      resultSuccess(`done: ${text}`),
+    ]);
+    const { session, events } = makeSession(queryFn);
+    session.start({ taskId: "task-1", prompt: "deploy" });
+    await until(() => events.some((e) => e.type === "completed"));
+    const needsInput = events.find((e) => e.type === "needs_input");
+    expect(needsInput?.summary).toBe("Should I use staging or prod?");
+    // The progress event from the same turn still flowed (throttle untouched).
+    expect(events.some((e) => e.type === "progress")).toBe(true);
+  });
+
   test("start feeds the prompt through streaming input and reports lifecycle events", async () => {
     const { queryFn, control } = createEchoQueryFn();
     const { session, events, broadcasts } = makeSession(queryFn);

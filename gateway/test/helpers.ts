@@ -42,6 +42,20 @@ export function assistantMessage(
   };
 }
 
+/** Assistant message whose only content is an AskUserQuestion tool call. */
+export function askUserQuestionMessage(question: string): SDKAssistantMessage {
+  const base = assistantMessage("");
+  base.message.content = [
+    {
+      type: "tool_use",
+      id: "toolu_test",
+      name: "AskUserQuestion",
+      input: { questions: [{ question }] },
+    },
+  ];
+  return base;
+}
+
 export function resultSuccess(text: string, isError = false): SDKResultMessage {
   return {
     type: "result",

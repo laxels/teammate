@@ -188,6 +188,33 @@ export const cancelQueued = internalMutation({
   },
 });
 
+/**
+ * Records the task's status-card message. Set-if-absent: concurrent lifecycle
+ * notifications can race to post the first card; the first writer wins and
+ * later updates all edit that one. A legacy task with no home thread adopts
+ * the card as its thread anchor, so subsequent updates (and user replies)
+ * finally thread.
+ */
+export const setSlackCard = internalMutation({
+  args: { taskId: v.string(), cardTs: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    if (task === null || task.slackCardTs !== undefined) {
+      return false;
+    }
+    await ctx.db.patch(task._id, {
+      slackCardTs: args.cardTs,
+      ...(task.slackThreadTs === undefined
+        ? { slackThreadTs: args.cardTs }
+        : {}),
+    });
+    return true;
+  },
+});
+
 export const markNudged = internalMutation({
   args: { taskId: v.string(), nudgedAt: v.number() },
   handler: async (ctx, args) => {

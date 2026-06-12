@@ -22,6 +22,9 @@ export type SlackTrigger = {
   threadTs: string | undefined;
   /** Slack attachments on the message; we can't fetch their contents yet. */
   fileCount: number;
+  /** An un-mentioned reply inside a channel thread: only act on it when the
+   * thread anchors one of our tasks (the orchestrator drops it otherwise). */
+  channelThreadReply: boolean;
 };
 
 export type SlackEventClassification =
@@ -95,10 +98,20 @@ export function classifySlackEvent(
   if (botUserIds.includes(event.user)) {
     return ignore("message from the bot user itself");
   }
-  // Only message.im is subscribed, but be defensive: never react to plain
-  // channel messages — channels are mention-only (app_mention).
+  // Channel messages: a bot mention arrives as BOTH app_mention and
+  // message.channels — let app_mention own those. Un-mentioned THREAD
+  // replies are accepted (flagged: they only matter inside a task's thread);
+  // plain channel chatter stays invisible.
+  let channelThreadReply = false;
   if (event.type === "message" && event.channel_type !== "im") {
-    return ignore("non-DM message without a mention");
+    const text = typeof event.text === "string" ? event.text : "";
+    if (botUserIds.some((id) => text.includes(`<@${id}>`))) {
+      return ignore("channel mention (app_mention covers it)");
+    }
+    if (event.thread_ts === undefined) {
+      return ignore("non-DM message without a mention");
+    }
+    channelThreadReply = true;
   }
   if (
     typeof event.channel !== "string" ||
@@ -118,6 +131,7 @@ export function classifySlackEvent(
       ts: event.ts,
       threadTs: event.thread_ts,
       fileCount: Array.isArray(event.files) ? event.files.length : 0,
+      channelThreadReply,
     },
   };
 }
@@ -410,6 +424,65 @@ export function shouldNudge(args: {
     return false;
   }
   return true;
+}
+
+// ---- Status card (the bot's first lifecycle message, edited in place) ----
+
+const STATUS_EMOJI: Record<TaskStatus, string> = {
+  queued: ":hourglass_flowing_sand:",
+  running: ":hammer_and_wrench:",
+  needs_input: ":raising_hand:",
+  completed: ":white_check_mark:",
+  failed: ":x:",
+  stopped: ":octagonal_sign:",
+};
+
+export function formatDurationMs(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(r).padStart(2, "0")}s`;
+  return `${r}s`;
+}
+
+/**
+ * Renders the task's status card: one glanceable message per task, posted on
+ * the first lifecycle event and chat.update'd in place on every later one.
+ * Detail events still arrive as separate thread replies (edits don't notify).
+ */
+export function buildStatusCard(args: {
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  summary: string;
+  monitorUrl: string | null;
+  startedAt?: number | undefined;
+  finishedAt?: number | undefined;
+  replyHint: ReplyHint;
+}): string {
+  const { taskId, title, status, summary, monitorUrl, replyHint } = args;
+  const lines = [
+    `${STATUS_EMOJI[status]} *${title}* (\`${taskId}\`) — ${status.replace("_", " ")}`,
+    `_Latest:_ ${summary}`,
+  ];
+  if (
+    args.startedAt !== undefined &&
+    args.finishedAt !== undefined &&
+    isTerminalTaskStatus(status)
+  ) {
+    lines.push(`Ran ${formatDurationMs(args.finishedAt - args.startedAt)}.`);
+  }
+  if (monitorUrl !== null && !isTerminalTaskStatus(status)) {
+    lines.push(`Monitor & steer: ${monitorUrl}`);
+  }
+  if (!isTerminalTaskStatus(status) && replyHint !== "none") {
+    lines.push(
+      `Reply in this thread${replyHint === "channel" ? " (mention me)" : ""} to steer or check on it.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 // ---- Slack message formatting for devbox events ----
