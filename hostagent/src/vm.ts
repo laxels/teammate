@@ -203,6 +203,19 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
       `${VM_USER}@${ip}:ultraclaude/`,
     ]);
 
+    // The baked node_modules lags the payload's code: a dependency added
+    // after the golden image was baked crashes the gateway at import
+    // (observed 2026-06-12: playwright-core). Install against the payload's
+    // lockfile every provision; the baked bun cache makes the no-change
+    // case sub-second, so only genuinely new packages hit the network.
+    await must(
+      "bun install",
+      sshCommand(
+        ip,
+        "cd ~/ultraclaude && ~/.bun/bin/bun install --frozen-lockfile",
+      ),
+    );
+
     // Gateway config only; Claude Code auth comes from the golden image.
     const envFile = [
       `DEVBOX_ID=${devboxId}`,
