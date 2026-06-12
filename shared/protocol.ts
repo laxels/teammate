@@ -130,7 +130,8 @@ export const MAX_TRANSCRIPT_BYTES = 900_000;
 export type DevboxEventType =
   | "started"
   | "progress"
-  // No producer yet: the gateway does not emit needs_input (roadmap).
+  // Emitted when the session blocks on AskUserQuestion (gateway session.ts);
+  // a steered user message answers it.
   | "needs_input"
   | "completed"
   | "failed"
