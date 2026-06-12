@@ -66,11 +66,17 @@ const TAILSCALE = "/opt/homebrew/bin/tailscale";
 // identity before the clone joins. The daemon is the root LaunchDaemon
 // homebrew.mxcl.tailscale (brew services); `tailscale version --daemon`
 // exits 0 once the restarted daemon is reachable, even while logged out.
+//
+// launchd tears services down ASYNCHRONOUSLY: a bootstrap right after
+// bootout intermittently fails with "Bootstrap failed: 5: Input/output
+// error" (observed on a freshly booted clone, 2026-06-12). Wait for the
+// label to disappear before removing state, and retry the bootstrap.
 const TAILSCALE_RESET =
   "set -e; " +
   "sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true; " +
+  "for i in $(seq 1 15); do sudo launchctl print system/homebrew.mxcl.tailscale >/dev/null 2>&1 || break; sleep 1; done; " +
   "sudo rm -rf /Library/Tailscale; " +
-  "sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist; " +
+  "for i in $(seq 1 10); do sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist 2>/dev/null && break; sleep 2; done; " +
   `for i in $(seq 1 30); do ${TAILSCALE} version --daemon >/dev/null 2>&1 && exit 0; sleep 1; done; ` +
   'echo "tailscaled did not come back after state wipe" >&2; exit 1';
 
