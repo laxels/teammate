@@ -1,0 +1,10 @@
+{
+  /* Convex function tests run under bun:test (convex-test in-memory backend),
+     so unlike deployed function code they get bun's type globals. */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["./**/*.test.ts"],
+  "exclude": []
+}
