@@ -4,6 +4,7 @@ import type {
   GatewayHealth,
   StartTaskRequest,
   SteerServerMessage,
+  UserMessagePayload,
 } from "../../shared/protocol";
 import { ComputerExecutor } from "./computer/executor";
 import { createComputerUseMcpServer } from "./computer/mcp";
@@ -52,6 +53,18 @@ function timingSafeEqual(a: string, b: string): boolean {
     diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return diff === 0;
+}
+
+function parseUserMessagePayload(body: unknown): UserMessagePayload | null {
+  if (typeof body !== "object" || body === null) return null;
+  const candidate = body as Record<string, unknown>;
+  if (typeof candidate.taskId !== "string" || candidate.taskId === "") {
+    return null;
+  }
+  if (typeof candidate.text !== "string" || candidate.text.trim() === "") {
+    return null;
+  }
+  return { taskId: candidate.taskId, text: candidate.text };
 }
 
 function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
@@ -154,7 +167,9 @@ export function createGatewayServer(
       // to authenticate with Convex).
       if (
         request.method === "POST" &&
-        (url.pathname === "/task" || url.pathname === "/interrupt")
+        (url.pathname === "/task" ||
+          url.pathname === "/message" ||
+          url.pathname === "/interrupt")
       ) {
         const provided = request.headers.get("x-devbox-secret");
         if (
@@ -191,7 +206,67 @@ export function createGatewayServer(
         return Response.json({ accepted: true }, { status: 202 });
       }
 
+      if (request.method === "POST" && url.pathname === "/message") {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json({ error: "invalid JSON body" }, { status: 400 });
+        }
+        const payload = parseUserMessagePayload(body);
+        if (payload === null) {
+          return Response.json(
+            { error: "expected { taskId, text }" },
+            { status: 400 },
+          );
+        }
+        // The taskId match keeps a stale command (aimed at a previous
+        // occupant of this devbox) out of the current session; the
+        // terminalEmitted check drops steers that lost the race against task
+        // completion (a late message must not re-open a finished task).
+        if (
+          session.status().taskId !== payload.taskId ||
+          session.terminalEmitted() ||
+          !session.pushUserMessage(payload.text)
+        ) {
+          return Response.json(
+            {
+              error: "no live session for that task",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
+        return Response.json({ ok: true });
+      }
+
       if (request.method === "POST" && url.pathname === "/interrupt") {
+        // An interrupt may carry { taskId } (orchestrator stop_task): only
+        // stop the session if it still belongs to that task, so a stale stop
+        // never kills a later occupant. A bodyless/empty interrupt stays
+        // unconditional — that's the local eviction path (index.ts).
+        let body: unknown = null;
+        try {
+          body = await request.json();
+        } catch {
+          // No/invalid body: unconditional interrupt.
+        }
+        const guardTaskId =
+          typeof body === "object" && body !== null
+            ? (body as Record<string, unknown>).taskId
+            : undefined;
+        if (
+          typeof guardTaskId === "string" &&
+          session.status().taskId !== guardTaskId
+        ) {
+          return Response.json(
+            {
+              error: "no live session for that task",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
         await session.stop();
         return Response.json({ ok: true });
       }

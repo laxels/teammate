@@ -34,20 +34,40 @@ export type SteerServerMessage =
 // ---- Control plane: orchestrator -> gateway ----
 // Convex cloud cannot reach tailnet addresses, so the orchestrator never
 // dials a gateway. It enqueues rows in the Convex `commands` table
-// (kind "start" with a StartTaskRequest payload, or "interrupt"); the gateway
-// subscribes via an outbound Convex client connection, executes against its
-// own local HTTP surface, and acks.
+// (kind "start" with a StartTaskRequest payload, "user_message" with a
+// UserMessagePayload, or "interrupt"); the gateway subscribes via an outbound
+// Convex client connection, executes against its own local HTTP surface, and
+// acks.
 //
 // ---- Gateway HTTP surface (tailnet/local only) ----
-// POST /task       StartTaskRequest -> 202, or 409 if a task is running
-// POST /interrupt  {}               -> 200
+// POST /task       StartTaskRequest   -> 202, or 409 if a task is running
+// POST /message    UserMessagePayload -> 200, or 409 if no live session for
+//                  that taskId (steering a finished/evicted session is a
+//                  no-op, never a crosstalk risk)
+// POST /interrupt  {}                 -> 200
 // GET  /health     -> GatewayHealth
-// Both POSTs require the x-devbox-secret header (Tailscale Serve exposes the
+// All POSTs require the x-devbox-secret header (Tailscale Serve exposes the
 // whole port to the tailnet); missing/wrong secret -> 401.
 export type StartTaskRequest = {
   taskId: string;
   prompt: string;
   cwd?: string;
+};
+
+/** A Slack-relayed steering message for a running task's live session (same
+ * effect as typing into the monitoring page's steering box). taskId guards
+ * against a stale command reaching a devbox that moved on to another task. */
+export type UserMessagePayload = {
+  taskId: string;
+  text: string;
+};
+
+/** Payload for "interrupt". With taskId, the gateway only stops the session
+ * if it still belongs to that task (a stale stop must never kill a later
+ * occupant). Without it ("{}"), the interrupt is unconditional — the local
+ * eviction path uses that form. */
+export type InterruptPayload = {
+  taskId?: string;
 };
 
 export type GatewayHealth = {

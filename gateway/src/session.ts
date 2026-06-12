@@ -134,6 +134,9 @@ export class SessionManager {
   #interrupted = false;
   /** True while a queued user message has not yet produced a result. */
   #turnInFlight = false;
+  /** True once the current task reported a terminal status (the session may
+   * outlive it as finished-but-steerable; see terminalEmitted()). */
+  #terminalEmitted = false;
   #queue: AsyncQueue<SDKUserMessage> | null = null;
   #query: AgentQuery | null = null;
   #throttle: Throttler;
@@ -168,6 +171,17 @@ export class SessionManager {
     return { running: this.#running, taskId: this.#taskId };
   }
 
+  /**
+   * True once the current task has reported completed/failed. Slack-relayed
+   * steers (POST /message) must be dropped then — a late message would start
+   * a new turn on a finished task and could regress its terminal record —
+   * while monitoring-page steering of the finished-but-steerable session
+   * stays allowed (it goes through /ws/steer, not /message).
+   */
+  terminalEmitted(): boolean {
+    return this.#terminalEmitted;
+  }
+
   historySnapshot(): SDKMessage[] {
     return this.#history.snapshot();
   }
@@ -180,6 +194,7 @@ export class SessionManager {
     this.#taskId = request.taskId;
     this.#interrupted = false;
     this.#turnInFlight = true;
+    this.#terminalEmitted = false;
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
 
     const queue = createAsyncQueue<SDKUserMessage>();
@@ -248,6 +263,7 @@ export class SessionManager {
     // normal retire flow), then wind the session down. Suppress the
     // interrupt-path "stopped" event so it cannot overwrite "failed".
     this.#turnInFlight = false;
+    this.#terminalEmitted = true;
     this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
@@ -354,6 +370,7 @@ export class SessionManager {
     if (message.type === "result") {
       if (this.#interrupted) return; // "stopped" is emitted at session end.
       this.#turnInFlight = false;
+      this.#terminalEmitted = true;
       const terminal = mapResultMessage(message);
       this.#emit(terminal.type, terminal.summary);
     }

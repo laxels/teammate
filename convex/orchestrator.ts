@@ -2,12 +2,21 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
-import type { HostVmPayload, StartTaskRequest } from "../shared/protocol";
 import {
+  type InterruptPayload,
+  isTerminalTaskStatus,
+  type StartTaskRequest,
+  type UserMessagePayload,
+} from "../shared/protocol";
+import {
+  buildOrchestratorUserMessage,
   classifySlackEvent,
   monitoringUrl,
   resolveThreadTarget,
+  steerRejection,
+  stopRejection,
   type ThreadTarget,
+  taskActionAuthorization,
 } from "../src/orchestration";
 import { postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
@@ -28,10 +37,12 @@ You receive Slack messages (DMs and @mentions). Either answer directly or use yo
 - When all VM slots are full, start_task queues the task and the fleet AUTOMATICALLY starts bootstrapping a new Mac host (the tool result tells you the host name and that this takes roughly 20-45 minutes). Relay that honestly. The permanent devbox devbox-1 may be idle as a faster fallback: offer it, but only use it when the user says so or explicitly asked for it up front (set use_permanent_devbox: true) — it can carry state between tasks, which is why ephemeral is the default.
 - get_fleet shows the Mac hosts, VM slots, in-flight host bootstraps, queued tasks, and recent fleet events. Use it when the user asks about capacity/infrastructure or when debugging why a task hasn't started.
 - get_task / list_tasks answer questions about ongoing work.
+- steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts).
 - stop_task interrupts a running task (it also cancels a task still waiting in the queue).
-- Steering a running task does NOT go through you: mid-task guidance happens on the task's monitoring page (linked in its status updates). Point users there.
 
-Once a task starts, status updates and the monitoring link are posted to this conversation automatically — never promise to "report back" manually.
+Each task's home is the Slack thread of the request that started it; follow-up tasks started from that thread share it. Messages arriving in a task's thread include a <thread_context> block listing the task(s) anchored there — treat them as being about that work: steer with steer_task, report with get_task, stop with stop_task. With several tasks listed, prefer the one the message names, otherwise the newest non-terminal one; ask before a stop that is ambiguous between running tasks. A plain question ("how's it going?") deserves a status answer, not a steer. Steering/stopping is restricted to the task's owner or replies in its own thread — relay the tool's error honestly if it refuses.
+
+Once a task starts, status updates and the monitoring link are posted to its thread automatically — never promise to "report back" manually. The monitoring page additionally offers live desktop viewing and the same steering.
 
 Formatting: concise Slack style — *bold*, _italic_, \`code\`, "-" bullets, <URL|label> links. No markdown headers, no **double asterisks**. Keep replies short: you are a teammate in chat, not an essayist.`;
 
@@ -86,6 +97,23 @@ const TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "steer_task",
+    description:
+      "Send a follow-up message into a running task's live Claude Code session (the Slack equivalent of the monitoring page's steering box). Use it to relay the user's mid-task guidance, corrections, or answers. Works until the task finishes, including while its devbox is provisioning (delivery is queued until the session starts). For finished tasks, start a follow-up task instead.",
+    input_schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task id to steer" },
+        message: {
+          type: "string",
+          description:
+            "The guidance to deliver to the session, written as if speaking to the Claude Code instance doing the work. Preserve the user's intent and constraints faithfully.",
+        },
+      },
+      required: ["taskId", "message"],
+    },
+  },
+  {
     name: "stop_task",
     description:
       "Interrupt a running task on its devbox. Call this when the user asks to stop or cancel a task.",
@@ -106,6 +134,8 @@ function toolError(message: string): string {
 async function executeTool(
   ctx: ActionCtx,
   target: ThreadTarget,
+  /** Slack user id of the message author — authorizes steer/stop. */
+  requester: string,
   block: Anthropic.ToolUseBlock,
 ): Promise<string> {
   const input = (block.input ?? {}) as Record<string, unknown>;
@@ -159,8 +189,6 @@ async function executeTool(
         return toolError("title (string) and prompt (string) are required");
       }
       const taskId = `task-${crypto.randomUUID().slice(0, 8)}`;
-      const threadArgs =
-        target.threadTs === undefined ? {} : { slackThreadTs: target.threadTs };
 
       // Explicit opt-in: the always-on permanent devbox. State can persist
       // between tasks there, so this path is never chosen silently.
@@ -186,7 +214,8 @@ async function executeTool(
           devboxId: claimed.devboxId,
           placement: "permanent",
           slackChannel: target.channel,
-          ...threadArgs,
+          slackThreadTs: target.threadTs,
+          slackUser: requester,
         });
         return JSON.stringify({
           ok: true,
@@ -210,7 +239,8 @@ async function executeTool(
         prompt,
         placement: "ephemeral",
         slackChannel: target.channel,
-        ...threadArgs,
+        slackThreadTs: target.threadTs,
+        slackUser: requester,
       });
       const placement = await ctx.runMutation(
         internal.hosts.placeEphemeralTask,
@@ -251,43 +281,112 @@ async function executeTool(
       return JSON.stringify(fleet);
     }
 
+    case "steer_task": {
+      const { taskId, message } = input;
+      if (typeof taskId !== "string" || typeof message !== "string") {
+        return toolError("taskId (string) and message (string) are required");
+      }
+      const task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
+      if (task === null) {
+        return toolError(`no task with id ${taskId}`);
+      }
+      const unauthorized = taskActionAuthorization({ task, requester, target });
+      if (unauthorized !== null) {
+        return toolError(unauthorized);
+      }
+      const devbox =
+        task.devboxId === undefined
+          ? null
+          : await ctx.runQuery(internal.devboxes.getByDevboxId, {
+              devboxId: task.devboxId,
+            });
+      const rejection = steerRejection(task, devbox);
+      if (rejection !== null || devbox === null) {
+        return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
+      }
+      const payload: UserMessagePayload = { taskId, text: message };
+      await ctx.runMutation(internal.commands.enqueue, {
+        devboxId: devbox.devboxId,
+        kind: "user_message",
+        payload: JSON.stringify(payload),
+      });
+      return JSON.stringify({
+        ok: true,
+        taskId,
+        note: "message queued for the live session. If the task finishes before delivery it is dropped — the thread's latest status update is authoritative.",
+      });
+    }
+
     case "stop_task": {
       const taskId = input.taskId;
       if (typeof taskId !== "string") {
         return toolError("taskId (string) is required");
       }
-      const task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
+      let task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
       if (task === null) {
         return toolError(`no task with id ${taskId}`);
+      }
+      const unauthorized = taskActionAuthorization({ task, requester, target });
+      if (unauthorized !== null) {
+        return toolError(unauthorized);
+      }
+      if (isTerminalTaskStatus(task.status)) {
+        return toolError(
+          `task ${taskId} is already ${task.status} — nothing to stop`,
+        );
       }
       if (task.devboxId === undefined) {
         // Still waiting for ephemeral placement: cancel in place.
         const cancelled = await ctx.runMutation(internal.tasks.cancelQueued, {
           taskId,
         });
-        return cancelled
-          ? JSON.stringify({
-              ok: true,
-              taskId,
-              note: "task was still queued (no devbox yet) and has been cancelled",
-            })
-          : toolError(`task ${taskId} has no devbox assigned`);
+        if (cancelled) {
+          // Queue cancellations never reach /devbox/events, so the terminal
+          // note for the task's thread is posted here.
+          await ctx.scheduler.runAfter(0, internal.notify.taskCancelled, {
+            taskId,
+          });
+          return JSON.stringify({
+            ok: true,
+            taskId,
+            note: "task was still queued (no devbox yet) and has been cancelled",
+          });
+        }
+        // Lost a race between the read and the cancel: re-read to see what
+        // actually happened instead of guessing.
+        task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
+        if (task === null) {
+          return toolError(`no task with id ${taskId}`);
+        }
+        if (isTerminalTaskStatus(task.status)) {
+          return toolError(
+            `task ${taskId} is already ${task.status} — nothing to stop`,
+          );
+        }
+        if (task.devboxId === undefined) {
+          return toolError(
+            `task ${taskId} could not be cancelled (status: ${task.status}) — try again`,
+          );
+        }
+        // Placed while we were cancelling: fall through to the interrupt path.
       }
       const devbox = await ctx.runQuery(internal.devboxes.getByDevboxId, {
         devboxId: task.devboxId,
       });
-      if (devbox === null) {
-        return toolError(`devbox ${task.devboxId} is not registered`);
+      const rejection = stopRejection(task, devbox);
+      if (rejection !== null || devbox === null) {
+        return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
       }
+      const payload: InterruptPayload = { taskId };
       await ctx.runMutation(internal.commands.enqueue, {
         devboxId: devbox.devboxId,
         kind: "interrupt",
-        payload: "{}",
+        payload: JSON.stringify(payload),
       });
       return JSON.stringify({
         ok: true,
         taskId,
-        note: "interrupt queued — if a turn was in flight, a 'stopped' status update will follow in the task's conversation",
+        note: "interrupt queued — if a turn was in flight, a 'stopped' status update will follow in the task's thread",
       });
     }
 
@@ -306,8 +405,9 @@ function finalTextOf(message: Anthropic.Message): string {
 
 /**
  * Processes one ingested Slack event: filters out bot/self messages, runs the
- * Fable 5 tool loop, posts the final reply to the originating channel
- * (threaded for channel mentions), and marks the event processed.
+ * Fable 5 tool loop, posts the final reply in a thread under the triggering
+ * message, and marks the event processed. Replies inside a task's thread get
+ * that task injected as context (see buildOrchestratorUserMessage).
  */
 export const processSlackEvent = internalAction({
   args: { eventId: v.string() },
@@ -339,14 +439,19 @@ export const processSlackEvent = internalAction({
     }
     const anthropic = new Anthropic();
 
-    const source =
-      trigger.type === "app_mention"
-        ? `mention in channel ${trigger.channel}`
-        : "direct message";
+    // A reply inside an existing thread may be about the task(s) anchored
+    // there; hand the model that association instead of leaving it amnesiac.
+    const threadTasks =
+      trigger.threadTs === undefined
+        ? []
+        : await ctx.runQuery(internal.tasks.findByChannelThread, {
+            slackChannel: trigger.channel,
+            slackThreadTs: trigger.threadTs,
+          });
     const messages: Anthropic.MessageParam[] = [
       {
         role: "user",
-        content: `Slack ${source} from <@${trigger.user}>:\n\n${trigger.text}`,
+        content: buildOrchestratorUserMessage({ trigger, threadTasks }),
       },
     ];
 
@@ -377,7 +482,7 @@ export const processSlackEvent = internalAction({
           results.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: await executeTool(ctx, target, toolUse),
+            content: await executeTool(ctx, target, trigger.user, toolUse),
           });
         }
         messages.push({ role: "user", content: results });

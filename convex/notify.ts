@@ -4,7 +4,11 @@ import {
   EPHEMERAL_RETIRE_GRACE_MS,
   isTerminalTaskStatus,
 } from "../shared/protocol";
-import { buildDevboxEventMessage, monitoringUrl } from "../src/orchestration";
+import {
+  buildDevboxEventMessage,
+  monitoringUrl,
+  replyHintFor,
+} from "../src/orchestration";
 import { postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
@@ -44,6 +48,7 @@ export const devboxEvent = internalAction({
       title: task.title,
       summary: args.summary,
       monitorUrl: devbox === null ? null : monitoringUrl(devbox.gatewayUrl),
+      replyHint: replyHintFor(task),
     });
     // A terminal event sends an ephemeral devbox into "retiring": warn that
     // the monitoring page is about to disappear with the VM.
@@ -56,6 +61,34 @@ export const devboxEvent = internalAction({
       botToken,
       channel: task.slackChannel,
       text: `${text}${retireNote}`,
+      threadTs: task.slackThreadTs,
+    });
+  },
+});
+
+/**
+ * Posts the terminal note for a task cancelled while still queued. Devbox-path
+ * stops are announced via /devbox/events; queue cancellations have no devbox,
+ * so without this the task's thread would dangle without an outcome.
+ */
+export const taskCancelled = internalAction({
+  args: { taskId: v.string() },
+  handler: async (ctx, args) => {
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    if (botToken === undefined) {
+      console.error("SLACK_BOT_TOKEN is not set; dropping notification");
+      return;
+    }
+    const task = await ctx.runQuery(internal.tasks.getByTaskId, {
+      taskId: args.taskId,
+    });
+    if (task === null) {
+      return;
+    }
+    await postSlackMessage({
+      botToken,
+      channel: task.slackChannel,
+      text: `:octagonal_sign: *${task.title}* (\`${task.taskId}\`) was cancelled while still queued — no devbox had been assigned yet.`,
       threadTs: task.slackThreadTs,
     });
   },

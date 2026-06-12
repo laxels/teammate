@@ -47,14 +47,22 @@ export default defineSchema({
       v.union(v.literal("ephemeral"), v.literal("permanent")),
     ),
     slackChannel: v.string(),
+    // The task's home thread: every task anchors to the thread of the request
+    // that started it (follow-up tasks started from a thread share it).
+    // Absent only on rows from before DM replies were threaded.
     slackThreadTs: v.optional(v.string()),
+    // Who asked (Slack user id). Steer/stop authorization: the owner from
+    // anywhere, anyone from inside the task's thread. Absent on legacy rows.
+    slackUser: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
   })
     .index("by_task_id", ["taskId"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    // Inbound thread replies look their task(s) up by thread anchor.
+    .index("by_channel_thread", ["slackChannel", "slackThreadTs"]),
 
   // Devbox VMs. Permanent devboxes are registered manually via
   // devboxes.registerDevbox and cycle warm <-> busy; ephemeral devboxes are
@@ -137,8 +145,13 @@ export default defineSchema({
   commands: defineTable({
     commandId: v.string(),
     devboxId: v.string(),
-    kind: v.union(v.literal("start"), v.literal("interrupt")),
-    // JSON payload: StartTaskRequest for "start", "{}" for "interrupt".
+    kind: v.union(
+      v.literal("start"),
+      v.literal("user_message"),
+      v.literal("interrupt"),
+    ),
+    // JSON payload: StartTaskRequest for "start", UserMessagePayload for
+    // "user_message", "{}" for "interrupt".
     payload: v.string(),
     status: v.union(v.literal("pending"), v.literal("acked")),
     createdAt: v.number(),
@@ -146,10 +159,12 @@ export default defineSchema({
     .index("by_devbox_status", ["devboxId", "status"])
     .index("by_command_id", ["commandId"]),
 
-  // Lifecycle events posted by devbox gateways to /devbox/events.
+  // Lifecycle events posted by devbox gateways to /devbox/events, plus
+  // orchestrator-recorded events for tasks that never reached a devbox
+  // (queue cancellations) — those have no devboxId.
   taskEvents: defineTable({
     taskId: v.string(),
-    devboxId: v.string(),
+    devboxId: v.optional(v.string()),
     type: v.string(),
     summary: v.string(),
     ts: v.number(),

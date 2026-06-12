@@ -33,6 +33,32 @@ export const getByTaskId = internalQuery({
   },
 });
 
+/**
+ * Tasks anchored to a Slack thread, newest first — how an inbound thread
+ * reply finds the work it is about. Multiple tasks can share a thread when
+ * one request spawned several.
+ */
+export const findByChannelThread = internalQuery({
+  args: { slackChannel: v.string(), slackThreadTs: v.string() },
+  handler: async (ctx, args) => {
+    const tasks = await ctx.db
+      .query("tasks")
+      .withIndex("by_channel_thread", (q) =>
+        q
+          .eq("slackChannel", args.slackChannel)
+          .eq("slackThreadTs", args.slackThreadTs),
+      )
+      .collect();
+    return tasks
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((task) => ({
+        taskId: task.taskId,
+        title: task.title,
+        status: task.status,
+      }));
+  },
+});
+
 export const getWithEvents = internalQuery({
   args: { taskId: v.string() },
   handler: async (ctx, args) => {
@@ -65,6 +91,7 @@ export const create = internalMutation({
     ),
     slackChannel: v.string(),
     slackThreadTs: v.optional(v.string()),
+    slackUser: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -79,6 +106,7 @@ export const create = internalMutation({
       ...(args.slackThreadTs === undefined
         ? {}
         : { slackThreadTs: args.slackThreadTs }),
+      ...(args.slackUser === undefined ? {} : { slackUser: args.slackUser }),
       createdAt: now,
       updatedAt: now,
     });
@@ -88,7 +116,9 @@ export const create = internalMutation({
 /**
  * Cancels a task that is still waiting for ephemeral placement (no devbox
  * assigned, nothing to interrupt). Returns false when the task has already
- * been placed — the caller should interrupt the devbox instead.
+ * been placed — the caller should interrupt the devbox instead. Records a
+ * "stopped" task event so the task's history isn't empty (devbox-path stops
+ * get theirs from /devbox/events).
  */
 export const cancelQueued = internalMutation({
   args: { taskId: v.string() },
@@ -104,7 +134,14 @@ export const cancelQueued = internalMutation({
     ) {
       return false;
     }
-    await ctx.db.patch(task._id, { status: "stopped", updatedAt: Date.now() });
+    const now = Date.now();
+    await ctx.db.patch(task._id, { status: "stopped", updatedAt: now });
+    await ctx.db.insert("taskEvents", {
+      taskId: task.taskId,
+      type: "stopped",
+      summary: "Cancelled while queued (before a devbox was assigned).",
+      ts: now,
+    });
     return true;
   },
 });

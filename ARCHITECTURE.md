@@ -45,17 +45,26 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 1. Slack event → Convex HTTP action `/slack/events` (signature-verified,
    deduped into `slackEvents`).
 2. Orchestrator action (Fable 5 `xhigh` + tools) decides: answer directly, or
-   start/steer/stop a task on a devbox.
+   start/steer/stop a task on a devbox. Every reply is threaded under the
+   triggering message — one task = one Slack thread, anchored at the request.
 3. Task start: the orchestrator enqueues a command row in Convex (it cannot
    reach the tailnet); the gateway's outbound subscription picks it up within
    seconds, runs an Agent SDK session (streaming input mode), and posts
    `DevboxEvent`s back to Convex `/devbox/events`. Gateways heartbeat every
    60s; `claimWarm` only assigns devboxes seen in the last 2 minutes.
-4. Orchestrator turns events into Slack updates (thread-aware) and posts the
-   monitoring link `https://<devbox-tailnet-host>/` (Tailscale Serve).
-5. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
-   steering sidebar (`/ws/steer` → Agent SDK streaming input / `interrupt()`).
-6. A Convex cron flags tasks with no events for >30 min and the orchestrator
+4. Orchestrator turns events into Slack updates posted to the task's thread,
+   with the monitoring link `https://<devbox-tailnet-host>/` (Tailscale
+   Serve).
+5. Replies in a task's thread reach the orchestrator with that task injected
+   as context: `steer_task` relays guidance into the live session via a
+   `user_message` command (gateway `POST /message`, taskId-guarded so stale
+   commands never reach a later task's session); `stop_task` interrupts,
+   refusing terminal tasks and devboxes that moved on to other work.
+6. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
+   steering sidebar (`/ws/steer` → Agent SDK streaming input / `interrupt()`)
+   — the same `pushUserMessage` primitive Slack thread replies use, so steers
+   from either surface appear in the page's transcript.
+7. A Convex cron flags tasks with no events for >30 min and the orchestrator
    checks on them proactively.
 
 ## Conventions

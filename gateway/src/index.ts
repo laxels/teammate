@@ -71,11 +71,43 @@ startCommandConsumer({
       }
       return;
     }
-    await fetch(`${localUrl}/interrupt`, {
-      method: "POST",
-      headers: authHeader,
-      body: "{}",
-    });
+    if (command.kind === "user_message") {
+      // Slack-relayed steering. A 409 means the session ended (or the devbox
+      // moved on) before delivery — the task's terminal status update already
+      // tells that story in its thread, so just log.
+      const response = await fetch(`${localUrl}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeader },
+        body: command.payload,
+      });
+      if (!response.ok) {
+        console.warn(
+          `[gateway] user_message ${command.commandId} not delivered (HTTP ${response.status})`,
+        );
+      }
+      return;
+    }
+    if (command.kind === "interrupt") {
+      // The payload may carry { taskId } so /interrupt can refuse to stop a
+      // session that has moved on to another task.
+      const response = await fetch(`${localUrl}/interrupt`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeader },
+        body: command.payload,
+      });
+      if (!response.ok) {
+        console.warn(
+          `[gateway] interrupt ${command.commandId} not applied (HTTP ${response.status})`,
+        );
+      }
+      return;
+    }
+    // A kind this binary doesn't know (orchestrator deployed ahead of the
+    // gateway payload). Never guess — executing it as something else could
+    // kill the session. Log and let the consumer ack it away.
+    console.warn(
+      `[gateway] ignoring unknown command kind ${String(command.kind)} (${command.commandId})`,
+    );
   },
 });
 

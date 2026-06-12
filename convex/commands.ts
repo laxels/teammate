@@ -9,6 +9,7 @@ import {
 
 export const commandKindValidator = v.union(
   v.literal("start"),
+  v.literal("user_message"),
   v.literal("interrupt"),
 );
 
@@ -94,7 +95,11 @@ export const heartbeat = mutation({
  * gateway commands inside their own transaction. */
 export async function enqueueCommandRow(
   ctx: MutationCtx,
-  args: { devboxId: string; kind: "start" | "interrupt"; payload: string },
+  args: {
+    devboxId: string;
+    kind: "start" | "user_message" | "interrupt";
+    payload: string;
+  },
 ): Promise<string> {
   const commandId = `cmd-${crypto.randomUUID().slice(0, 8)}`;
   await ctx.db.insert("commands", {
