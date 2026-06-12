@@ -239,3 +239,30 @@ test("destroy keeps the devbox row when the VM survives tart delete", async () =
   );
   expect(removed).toEqual([]);
 });
+
+test("transient ssh failures (exit 255) are retried, not fatal", async () => {
+  let bypassAttempts = 0;
+  const { calls, executors } = harness((command) => {
+    if (
+      command[0] === "sshpass" &&
+      remoteOf(command).includes("settings.json")
+    ) {
+      bypassAttempts++;
+      if (bypassAttempts === 1) {
+        return {
+          code: 255,
+          stderr: "admin@192.168.64.3: Permission denied (publickey,password,keyboard-interactive).",
+        };
+      }
+      return {};
+    }
+    return happyHandler(command);
+  });
+  await executors.provision("dev-1");
+
+  expect(bypassAttempts).toBe(2);
+  // The rest of the sequence still completed.
+  expect(
+    calls.some((c) => remoteOf(c.command).includes("tailscale up")),
+  ).toBe(true);
+});

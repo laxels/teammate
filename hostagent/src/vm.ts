@@ -110,12 +110,31 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const tart = config.tartBin;
 
+  // Freshly cloned VMs intermittently deny password auth for a short window
+  // after boot (new MAC -> OpenDirectory/auth settle): provisions fail at a
+  // RANDOM ssh step with exit 255 while neighboring steps succeed. Every
+  // provisioning step is idempotent, so ssh-layer failures (255) get retried.
+  const SSH_FAILURE_EXIT = 255;
+  const SSH_RETRY_ATTEMPTS = 4;
+  const SSH_RETRY_DELAY_MS = 5_000;
+
   const must = async (
     step: string,
     command: string[],
     runOptions?: RunOptions,
   ): Promise<RunResult> => {
-    const result = await run(command, runOptions);
+    let result = await run(command, runOptions);
+    for (
+      let attempt = 1;
+      result.code === SSH_FAILURE_EXIT && attempt < SSH_RETRY_ATTEMPTS;
+      attempt++
+    ) {
+      console.log(
+        `[hostagent] ${step}: ssh failure (exit 255), retry ${attempt}/${SSH_RETRY_ATTEMPTS - 1}`,
+      );
+      await sleep(SSH_RETRY_DELAY_MS);
+      result = await run(command, runOptions);
+    }
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim();
       throw new Error(`${step} failed (exit ${result.code}): ${detail}`);
