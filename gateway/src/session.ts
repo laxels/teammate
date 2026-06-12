@@ -40,10 +40,23 @@ export type SessionManagerDeps = {
   now?: () => number;
   progressIntervalMs?: number;
   historyCapacity?: number;
+  /** Hang detection thresholds (tests tighten these). */
+  watchdog?: { initMs?: number; stallMs?: number; intervalMs?: number };
 };
 
 export const HISTORY_CAPACITY = 500;
 export const PROGRESS_INTERVAL_MS = 30_000;
+
+// Watchdog defaults: the SDK emits its init message within seconds of spawn
+// (well before the first model response), so a long first-message silence
+// means the subprocess or its first API call is hung — observed live on
+// 2026-06-12: a session stalled before its first response for 35 min with
+// zero signals. Mid-session, tool results and assistant messages flow
+// continuously; prolonged silence is a stall (xhigh thinking pauses included,
+// 10 min is generous).
+export const INIT_WATCHDOG_MS = 2 * 60_000;
+export const STALL_WATCHDOG_MS = 10 * 60_000;
+export const WATCHDOG_INTERVAL_MS = 10_000;
 
 const MODEL = "claude-fable-5";
 const EFFORT = "xhigh";
@@ -124,6 +137,11 @@ export class SessionManager {
   #queue: AsyncQueue<SDKUserMessage> | null = null;
   #query: AgentQuery | null = null;
   #throttle: Throttler;
+  #watchdogConfig: { initMs: number; stallMs: number; intervalMs: number };
+  #watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  #sessionStartedAt = 0;
+  /** null until the first SDK message of the current session arrives. */
+  #lastMessageAt: number | null = null;
 
   constructor(deps: SessionManagerDeps) {
     this.#deps = {
@@ -139,6 +157,11 @@ export class SessionManager {
       deps.historyCapacity ?? HISTORY_CAPACITY,
     );
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
+    this.#watchdogConfig = {
+      initMs: deps.watchdog?.initMs ?? INIT_WATCHDOG_MS,
+      stallMs: deps.watchdog?.stallMs ?? STALL_WATCHDOG_MS,
+      intervalMs: deps.watchdog?.intervalMs ?? WATCHDOG_INTERVAL_MS,
+    };
   }
 
   status(): SessionStatus {
@@ -169,6 +192,12 @@ export class SessionManager {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       cwd: request.cwd ?? homedir(),
+      // Subprocess stderr into the gateway log: hung sessions must leave
+      // evidence (a first-turn hang on 2026-06-12 left none).
+      stderr: (data: string) => {
+        const line = data.trimEnd();
+        if (line.length > 0) console.error("[gateway] sdk-stderr:", line);
+      },
       // In-process MCP servers (desktop computer use) — every task gets GUI
       // control; no per-task flag.
       ...(this.#createMcpServers !== null
@@ -182,8 +211,58 @@ export class SessionManager {
 
     this.#emit("started", `Started task: ${excerpt(request.prompt)}`);
     this.#deps.onStatusChange?.(this.status());
+    this.#sessionStartedAt = this.#deps.now();
+    this.#lastMessageAt = null;
+    this.#watchdogTimer = setInterval(
+      () => this.#checkWatchdog(request.taskId),
+      this.#watchdogConfig.intervalMs,
+    );
     void this.#run(query, request.taskId);
     return true;
+  }
+
+  /** Hang detection: a healthy session emits its SDK init message within
+   * seconds and streams messages continuously thereafter. */
+  #checkWatchdog(taskId: string): void {
+    if (!this.#running) return;
+    const now = this.#deps.now();
+    const sinceStart = now - this.#sessionStartedAt;
+    const sinceLast =
+      this.#lastMessageAt === null ? null : now - this.#lastMessageAt;
+    const reason =
+      this.#lastMessageAt === null && sinceStart > this.#watchdogConfig.initMs
+        ? `no SDK message at all ${Math.round(sinceStart / 1000)}s after session start (subprocess or first API call hung)`
+        : sinceLast !== null && sinceLast > this.#watchdogConfig.stallMs
+          ? `no SDK messages for ${Math.round(sinceLast / 1000)}s (session stalled mid-task)`
+          : null;
+    if (reason === null) return;
+    console.error(
+      `[gateway] session watchdog tripped for ${taskId}: ${reason}`,
+    );
+    // One trip is final.
+    if (this.#watchdogTimer !== null) {
+      clearInterval(this.#watchdogTimer);
+      this.#watchdogTimer = null;
+    }
+    // Emit the terminal status FIRST (recycles ephemeral devboxes via the
+    // normal retire flow), then wind the session down. Suppress the
+    // interrupt-path "stopped" event so it cannot overwrite "failed".
+    this.#turnInFlight = false;
+    this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
+    void this.stop();
+    // A subprocess hung badly enough to trip the watchdog may also ignore the
+    // interrupt, leaving #run blocked forever — which would wedge a permanent
+    // devbox's gateway (eviction polls /health until free). Last resort:
+    // exit for a clean launchd relaunch. unref so tests never hang on it.
+    const hardExit = setTimeout(() => {
+      if (this.#running) {
+        console.error(
+          "[gateway] watchdog: session did not wind down 30s after interrupt; exiting for a clean relaunch",
+        );
+        process.exit(1);
+      }
+    }, 30_000);
+    hardExit.unref?.();
   }
 
   /** Push a follow-up user message into the live session. */
@@ -224,6 +303,10 @@ export class SessionManager {
   async #run(query: AgentQuery, taskId: string): Promise<void> {
     try {
       for await (const message of query) {
+        this.#lastMessageAt = this.#deps.now();
+        // Type-only breadcrumb so a hung/stalled session is diagnosable from
+        // the gateway log alone (content still goes to steer clients only).
+        console.log(`[gateway] sdk message: ${message.type}`);
         this.#history.push(message);
         this.#deps.onMessage?.(message);
         this.#handleLifecycle(message);
@@ -245,6 +328,10 @@ export class SessionManager {
       // the task's terminal status.
       if (this.#interrupted && this.#turnInFlight) {
         this.#emit("stopped", "Stopped by interrupt.", taskId);
+      }
+      if (this.#watchdogTimer !== null) {
+        clearInterval(this.#watchdogTimer);
+        this.#watchdogTimer = null;
       }
       this.#running = false;
       this.#taskId = null;

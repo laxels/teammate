@@ -273,6 +273,94 @@ describe("SessionManager", () => {
     expect(factoryCalls).toBe(2);
   });
 
+  test("init watchdog fails a session with no SDK messages and recycles it", async () => {
+    const clock = { t: 0 };
+    let interrupts = 0;
+    const neverYields: QueryFn = (params) => {
+      async function* generate(): AsyncGenerator<SDKMessage, void> {
+        // Simulates the observed first-turn hang: the subprocess produces
+        // nothing, and even reading the input stalls.
+        await new Promise<void>(() => {});
+        void params;
+        yield assistantMessage("unreachable");
+      }
+      return Object.assign(generate(), {
+        interrupt: async () => {
+          interrupts += 1;
+        },
+        setPermissionMode: async () => {},
+      });
+    };
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn: neverYields,
+      now: () => clock.t,
+      watchdog: { initMs: 1_000, stallMs: 60_000, intervalMs: 5 },
+    });
+
+    session.start({ taskId: "task-1", prompt: "doomed to hang" });
+    clock.t = 1_500; // past initMs with no first message
+    await until(() => events.some((e) => e.type === "failed"));
+
+    const failed = events.find((e) => e.type === "failed");
+    expect(failed?.summary).toContain("no SDK message at all");
+    await until(() => interrupts >= 1);
+    // The interrupt-path "stopped" event is suppressed: failed is terminal.
+    expect(events.some((e) => e.type === "stopped")).toBe(false);
+  });
+
+  test("stall watchdog fails a session that goes silent mid-task", async () => {
+    const clock = { t: 0 };
+    const gate = Promise.withResolvers<void>();
+    const stallsAfterOne: QueryFn = (params) => {
+      async function* generate(): AsyncGenerator<SDKMessage, void> {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        await iterator.next();
+        yield assistantMessage("working...");
+        await gate.promise; // never resolves: mid-task stall
+      }
+      return Object.assign(generate(), {
+        interrupt: async () => {
+          gate.resolve();
+        },
+        setPermissionMode: async () => {},
+      });
+    };
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn: stallsAfterOne,
+      now: () => clock.t,
+      watchdog: { initMs: 60_000, stallMs: 1_000, intervalMs: 5 },
+    });
+
+    session.start({ taskId: "task-1", prompt: "stalls midway" });
+    await until(() => events.some((e) => e.type === "progress"));
+    clock.t = 2_000; // past stallMs since the last message
+    await until(() => events.some((e) => e.type === "failed"));
+
+    expect(events.find((e) => e.type === "failed")?.summary).toContain(
+      "no SDK messages for",
+    );
+    await until(() => !session.status().running);
+    expect(events.some((e) => e.type === "stopped")).toBe(false);
+  });
+
+  test("watchdog stays quiet on a healthy session", async () => {
+    const { queryFn } = createEchoQueryFn();
+    const { events, emitEvent } = createEventRecorder();
+    const session = new SessionManager({
+      emitEvent,
+      queryFn,
+      watchdog: { initMs: 1_000, stallMs: 1_000, intervalMs: 5 },
+    });
+    session.start({ taskId: "task-1", prompt: "healthy" });
+    await until(() => events.some((e) => e.type === "completed"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(events.some((e) => e.type === "failed")).toBe(false);
+  });
+
   test("history is capped at the configured capacity", async () => {
     const { emitEvent } = createEventRecorder();
     const turns = Array.from({ length: 8 }, (_, i) =>
