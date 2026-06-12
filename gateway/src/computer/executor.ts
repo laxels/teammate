@@ -181,16 +181,67 @@ export function parseModifierList(text: string): string[] | null {
 export const SCREEN_POINT_SIZE_SCRIPT =
   'ObjC.import("AppKit"); const size = $.NSScreen.screens.js[0].frame.size; `${size.width},${size.height}`;';
 
-const APPLESCRIPT_MODIFIERS: Record<string, string> = {
-  cmd: "command down",
-  ctrl: "control down",
-  alt: "option down",
-  shift: "shift down",
+/** CGEventFlags modifier masks (CGEventTypes.h). */
+export const CGEVENT_FLAGS: Record<string, number> = {
+  cmd: 0x100000,
+  shift: 0x20000,
+  ctrl: 0x40000,
+  alt: 0x80000,
 };
 
-function escapeAppleScript(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
+/**
+ * ANSI-US virtual keycodes (Carbon kVK_ANSI_*) for chord synthesis. Keycodes
+ * are layout-positional; devbox images run the US layout.
+ */
+export const US_VIRTUAL_KEYCODES: Record<string, number> = {
+  a: 0,
+  s: 1,
+  d: 2,
+  f: 3,
+  h: 4,
+  g: 5,
+  z: 6,
+  x: 7,
+  c: 8,
+  v: 9,
+  b: 11,
+  q: 12,
+  w: 13,
+  e: 14,
+  r: 15,
+  y: 16,
+  t: 17,
+  "1": 18,
+  "2": 19,
+  "3": 20,
+  "4": 21,
+  "6": 22,
+  "5": 23,
+  "=": 24,
+  "9": 25,
+  "7": 26,
+  "-": 27,
+  "8": 28,
+  "0": 29,
+  "]": 30,
+  o: 31,
+  u: 32,
+  "[": 33,
+  i: 34,
+  p: 35,
+  l: 37,
+  j: 38,
+  "'": 39,
+  k: 40,
+  ";": 41,
+  "\\": 42,
+  ",": 43,
+  "/": 44,
+  n: 45,
+  m: 46,
+  ".": 47,
+  "`": 50,
+};
 
 // ---- Executor ---------------------------------------------------------------
 
@@ -376,14 +427,32 @@ export class ComputerExecutor {
       return;
     }
     // Character chords (cmd+s): cliclick's unicode typing ignores held
-    // modifiers, so route through System Events.
-    const using = press.modifiers
-      .map((mod) => APPLESCRIPT_MODIFIERS[mod])
-      .filter((mod): mod is string => mod !== undefined);
-    const script = `tell application "System Events" to keystroke "${escapeAppleScript(
-      press.key.char,
-    )}" using {${using.join(", ")}}`;
-    await this.#exec(["osascript", "-e", script]);
+    // modifiers, and System Events needs an AppleEvents TCC grant that has
+    // proven unreliable to pre-seed — post raw CGEvent keycodes instead,
+    // which ride the same Accessibility grant as the rest of the executor.
+    const keyCode = US_VIRTUAL_KEYCODES[press.key.char.toLowerCase()];
+    if (keyCode === undefined) {
+      throw new ExecutorError(
+        `No keycode mapping for "${press.key.char}" in a chord. Use a letter/digit/punctuation key, or click the UI control instead.`,
+      );
+    }
+    let flags =
+      press.key.char !== press.key.char.toLowerCase()
+        ? (CGEVENT_FLAGS.shift ?? 0)
+        : 0;
+    for (const mod of press.modifiers) {
+      flags |= CGEVENT_FLAGS[mod] ?? 0;
+    }
+    const script = [
+      'ObjC.import("CoreGraphics");',
+      `const d = $.CGEventCreateKeyboardEvent($(), ${keyCode}, true);`,
+      `$.CGEventSetFlags(d, ${flags});`,
+      "$.CGEventPost($.kCGHIDEventTap, d);",
+      `const u = $.CGEventCreateKeyboardEvent($(), ${keyCode}, false);`,
+      `$.CGEventSetFlags(u, ${flags});`,
+      "$.CGEventPost($.kCGHIDEventTap, u);",
+    ].join(" ");
+    await this.#exec(["osascript", "-l", "JavaScript", "-e", script]);
   }
 
   async holdKey(spec: string, durationSeconds: number): Promise<void> {

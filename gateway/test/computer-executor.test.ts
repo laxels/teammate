@@ -283,12 +283,18 @@ describe("ComputerExecutor input", () => {
     await executor.pressKey("Page_Down");
     expect(cliclickCalls(calls).at(-1)).toEqual(["kp:page-down"]);
 
+    // Chords post raw CGEvent keycodes (s = kVK_ANSI_S = 1, cmd = 0x100000)
     await executor.pressKey("super+s");
     const osa = calls.at(-1);
     expect(osa?.[0]).toBe("osascript");
-    expect(osa?.at(-1)).toBe(
-      'tell application "System Events" to keystroke "s" using {command down}',
-    );
+    expect(osa?.[1]).toBe("-l");
+    expect(osa?.at(-1)).toContain("CGEventCreateKeyboardEvent($(), 1, true)");
+    expect(osa?.at(-1)).toContain(`CGEventSetFlags(d, ${0x100000})`);
+
+    await executor.pressKey("ctrl+shift+t");
+    const chord = calls.at(-1)?.at(-1);
+    expect(chord).toContain("CGEventCreateKeyboardEvent($(), 17, true)");
+    expect(chord).toContain(`CGEventSetFlags(d, ${0x40000 | 0x20000})`);
 
     expect(executor.pressKey("NoSuchKey")).rejects.toThrow(
       'Unrecognized key spec "NoSuchKey"',
