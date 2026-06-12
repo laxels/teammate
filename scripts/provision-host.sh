@@ -53,13 +53,24 @@ env_secret() { # <KEY> -> value from repo .env, never echoed
 }
 
 scw_api() { # <method> <path> [json-body]
-  local method="$1" path="$2" body="${3:-}"
+  # No curl -f: HTTP error bodies (quota details, validation messages) must
+  # reach stderr — they end up in hostEvents when a fleet host runs this.
+  local method="$1" path="$2" body="${3:-}" response http_code
   if [[ -n "$body" ]]; then
-    curl -fsS -X "$method" -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" \
-      -H "Content-Type: application/json" -d "$body" "$API$path"
+    response="$(curl -sS -w $'\n%{http_code}' -X "$method" \
+      -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" \
+      -H "Content-Type: application/json" -d "$body" "$API$path")"
   else
-    curl -fsS -X "$method" -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" "$API$path"
+    response="$(curl -sS -w $'\n%{http_code}' -X "$method" \
+      -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" "$API$path")"
   fi
+  http_code="${response##*$'\n'}"
+  response="${response%$'\n'*}"
+  if (( http_code >= 400 )); then
+    echo "ERROR: Scaleway API $method $path -> HTTP $http_code: $response" >&2
+    return 1
+  fi
+  printf '%s' "$response"
 }
 
 json_get() { # <dot.path> — reads JSON on stdin, prints the value
