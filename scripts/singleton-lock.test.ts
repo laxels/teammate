@@ -166,7 +166,7 @@ describe("singleton-lock.sh", () => {
     expect((await Bun.file(ranFile).text()).trim().split("\n")).toHaveLength(1);
   });
 
-  test("a contender that observed a dead owner must not steal a rival's fresh lock", async () => {
+  test("a contender that pauses mid-steal cannot yank a fresh live lock", async () => {
     const dead = Bun.spawn(["true"]);
     await dead.exited;
     await mkdir(lockDir(repo, "convex"), { recursive: true });
