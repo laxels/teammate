@@ -22,10 +22,10 @@ import { getSlackPermalink, postSlackMessage } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { type ActionCtx, internalAction } from "./_generated/server";
 
-// Model policy (ARCHITECTURE.md): claude-fable-5 at xhigh everywhere, no
+// Model policy (ARCHITECTURE.md): claude-opus-4-8 at xhigh everywhere, no
 // fallback model, no `fallbacks` parameter — flagged requests refuse rather
 // than downgrade.
-const MODEL = "claude-fable-5";
+const MODEL = "claude-opus-4-8";
 const MAX_TOOL_ITERATIONS = 12;
 
 const SYSTEM_PROMPT = `You are ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
@@ -417,7 +417,7 @@ function finalTextOf(message: Anthropic.Message): string {
 
 /**
  * Processes one ingested Slack event: filters out bot/self messages, claims
- * the event (at-most-once — see slack.claimEvent), runs the Fable 5 tool
+ * the event (at-most-once — see slack.claimEvent), runs the Opus 4.8 tool
  * loop, and posts the final reply in a thread under the triggering message.
  * Replies inside a task's thread get that task injected as context (see
  * buildOrchestratorUserMessage). Events stranded before the claim are

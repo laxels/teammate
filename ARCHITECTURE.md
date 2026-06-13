@@ -1,6 +1,6 @@
 # ultraclaude architecture
 
-A Slack-addressable "virtual teammate". The orchestrator (Claude Fable 5,
+A Slack-addressable "virtual teammate". The orchestrator (Claude Opus 4.8,
 effort `xhigh`, no model fallback) receives DMs/mentions, manages tasks, and
 delegates each task to a Claude Code instance running in a macOS devbox VM.
 
@@ -8,7 +8,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 | Component | Dir | Runs on | Role |
 |---|---|---|---|
-| Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Fable 5 tool loop, staleness cron |
+| Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Opus 4.8 tool loop, staleness cron |
 | Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`) and Playwright browser MCP tools (`gateway/src/browser/`: aria snapshots + ref-targeted actions in a gateway-owned headed Chrome — see "Browser automation" below), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
@@ -20,10 +20,12 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   running Tart VMs (max 2 concurrent macOS VMs per Apple EULA).
 - Golden image: `golden-v3` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v3`) —
   macOS Sequoia with Chrome (logged in, default browser, Claude-in-Chrome
-  extension removed), Claude desktop (logged in), Claude Code pinned to
-  `claude-fable-5` at `xhigh` (`~/.claude/settings.json`, which also carries
-  `autoCompactWindow`, BASH timeout env, `cleanupPeriodDays`),
-  `switchModelsOnFlag: false`, subscription OAuth token at
+  extension removed), Claude desktop (logged in), Claude Code run at
+  `claude-opus-4-8`/`xhigh` (set by the gateway via the Agent SDK `model`
+  option, which is authoritative over the baked `~/.claude/settings.json` pin —
+  that pin still reads `claude-fable-5` until the next golden rebake;
+  settings.json also carries `autoCompactWindow`, BASH timeout env,
+  `cleanupPeriodDays`), `switchModelsOnFlag: false`, subscription OAuth token at
   `~/claude-oauth-token.txt`. Computer-use prerequisites baked in: `cliclick`
   at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
   (SIP is disabled in the guest; grants persist across clones), 1920x1080
@@ -48,7 +50,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 1. Slack event → Convex HTTP action `/slack/events` (signature-verified,
    deduped into `slackEvents`).
-2. Orchestrator action (Fable 5 `xhigh` + tools) decides: answer directly, or
+2. Orchestrator action (Opus 4.8 `xhigh` + tools) decides: answer directly, or
    start/steer/stop a task on a devbox. Every reply is threaded under the
    triggering message — one task = one Slack thread, anchored at the request.
 3. Task start: the orchestrator enqueues a command row in Convex (it cannot
@@ -122,6 +124,6 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 - Secrets: local `.env` (never committed); Convex env vars for the deployment;
   `DEVBOX_SHARED_SECRET` authenticates gateway→Convex posts.
-- Model policy: `claude-fable-5` + effort `xhigh` everywhere; never configure
+- Model policy: `claude-opus-4-8` + effort `xhigh` everywhere; never configure
   `--fallback-model`; API calls send no `fallbacks` parameter; flagged
   requests refuse rather than downgrade.
