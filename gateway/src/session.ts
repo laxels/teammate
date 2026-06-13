@@ -70,7 +70,7 @@ export const INIT_WATCHDOG_MS = 2 * 60_000;
 export const STALL_WATCHDOG_MS = 10 * 60_000;
 export const WATCHDOG_INTERVAL_MS = 10_000;
 
-const MODEL = "claude-fable-5";
+const MODEL = "claude-opus-4-8";
 const EFFORT = "xhigh";
 
 type AsyncQueue<T> = {

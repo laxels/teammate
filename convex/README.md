@@ -1,6 +1,6 @@
 # Orchestrator (Convex)
 
-Slack-driven orchestrator: ingests Slack events, runs a Claude Fable 5 tool
+Slack-driven orchestrator: ingests Slack events, runs a Claude Opus 4.8 tool
 loop (`orchestrator.ts`), manages tasks/devboxes, relays devbox lifecycle
 events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 
@@ -10,7 +10,7 @@ events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 | --- | --- | --- |
 | `SLACK_SIGNING_SECRET` | `http.ts` | Verifies `/slack/events` request signatures |
 | `SLACK_BOT_TOKEN` | `orchestrator.ts`, `notify.ts`, `staleness.ts` | `chat.postMessage` replies and status updates |
-| `ANTHROPIC_API_KEY` | `orchestrator.ts` | Fable 5 tool loop (`claude-fable-5`, effort `xhigh`, no fallbacks) |
+| `ANTHROPIC_API_KEY` | `orchestrator.ts` | Opus 4.8 tool loop (`claude-opus-4-8`, effort `xhigh`, no fallbacks) |
 | `DEVBOX_SHARED_SECRET` | `http.ts` | Authenticates gateway posts to `/devbox/events` (`x-devbox-secret` header) |
 
 Set via `npx convex env set NAME value` (or the dashboard). Nothing reads a
@@ -39,7 +39,7 @@ Re-running upserts and resets the devbox to `warm`.
 1. Slack message → `/slack/events` → `slackEvents` row → scheduled
    `orchestrator.processSlackEvent`.
 2. The orchestrator filters bot/self messages (`src/orchestration.ts`), then
-   runs the Fable 5 loop with tools `list_tasks` / `get_task` / `start_task` /
+   runs the Opus 4.8 loop with tools `list_tasks` / `get_task` / `start_task` /
    `steer_task` / `stop_task`. Every reply is threaded under the triggering
    message (one request = one thread); a reply inside a task's thread gets
    that task injected as `<thread_context>` (looked up via the tasks

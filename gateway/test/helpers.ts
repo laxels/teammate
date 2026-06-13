@@ -26,7 +26,7 @@ export function assistantMessage(
       id: "msg_test",
       type: "message",
       role: "assistant",
-      model: "claude-fable-5",
+      model: "claude-opus-4-8",
       content: [{ type: "text", text, citations: null }],
       stop_reason: null,
       stop_sequence: null,

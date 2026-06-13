@@ -83,7 +83,7 @@ describe("SessionManager", () => {
 
     // The session options conform to the devbox contract.
     const options = control.calls[0]?.options;
-    expect(options?.model).toBe("claude-fable-5");
+    expect(options?.model).toBe("claude-opus-4-8");
     expect(options?.effort).toBe("xhigh");
     expect(options?.permissionMode).toBe("bypassPermissions");
     expect(options?.allowDangerouslySkipPermissions).toBe(true);
