@@ -24,6 +24,22 @@ bun run validate   # typecheck + lint + test, run concurrently with grouped outp
 
 Individual checks: `bun run typecheck`, `bun run lint` (`lint:fix` to autofix), `bun test`.
 
+## Backlog
+
+The backlog is GitHub issues, prioritized in the
+[Teammate Backlog project](https://github.com/users/laxels/projects/1):
+a single-select Priority field (P0/P1/P2) plus the project's manual rank
+order within a tier. Priority lives only there — no priority labels.
+
+```sh
+scripts/backlog.sh list       # open issues in priority order; flags issues missing from the project
+scripts/backlog.sh set 42 P1  # set priority, adding the issue to the project if needed
+```
+
+GitHub has no API to configure the project's auto-add workflow, so adding
+issues to the project is `backlog.sh set`'s job (or the project UI).
+`backlog.sh list` shows any open issue that slipped through as `UNTRACKED`.
+
 ## Worktrees and the singleton lane
 
 Parallel sessions each get their own git worktree. Worktree creation runs
