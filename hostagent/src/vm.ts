@@ -45,6 +45,12 @@ export type VmExecutorOptions = {
   config: VmConfig;
   /** Drops the devbox row in Convex after a successful tart delete. */
   removeDevbox: (devboxId: string) => Promise<void>;
+  /**
+   * Reports a failed provision to Convex: drops the leaked devbox row (freeing
+   * the host VM slot) and fails the associated task. Without this a failed
+   * provision permanently occupies one of the host's Apple-EULA-capped slots.
+   */
+  reportProvisionFailure: (devboxId: string, summary: string) => Promise<void>;
   run?: Run;
   /** Injectable for tests; defaults to real timers. */
   sleep?: (ms: number) => Promise<void>;
@@ -126,7 +132,7 @@ const GATEWAY_KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";
 
 export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
-  const { config, removeDevbox } = options;
+  const { config, removeDevbox, reportProvisionFailure } = options;
   const run = options.run ?? spawnRun;
   const sleep =
     options.sleep ??
@@ -342,15 +348,27 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
         await provisionSteps(devboxId);
         console.log(`[hostagent] ${devboxId} provisioned and healthy`);
       } catch (error) {
-        // Best-effort teardown of the partial VM, then rethrow so the failure
-        // is visible in the log. The consumer acks regardless; the
-        // orchestrator's staleness cron surfaces the stuck task.
+        // Best-effort teardown of the partial VM, then report the failure to
+        // Convex so the pre-created devbox row is dropped (freeing the host
+        // slot) and the task is failed — otherwise the row counts against the
+        // host's VM capacity forever. Rethrow afterwards so the failure is
+        // visible in the log; the consumer acks either way.
         console.error(
           `[hostagent] provisioning ${devboxId} failed; cleaning up partial VM:`,
           error,
         );
         await run([tart, "stop", devboxId]);
         await run([tart, "delete", devboxId]);
+        const summary = `Provisioning failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        // Best-effort: a Convex hiccup here must not mask the original error.
+        await reportProvisionFailure(devboxId, summary).catch((reportError) => {
+          console.error(
+            `[hostagent] failed to report provision failure for ${devboxId}:`,
+            reportError,
+          );
+        });
         throw error;
       }
     },

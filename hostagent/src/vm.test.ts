@@ -40,6 +40,7 @@ type Handler = (command: string[]) => Partial<RunResult> | undefined;
 function harness(handler: Handler = () => undefined) {
   const calls: Call[] = [];
   const removed: string[] = [];
+  const reported: { devboxId: string; summary: string }[] = [];
   const run: Run = async (command, options) => {
     calls.push({ command, stdin: options?.stdin });
     return { code: 0, stdout: "", stderr: "", ...handler(command) };
@@ -50,9 +51,12 @@ function harness(handler: Handler = () => undefined) {
     removeDevbox: async (devboxId) => {
       removed.push(devboxId);
     },
+    reportProvisionFailure: async (devboxId, summary) => {
+      reported.push({ devboxId, summary });
+    },
     sleep: async () => {},
   });
-  return { calls, removed, executors };
+  return { calls, removed, reported, executors };
 }
 
 function remoteOf(command: string[]): string {
@@ -88,7 +92,7 @@ function happyHandler(command: string[]): Partial<RunResult> | undefined {
 }
 
 test("provision runs the exact step sequence in order", async () => {
-  const { calls, removed, executors } = harness(happyHandler);
+  const { calls, removed, reported, executors } = harness(happyHandler);
   await executors.provision("dev-1");
 
   expect(calls.map(summarize)).toEqual([
@@ -127,8 +131,9 @@ test("provision runs the exact step sequence in order", async () => {
     expect(call.command.join(" ")).not.toContain("tskey-test");
   }
 
-  // Provisioning never touches the devbox row.
+  // A successful provision never touches the devbox row, nor reports a failure.
   expect(removed).toEqual([]);
+  expect(reported).toEqual([]);
 });
 
 test("provision polls until the IP and SSH come up", async () => {
@@ -155,8 +160,8 @@ test("provision polls until the IP and SSH come up", async () => {
   ).toHaveLength(2);
 });
 
-test("provision failure mid-way cleans up the partial VM and rethrows", async () => {
-  const { calls, removed, executors } = harness((command) => {
+test("provision failure mid-way tears down the VM, reports the leak, and rethrows", async () => {
+  const { calls, removed, reported, executors } = harness((command) => {
     if (command[0] === "rsync") {
       return { code: 23, stderr: "rsync: connection unexpectedly closed" };
     }
@@ -170,17 +175,64 @@ test("provision failure mid-way cleans up the partial VM and rethrows", async ()
     [TART, "stop", "dev-1"],
     [TART, "delete", "dev-1"],
   ]);
+  // The slot is freed via the failure report, never via removeDevbox (which is
+  // reserved for the destroy path). The summary carries the failing step.
   expect(removed).toEqual([]);
+  expect(reported).toEqual([
+    {
+      devboxId: "dev-1",
+      summary:
+        "Provisioning failed: rsync payload failed (exit 23): " +
+        "rsync: connection unexpectedly closed",
+    },
+  ]);
 });
 
-test("provision gives up after the IP poll budget, with cleanup", async () => {
-  const { calls, executors } = harness((command) =>
+test("provision gives up after the IP poll budget, with cleanup and a failure report", async () => {
+  const { calls, reported, executors } = harness((command) =>
     command[1] === "ip" ? { code: 1 } : undefined,
   );
 
   await expect(executors.provision("dev-1")).rejects.toThrow("never got an IP");
   expect(calls.filter((c) => c.command[1] === "ip")).toHaveLength(36);
   expect(calls.slice(-2).map((c) => c.command)).toEqual([
+    [TART, "stop", "dev-1"],
+    [TART, "delete", "dev-1"],
+  ]);
+  expect(reported).toEqual([
+    {
+      devboxId: "dev-1",
+      summary: "Provisioning failed: dev-1 never got an IP",
+    },
+  ]);
+});
+
+test("a failure-report error never masks the original provision error", async () => {
+  const calls: string[][] = [];
+  const run: Run = async (command) => {
+    calls.push(command);
+    const override =
+      command[0] === "rsync"
+        ? { code: 23, stderr: "rsync: connection unexpectedly closed" }
+        : happyHandler(command);
+    return { code: 0, stdout: "", stderr: "", ...override };
+  };
+  const executors = createVmExecutors({
+    config,
+    run,
+    removeDevbox: async () => {},
+    reportProvisionFailure: async () => {
+      throw new Error("convex unreachable");
+    },
+    sleep: async () => {},
+  });
+
+  // The provision rejects with the ORIGINAL error, not the reporting error.
+  await expect(executors.provision("dev-1")).rejects.toThrow(
+    "rsync payload failed (exit 23)",
+  );
+  // Teardown still ran despite the reporting failure.
+  expect(calls.slice(-2)).toEqual([
     [TART, "stop", "dev-1"],
     [TART, "delete", "dev-1"],
   ]);
