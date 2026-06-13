@@ -1,0 +1,12 @@
+version = 1
+name = "setup"
+
+[setup]
+script = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_DIR="$CODEX_SOURCE_TREE_PATH" \
+  WORKTREE_PATH="$CODEX_WORKTREE_PATH" \
+  bun run worktree-setup
+'''
