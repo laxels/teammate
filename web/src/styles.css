@@ -129,6 +129,14 @@ body {
   scrollbar-color: var(--ink-faint) transparent;
 }
 
+/* While a turn is running, the absolutely-positioned Stop button floats over
+   the bottom of the transcript. Without extra room the last (possibly
+   expanded) item scrolls only as far as the transcript's own bottom edge and
+   stays hidden behind the button. Reserve enough space to clear it. */
+.transcript.is-running {
+  padding-bottom: 64px;
+}
+
 .row-user {
   display: flex;
   justify-content: flex-end;

@@ -21,7 +21,11 @@ export function Sidebar({ state, onSendMessage, onInterrupt }: SidebarProps) {
   return (
     <aside className="sidebar">
       <Header state={state} />
-      <Transcript items={state.items} thinking={state.thinking} />
+      <Transcript
+        items={state.items}
+        thinking={state.thinking}
+        running={state.running}
+      />
       <div className="sidebar-bottom">
         {state.running ? (
           <div className="stop-float">
@@ -65,26 +69,37 @@ function Header({ state }: { state: TranscriptState }) {
 function Transcript({
   items,
   thinking,
+  running,
 }: {
   items: readonly TranscriptItem[];
   thinking: boolean;
+  running: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
-  // Follow the bottom of the transcript unless the user scrolled away.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on content growth
-  useEffect(() => {
+  // Snap to the bottom, but only while the user is already following along.
+  const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (el !== null && pinnedRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [items, thinking]);
+  }, []);
+
+  // Follow the bottom of the transcript unless the user scrolled away. The
+  // body only calls the stable callback, but items/thinking are real triggers:
+  // re-run whenever the content grows.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on content growth
+  useEffect(() => {
+    stickToBottom();
+  }, [items, thinking, stickToBottom]);
 
   return (
     <div
       ref={scrollRef}
-      className="transcript"
+      // While running, the floating Stop button overlays the bottom of the
+      // transcript; `is-running` reserves room so the last item clears it.
+      className={running ? "transcript is-running" : "transcript"}
       onScroll={() => {
         const el = scrollRef.current;
         if (el !== null) {
@@ -95,14 +110,20 @@ function Transcript({
       }}
     >
       {items.map((item) => (
-        <TranscriptEntry key={item.key} item={item} />
+        <TranscriptEntry key={item.key} item={item} onToggle={stickToBottom} />
       ))}
       {thinking ? <ThinkingIndicator /> : null}
     </div>
   );
 }
 
-function TranscriptEntry({ item }: { item: TranscriptItem }) {
+function TranscriptEntry({
+  item,
+  onToggle,
+}: {
+  item: TranscriptItem;
+  onToggle: () => void;
+}) {
   switch (item.kind) {
     case "user":
       return (
@@ -113,11 +134,21 @@ function TranscriptEntry({ item }: { item: TranscriptItem }) {
     case "assistant_text":
       return <div className="assistant-text">{item.text}</div>;
     case "tool_use":
-      return <ToolChip name={item.name} input={item.input} />;
+      return (
+        <ToolChip name={item.name} input={item.input} onToggle={onToggle} />
+      );
   }
 }
 
-function ToolChip({ name, input }: { name: string; input: unknown }) {
+function ToolChip({
+  name,
+  input,
+  onToggle,
+}: {
+  name: string;
+  input: unknown;
+  onToggle: () => void;
+}) {
   let pretty: string;
   try {
     pretty = JSON.stringify(input, null, 2) ?? "null";
@@ -125,7 +156,9 @@ function ToolChip({ name, input }: { name: string; input: unknown }) {
     pretty = String(input);
   }
   return (
-    <details className="tool-chip">
+    // Expanding a chip grows the transcript; re-stick so the freshly revealed
+    // content stays in view instead of opening below the fold.
+    <details className="tool-chip" onToggle={onToggle}>
       <summary>
         <span className="tool-gear" aria-hidden="true">
           {"⚙"}

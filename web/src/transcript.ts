@@ -11,13 +11,15 @@ export type TranscriptItem =
   | {
       kind: "assistant_text";
       key: string;
-      messageId: string | null;
+      /** Wire `uuid` of the assistant frame this block came from (see
+       * applyAssistantMessage). Used to dedupe re-delivered frames. */
+      frameId: string | null;
       text: string;
     }
   | {
       kind: "tool_use";
       key: string;
-      messageId: string | null;
+      frameId: string | null;
       toolUseId: string | null;
       name: string;
       input: unknown;
@@ -152,7 +154,20 @@ function applyAssistantMessage(
   if (apiMessage === null) {
     return state;
   }
-  const messageId = typeof apiMessage.id === "string" ? apiMessage.id : null;
+  // The CLI emits ONE assistant frame per content block: a turn that thinks,
+  // says something, then calls a tool arrives as three separate `assistant`
+  // messages. Every frame of one model response shares the same API
+  // `message.id`, but each carries a unique wire `uuid`. Accumulation must key
+  // on the per-frame `uuid` so the distinct blocks append; keying on
+  // `message.id` made each tool_use frame overwrite the mid-turn text that
+  // preceded it (issue #64). Fall back to `message.id`, then a minted key, for
+  // frames that predate `uuid` (older histories, tests).
+  const frameId =
+    typeof msg.uuid === "string"
+      ? msg.uuid
+      : typeof apiMessage.id === "string"
+        ? apiMessage.id
+        : null;
   const content = apiMessage.content;
   if (!Array.isArray(content)) {
     return state;
@@ -169,8 +184,8 @@ function applyAssistantMessage(
       if (block.text.length > 0) {
         fresh.push({
           kind: "assistant_text",
-          key: messageId !== null ? `${messageId}:${fresh.length}` : `a${seq}`,
-          messageId,
+          key: frameId !== null ? `${frameId}:${fresh.length}` : `a${seq}`,
+          frameId,
           text: block.text,
         });
         seq += 1;
@@ -183,8 +198,8 @@ function applyAssistantMessage(
           kind: "tool_use",
           key:
             toolUseId ??
-            (messageId !== null ? `${messageId}:${fresh.length}` : `t${seq}`),
-          messageId,
+            (frameId !== null ? `${frameId}:${fresh.length}` : `t${seq}`),
+          frameId,
           toolUseId,
           name,
           input: block.input,
@@ -195,16 +210,18 @@ function applyAssistantMessage(
     // thinking/unknown blocks: ignored.
   }
 
-  // Accumulation/idempotency: an assistant message with a known id replaces
-  // any previously rendered items from the same message, in place.
+  // Idempotency: a re-delivered frame (same uuid) replaces its own prior items
+  // in place; distinct frames accumulate. With unique per-frame uuids this only
+  // fires on an exact duplicate send — never across the separate blocks of one
+  // model response, which is what lets mid-turn text survive a later tool_use.
   let items: TranscriptItem[];
-  if (messageId !== null) {
+  if (frameId !== null) {
     const firstIndex = state.items.findIndex(
-      (item) => item.kind !== "user" && item.messageId === messageId,
+      (item) => item.kind !== "user" && item.frameId === frameId,
     );
     if (firstIndex >= 0) {
       const kept = state.items.filter(
-        (item) => item.kind === "user" || item.messageId !== messageId,
+        (item) => item.kind === "user" || item.frameId !== frameId,
       );
       // Number of retained items that precede the replaced run.
       let insertAt = 0;
@@ -212,7 +229,7 @@ function applyAssistantMessage(
         const item = state.items[i];
         if (
           item !== undefined &&
-          (item.kind === "user" || item.messageId !== messageId)
+          (item.kind === "user" || item.frameId !== frameId)
         ) {
           insertAt += 1;
         }

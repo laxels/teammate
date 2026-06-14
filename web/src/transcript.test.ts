@@ -26,6 +26,12 @@ function assistantMessage(id: string | undefined, content: unknown[]): unknown {
   return { type: "assistant", message: { id, content } };
 }
 
+// A real assistant frame as the CLI emits it: a unique wire `uuid` plus the
+// API `message.id` shared across the frames of one model response.
+function assistantFrame(uuid: string, id: string, content: unknown[]): unknown {
+  return { type: "assistant", uuid, message: { id, content } };
+}
+
 const userHello = {
   type: "user",
   message: { content: [{ type: "text", text: "hello" }] },
@@ -109,6 +115,62 @@ describe("assistant block accumulation", () => {
       sdk(assistantMessage("msg_2", [{ type: "text", text: "two" }])),
     ]);
     expect(state.items).toHaveLength(2);
+  });
+
+  // Regression for issue #64: the CLI streams each content block as its own
+  // `assistant` frame — a text frame, then a separate tool_use frame — that
+  // share `message.id` but each have a distinct `uuid`. Keying accumulation on
+  // `message.id` made the tool_use frame wipe the preceding mid-turn text.
+  test("a tool_use frame sharing the message id but a new uuid keeps the preceding text", () => {
+    const textFrame = assistantFrame("uuid-text", "msg_1", [
+      { type: "text", text: "Let me check the directory." },
+    ]);
+    const toolFrame = assistantFrame("uuid-tool", "msg_1", [
+      {
+        type: "tool_use",
+        id: "toolu_1",
+        name: "Bash",
+        input: { command: "ls" },
+      },
+    ]);
+    const state = run([sdk(textFrame), sdk(toolFrame)]);
+    expect(state.items.map((i) => i.kind)).toEqual([
+      "assistant_text",
+      "tool_use",
+    ]);
+    expect(state.items[0]).toMatchObject({
+      text: "Let me check the directory.",
+    });
+  });
+
+  test("a turn of text -> tool -> text frames all persist in order", () => {
+    const state = run([
+      sdk(assistantFrame("u1", "msg_1", [{ type: "text", text: "first" }])),
+      sdk(
+        assistantFrame("u2", "msg_1", [
+          { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
+        ]),
+      ),
+      sdk(assistantFrame("u3", "msg_1", [{ type: "text", text: "second" }])),
+    ]);
+    expect(
+      state.items.map((i) =>
+        i.kind === "tool_use"
+          ? `tool:${i.name}`
+          : i.kind === "assistant_text"
+            ? i.text
+            : "?",
+      ),
+    ).toEqual(["first", "tool:Read", "second"]);
+  });
+
+  test("re-delivering the identical frame (same uuid) is idempotent", () => {
+    const frame = assistantFrame("u1", "msg_1", [
+      { type: "text", text: "hello" },
+    ]);
+    const state = run([sdk(frame), sdk(frame)]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({ text: "hello" });
   });
 
   test("empty text blocks and unknown block types are skipped", () => {
