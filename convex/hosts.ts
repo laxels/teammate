@@ -23,7 +23,7 @@ import {
   type QueryCtx,
   query,
 } from "./_generated/server";
-import { enqueueCommandRow } from "./commands";
+import { deleteCommandsForDevbox, enqueueCommandRow } from "./commands";
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 export const hostCommandKindValidator = v.union(
@@ -34,6 +34,10 @@ export const hostCommandKindValidator = v.union(
 
 /** Apple's EULA allows 2 concurrent macOS VMs per host. */
 const DEFAULT_MAX_VMS = 2;
+
+/** Upper bound on event summaries stored in Convex / posted to Slack, so a
+ * noisy failure tail can't blow the document/payload size limits. */
+const MAX_EVENT_SUMMARY = 500;
 
 /**
  * Host agents authenticate with the same shared secret gateways use, passed
@@ -205,6 +209,10 @@ export const provisionVmFailed = mutation({
     }
     const taskId = devbox.taskId;
     await ctx.db.delete(devbox._id);
+    // Drop the task's pre-enqueued gateway commands (the `start` command was
+    // inserted before the VM existed) so a future gateway reusing the devboxId
+    // can't pick up this dead task's command.
+    await deleteCommandsForDevbox(ctx, args.devboxId);
     // The freed VM slot may unblock a queued ephemeral task.
     await ctx.scheduler.runAfter(
       0,
@@ -224,6 +232,11 @@ export const provisionVmFailed = mutation({
       return;
     }
     const now = Date.now();
+    // Cap the summary before it lands in a Convex document / Slack payload: a
+    // failing provision step can spew a multi-KB stderr tail, and an oversized
+    // taskEvents insert would roll back this whole mutation — leaving the slot
+    // leaked. Same 500-char bound recordHostEventRow uses.
+    const summary = args.summary.slice(0, MAX_EVENT_SUMMARY);
     await ctx.db.patch(task._id, {
       status: "failed",
       updatedAt: now,
@@ -233,7 +246,7 @@ export const provisionVmFailed = mutation({
       taskId,
       devboxId: args.devboxId,
       type: "failed",
-      summary: args.summary,
+      summary,
       ts: now,
     });
     // Surface the failure the same way a gateway-posted terminal event would:
@@ -242,7 +255,7 @@ export const provisionVmFailed = mutation({
       devboxId: args.devboxId,
       taskId,
       type: "failed",
-      summary: args.summary,
+      summary,
     });
   },
 });
@@ -282,7 +295,7 @@ async function recordHostEventRow(
   await ctx.db.insert("hostEvents", {
     hostId: args.hostId,
     type: args.type,
-    summary: args.summary.slice(0, 500),
+    summary: args.summary.slice(0, MAX_EVENT_SUMMARY),
     ts: Date.now(),
   });
 }

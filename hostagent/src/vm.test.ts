@@ -207,6 +207,26 @@ test("provision gives up after the IP poll budget, with cleanup and a failure re
   ]);
 });
 
+test("a noisy failure summary is collapsed to one line and capped", async () => {
+  // A failing step can spew a multi-KB multi-line stderr tail; the report must
+  // stay small enough that the provisionVmFailed mutation can't reject on size.
+  const noisyStderr = `${"connection reset by peer\n".repeat(200)}`;
+  const { reported, executors } = harness((command) =>
+    command[0] === "rsync"
+      ? { code: 23, stderr: noisyStderr }
+      : happyHandler(command),
+  );
+
+  await expect(executors.provision("dev-1")).rejects.toThrow("rsync payload");
+
+  const summary = reported[0]?.summary ?? "";
+  expect(summary.length).toBe(500);
+  expect(summary).not.toContain("\n");
+  expect(summary.startsWith("Provisioning failed: rsync payload failed")).toBe(
+    true,
+  );
+});
+
 test("a failure-report error never masks the original provision error", async () => {
   const calls: string[][] = [];
   const run: Run = async (command) => {

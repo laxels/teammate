@@ -123,3 +123,23 @@ export const enqueue = internalMutation({
     return await enqueueCommandRow(ctx, args);
   },
 });
+
+/**
+ * Plain-function form: drops every queued command for a devbox. A task's
+ * `start` command is enqueued before its VM exists (hosts.dispatchTaskToSlot),
+ * so a failed provision would otherwise strand it until the weekly prune —
+ * and a future gateway that reused the (random) devboxId would subscribe to
+ * that stale command first. Called from the provision-failure cleanup.
+ */
+export async function deleteCommandsForDevbox(
+  ctx: MutationCtx,
+  devboxId: string,
+): Promise<void> {
+  const rows = await ctx.db
+    .query("commands")
+    .withIndex("by_devbox_status", (q) => q.eq("devboxId", devboxId))
+    .collect();
+  for (const row of rows) {
+    await ctx.db.delete(row._id);
+  }
+}

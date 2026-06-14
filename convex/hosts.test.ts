@@ -5,13 +5,15 @@ import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 
 // Bun has no import.meta.glob; hand-build the module map convex-test needs.
-// Only hosts.ts is exercised directly; the mutation's scheduled follow-ups
-// (placeQueuedEphemeralTasks, notify.devboxEvent) are never run by these
-// tests, so their modules don't need to be listed.
+// provisionVmFailed schedules placeQueuedEphemeralTasks (hosts) and
+// notify.devboxEvent at 0ms — both must be resolvable, or the scheduler logs
+// "Could not find module" while the suite still passes. notify.devboxEvent
+// no-ops without SLACK_BOT_TOKEN (unset here), so it drains cleanly.
 const modules = {
   "./_generated/api.js": () => import("./_generated/api.js"),
   "./_generated/server.js": () => import("./_generated/server.js"),
   "./hosts.ts": () => import("./hosts"),
+  "./notify.ts": () => import("./notify"),
 };
 
 function newT() {
@@ -20,18 +22,37 @@ function newT() {
 
 type Tester = ReturnType<typeof newT>;
 
+/** Runs the 0ms scheduled follow-ups (placeQueuedEphemeralTasks,
+ * notify.devboxEvent) so they execute inside the test and any error surfaces,
+ * instead of erroring in the background after the suite goes green. */
+async function drainScheduled(t: Tester): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await t.finishInProgressScheduledFunctions();
+  }
+}
+
 const SECRET = "s3cret";
+let savedSlackToken: string | undefined;
 
 beforeEach(() => {
   // secretOk() reads these; allocateEphemeralSlot needs TAILNET_SUFFIX to mint
   // a gateway URL once a slot is free.
   process.env.DEVBOX_SHARED_SECRET = SECRET;
   process.env.TAILNET_SUFFIX = "ts.example.com";
+  // bun auto-loads .env.local, which carries a real SLACK_BOT_TOKEN. Unset it
+  // so the drained notify.devboxEvent takes its no-token early return instead
+  // of firing a real Slack API call from the test.
+  savedSlackToken = process.env.SLACK_BOT_TOKEN;
+  delete process.env.SLACK_BOT_TOKEN;
 });
 
 afterEach(() => {
   delete process.env.DEVBOX_SHARED_SECRET;
   delete process.env.TAILNET_SUFFIX;
+  if (savedSlackToken !== undefined) {
+    process.env.SLACK_BOT_TOKEN = savedSlackToken;
+  }
 });
 
 /** A host at its EULA cap of 2 VMs, both held by provisioning ephemeral rows —
@@ -69,8 +90,24 @@ async function seedFullHost(t: Tester): Promise<void> {
         ephemeral: true,
         lastSeenAt: now,
       });
+      // dispatchTaskToSlot enqueues the gateway `start` command before the VM
+      // exists; a failed provision must not strand it for the queue prune.
+      await ctx.db.insert("commands", {
+        commandId: `cmd-${n}`,
+        devboxId,
+        kind: "start",
+        payload: "{}",
+        status: "pending",
+        createdAt: now,
+      });
     }
   });
+}
+
+function commandDevboxes(t: Tester): Promise<string[]> {
+  return t.run(async (ctx) =>
+    (await ctx.db.query("commands").collect()).map((c) => c.devboxId).sort(),
+  );
 }
 
 function devboxIds(t: Tester): Promise<string[]> {
@@ -104,9 +141,13 @@ test("a failed provision drops the leaked row, fails the task, and reclaims the 
     summary: "Provisioning failed: dev never got an IP",
     secret: SECRET,
   });
+  await drainScheduled(t);
 
-  // 1. No orphaned devbox row remains.
+  // 1. No orphaned devbox row remains, and the dead task's pre-enqueued gateway
+  // command is purged (only the sibling's survives) so a reused devboxId can't
+  // pick it up.
   expect(await devboxIds(t)).toEqual(["devbox-2"]);
+  expect(await commandDevboxes(t)).toEqual(["devbox-2"]);
 
   // 2. The task is terminally failed (visible in Slack/dashboard), with a
   // failure event and a finishedAt stamp — not an eternal silent stall.
@@ -149,6 +190,7 @@ test("provisionVmFailed never regresses a task that already reached terminal", a
     summary: "Provisioning failed: boom",
     secret: SECRET,
   });
+  await drainScheduled(t);
 
   // The slot is still freed, but the terminal status is preserved.
   expect(await devboxIds(t)).toEqual(["devbox-2"]);

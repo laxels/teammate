@@ -87,6 +87,10 @@ const TAILSCALE_RESET =
   'echo "tailscaled did not come back after state wipe" >&2; exit 1';
 
 const POLL_INTERVAL_MS = 5_000;
+// Matches convex hosts.MAX_EVENT_SUMMARY: the provisionVmFailed mutation caps
+// again, but bounding the argument here keeps the failure report from ever
+// being rejected for size (which would re-leak the slot).
+const PROVISION_FAILURE_SUMMARY_MAX = 500;
 const IP_ATTEMPTS = 36; // 3 min
 const SSH_ATTEMPTS = 60; // 5 min
 const HEALTH_ATTEMPTS = 36; // 3 min
@@ -359,9 +363,16 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
         );
         await run([tart, "stop", devboxId]);
         await run([tart, "delete", devboxId]);
-        const summary = `Provisioning failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
+        // Collapse and cap the error: a failing step (rsync, bun install) can
+        // spew a multi-KB stderr tail, and an oversized report would make the
+        // mutation reject — re-leaking the slot this cleanup is meant to free.
+        const detail = (error instanceof Error ? error.message : String(error))
+          .replace(/\s+/g, " ")
+          .trim();
+        const summary = `Provisioning failed: ${detail}`.slice(
+          0,
+          PROVISION_FAILURE_SUMMARY_MAX,
+        );
         // Best-effort: a Convex hiccup here must not mask the original error.
         await reportProvisionFailure(devboxId, summary).catch((reportError) => {
           console.error(
