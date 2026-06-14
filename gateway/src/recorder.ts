@@ -69,8 +69,14 @@ export const FINALIZE_TIMEOUT_MS = 30_000;
 function defaultSpawn(outputPath: string): RecorderProcess {
   return Bun.spawn(
     ["screencapture", "-v", "-C", "-k", "-x", outputPath],
+    // stdin MUST stay open. `screencapture -v` watches stdin ("type any
+    // character to stop recording") and stops the instant it hits EOF — the
+    // default stdin "ignore" is /dev/null → immediate EOF → it captures ~3
+    // frames (~0.05s) then stops while we think it's still recording. A "pipe"
+    // we never write to keeps stdin open so it records until SIGINT. (Verified
+    // live on a devbox: /dev/null stdin → 0.05s; held-open stdin → full length.)
     // stdout/err piped so a capture failure leaves evidence in the gateway log.
-    { stdout: "ignore", stderr: "pipe" },
+    { stdin: "pipe", stdout: "ignore", stderr: "pipe" },
   );
 }
 
