@@ -183,7 +183,18 @@ export default defineSchema({
     // JSON payload: HostVmPayload for the vm kinds, HostProvisionPayload for
     // provision_host.
     payload: v.string(),
-    status: v.union(v.literal("pending"), v.literal("acked")),
+    // A consumer claims a command (pending -> running) before running its side
+    // effect and only acks (-> acked) after, so a crash anywhere after the
+    // claim leaves it "running" — never redelivered, never replayed. See
+    // hosts.ts claim(). pendingFor returns only "pending".
+    status: v.union(
+      v.literal("pending"),
+      v.literal("running"),
+      v.literal("acked"),
+    ),
+    // When the command was claimed (pending -> running); lets a future sweep
+    // spot commands wedged in "running" by a consumer that died mid-execution.
+    claimedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_host_status", ["hostId", "status"])
@@ -213,7 +224,19 @@ export default defineSchema({
     // JSON payload: StartTaskRequest for "start", UserMessagePayload for
     // "user_message", "{}" for "interrupt".
     payload: v.string(),
-    status: v.union(v.literal("pending"), v.literal("acked")),
+    // A gateway claims a command (pending -> running) before running its side
+    // effect and only acks (-> acked) after, so a crash anywhere after the
+    // claim leaves it "running" — never redelivered, never replayed (a
+    // replayed `start` could evict a live session). See commands.ts claim().
+    // pendingFor returns only "pending".
+    status: v.union(
+      v.literal("pending"),
+      v.literal("running"),
+      v.literal("acked"),
+    ),
+    // When the command was claimed (pending -> running); lets a future sweep
+    // spot commands wedged in "running" by a gateway that died mid-execution.
+    claimedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_devbox_status", ["devboxId", "status"])
