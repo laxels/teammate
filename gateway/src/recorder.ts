@@ -53,6 +53,8 @@ export type RecorderDeps = {
   removeFile?: (path: string) => Promise<void>;
   /** Where .mov files are written. Default: ~/.ultraclaude/recordings. */
   recordingsDir?: string;
+  /** Override the SIGINT-finalize wait (tests). Default FINALIZE_TIMEOUT_MS. */
+  finalizeTimeoutMs?: number;
 };
 
 /** How long finish() waits for screencapture to finalize the .mov after SIGINT
@@ -73,7 +75,14 @@ function defaultSpawn(outputPath: string): RecorderProcess {
 type ActiveRecording = {
   taskId: string;
   path: string;
-  proc: RecorderProcess;
+  /** Resolves to the spawned capture process, or null if spawning failed.
+   * finish()/abort() await this so a same-tick claim can't slip past a still-
+   * spawning recording and orphan the process (start() is async: mkdir + spawn
+   * happen after it returns). */
+  proc: Promise<RecorderProcess | null>;
+  /** Set by whichever of finish()/abort()/spawn-failure claims the recording
+   * first; the others (and a late "recording" status post) become no-ops. */
+  claimed: boolean;
 };
 
 export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
@@ -88,6 +97,7 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
     });
   const recordingsDir =
     deps.recordingsDir ?? join(homedir(), ".ultraclaude", "recordings");
+  const finalizeTimeoutMs = deps.finalizeTimeoutMs ?? FINALIZE_TIMEOUT_MS;
 
   let active: ActiveRecording | null = null;
 
@@ -139,40 +149,88 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
       console.error(
         `[gateway] recorder: start(${taskId}) while ${active.taskId} active; aborting the old capture`,
       );
-      active.proc.kill("SIGINT");
-      active = null;
+      abort();
     }
+    const path = recordingPath(taskId);
+    let resolveProc!: (proc: RecorderProcess | null) => void;
+    const procPromise = new Promise<RecorderProcess | null>((resolve) => {
+      resolveProc = resolve;
+    });
+    // Register synchronously, BEFORE the async mkdir/spawn: a same-tick
+    // finish() (instant terminal / immediate stop) then claims this recording
+    // and awaits the spawn, instead of seeing `active === null` and dropping
+    // it — which used to spawn screencapture after the task was already done.
+    const recording: ActiveRecording = {
+      taskId,
+      path,
+      proc: procPromise,
+      claimed: false,
+    };
+    active = recording;
     void (async () => {
       try {
         await mkdir(recordingsDir, { recursive: true });
-        const path = recordingPath(taskId);
         const proc = spawn(path);
-        active = { taskId, path, proc };
-        await postStatus(taskId, "recording");
+        resolveProc(proc);
+        // If finish()/abort() already claimed it, they own the transitions —
+        // don't post a late "recording".
+        if (!recording.claimed) await postStatus(taskId, "recording");
       } catch (error) {
         console.error("[gateway] recorder: failed to start capture:", error);
-        active = null;
-        await postStatus(taskId, "failed");
+        resolveProc(null);
+        if (!recording.claimed) {
+          recording.claimed = true;
+          if (active === recording) active = null;
+          await postStatus(taskId, "failed");
+        }
       }
     })();
   };
 
   const finish = async (taskId: string): Promise<void> => {
     const recording = active;
-    if (recording === null || recording.taskId !== taskId) {
-      // Already finished (or never started) for this task — idempotent no-op.
+    if (
+      recording === null ||
+      recording.taskId !== taskId ||
+      recording.claimed
+    ) {
+      // Never started, already claimed, or for another task — idempotent no-op.
       return;
     }
+    recording.claimed = true;
     active = null;
     try {
-      // SIGINT makes screencapture finalize a valid .mov, then exit.
-      recording.proc.kill("SIGINT");
-      await Promise.race([
-        recording.proc.exited,
-        new Promise<void>((resolve) =>
-          setTimeout(resolve, FINALIZE_TIMEOUT_MS),
+      // Wait for the (async) spawn to actually produce a process before acting.
+      const proc = await recording.proc;
+      if (proc === null) {
+        // Spawn failed; start()'s catch already reported "failed" unless it
+        // lost the claim race to us — post defensively (setStatus is idempotent).
+        await postStatus(taskId, "failed");
+        return;
+      }
+      // SIGINT makes screencapture finalize a valid .mov, then exit. If it does
+      // NOT exit within the window, the file has no finalized `moov` atom — so
+      // force-kill it (no orphaned capture) and fail, rather than upload an
+      // unplayable file and leave the process running.
+      proc.kill("SIGINT");
+      const exited = await Promise.race([
+        proc.exited.then(() => true),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), finalizeTimeoutMs),
         ),
       ]);
+      if (!exited) {
+        console.error(
+          "[gateway] recorder: screencapture did not finalize within timeout; force-killing",
+        );
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+        await postStatus(taskId, "failed");
+        return;
+      }
 
       await postStatus(taskId, "uploading");
 
@@ -252,10 +310,12 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
   };
 
   const abort = (): void => {
-    if (active !== null) {
-      active.proc.kill("SIGINT");
-      active = null;
-    }
+    const recording = active;
+    if (recording === null || recording.claimed) return;
+    recording.claimed = true;
+    active = null;
+    // The capture may still be spawning; kill it once (and if) it appears.
+    void recording.proc.then((proc) => proc?.kill("SIGINT"));
   };
 
   return { start, finish, abort };
