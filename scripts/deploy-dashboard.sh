@@ -66,7 +66,7 @@ ssh "${SSH_OPTS[@]}" "$HOST_SSH" "$TAILSCALE serve --bg $PORT"
 log "Health check (first deploy may mint a TLS cert; retrying up to 3 min)"
 HOSTNAME_FQDN="$(ssh "${SSH_OPTS[@]}" "$HOST_SSH" "$TAILSCALE status --json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
 deadline=$((SECONDS + 180))
-until curl -fsS --max-time 30 "https://$HOSTNAME_FQDN/" | grep -q ultraclaude; do
+until curl -fsS --max-time 30 "https://$HOSTNAME_FQDN/" | grep -qi ultraclaude; do
   if (( SECONDS >= deadline )); then
     echo "ERROR: dashboard not reachable at https://$HOSTNAME_FQDN/" >&2
     echo "Diagnostics: ssh $HOST_SSH 'tail -20 ~/dashboard.log'" >&2

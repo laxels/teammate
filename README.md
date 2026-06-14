@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/laxels/teammate/actions/workflows/ci.yml/badge.svg)
 
-ultraclaude: a Slack-addressable "virtual teammate". A [Convex](https://convex.dev)-hosted
+Ultraclaude: a Slack-addressable "virtual teammate". A [Convex](https://convex.dev)-hosted
 orchestrator receives Slack DMs/mentions and delegates engineering work to Claude Code
 instances running in macOS devbox VMs, each with a full desktop that tasks can drive
 directly via built-in computer-use tools (screenshots, mouse, keyboard). Every

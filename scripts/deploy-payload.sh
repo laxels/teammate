@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the repo's current code to one or more ultraclaude Mac hosts:
+# Deploy the repo's current code to one or more Ultraclaude Mac hosts:
 #   ~/ultraclaude-payload/  gateway/src, shared, web/dist — rsynced into each
 #                           devbox VM at provision time by the host agent
 #   ~/hostagent/            host agent source + deps (bun install on the host)
