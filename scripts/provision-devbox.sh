@@ -98,14 +98,28 @@ done
 # The golden image provides the slow-to-build environment (logins, apps, bun,
 # node_modules); the CODE is whatever was baked at image time and goes stale
 # with every merge. Provisioning deploys the repo's current gateway + page on
-# top, so fresh devboxes always run HEAD. (Dependency changes still require a
-# rebake: node_modules is not synced.)
+# top, so fresh devboxes always run HEAD.
 log "Syncing current gateway/web code into the VM"
 (cd "$REPO_ROOT/web" && bun run build >/dev/null 2>&1)
 RSYNC_SSH="ssh ${VM_SSH_OPTS[*]}"
+# The full workspace-manifest skeleton rides along (root + every member listed
+# in "workspaces") so the `bun install --frozen-lockfile` below succeeds: bun
+# refuses to install when a listed member's package.json is missing. Mirrors
+# scripts/deploy-payload.sh (the ephemeral path's payload).
 (cd "$REPO_ROOT" &&
   rsync -az -e "$RSYNC_SSH" --relative gateway/src shared web/dist \
+    bun.lock bunfig.toml package.json \
+    dashboard/package.json gateway/package.json hostagent/package.json web/package.json \
     "$VM_USER@$VM_IP:ultraclaude/")
+
+# The baked node_modules lags the synced code: a dependency added after the
+# golden image was baked crashes the gateway at import (observed 2026-06-12:
+# playwright-core). Install against the synced lockfile every provision,
+# mirroring the self-healing ephemeral path (hostagent/src/vm.ts); the baked
+# bun cache makes the no-change case sub-second, so only genuinely new packages
+# hit the network.
+log "Installing dependencies against the synced lockfile"
+vm 'cd ~/ultraclaude && ~/.bun/bin/bun install --frozen-lockfile'
 
 # ------------------------------------------------------- gateway env config
 # Claude Code auth is NOT configured here: it comes from the golden image
