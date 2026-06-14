@@ -154,10 +154,11 @@ type StagedFiles = {
 
 /**
  * Downloads each shared file with the bot token, stores the bytes in Convex
- * storage (a public URL the devbox can later fetch — the token never leaves
- * the orchestrator), and records a cleanup row. Images within the inline cap
- * are also base64'd into image blocks so the orchestrator can see them itself.
- * Failures are collected, not thrown: a bad attachment must not sink the turn.
+ * storage (the devbox later fetches them by storageId from the secret-gated
+ * /devbox/file endpoint — the bot token never leaves the orchestrator), and
+ * records a cleanup row. Images within the inline cap are also base64'd into
+ * image blocks so the orchestrator can see them itself. Failures are collected,
+ * not thrown: a bad attachment must not sink the turn.
  */
 async function stageInboundFiles(
   ctx: ActionCtx,

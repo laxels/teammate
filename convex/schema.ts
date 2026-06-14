@@ -80,9 +80,10 @@ export default defineSchema({
     finishedAt: v.optional(v.number()),
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
-    // Files the requester shared in Slack, staged in Convex storage. Resolved
-    // to public storage URLs and handed to the devbox in the start command
-    // (hosts.dispatchTaskToSlot / orchestrator permanent path).
+    // Files the requester shared in Slack, staged in Convex storage. The
+    // storageId rides the start command (hosts.dispatchTaskToSlot / orchestrator
+    // permanent path); the devbox fetches the bytes from the secret-gated
+    // /devbox/file endpoint, never a public storage URL.
     files: v.optional(v.array(taskFileValidator)),
   })
     .index("by_task_id", ["taskId"])
@@ -197,9 +198,10 @@ export default defineSchema({
   }).index("by_task_id", ["taskId"]),
 
   // Bookkeeping for inbound Slack files staged in Convex storage: the daily
-  // cleanup cron deletes the storage blob + this row past a short window (the
-  // gateway downloads each file within minutes, or up to ~45 min if its task
-  // sits queued — 1 day is generous). Pruned by cleanup.pruneExpired.
+  // cleanup cron deletes the storage blob + this row past INBOUND_FILE_RETENTION_MS
+  // (= QUEUE_RETENTION_MS, 7 days), so a task that waits through a host bootstrap
+  // keeps its attachments; past that a queued task is effectively abandoned and a
+  // missing blob 404s the gateway's /devbox/file fetch. Pruned by cleanup.pruneExpired.
   inboundFiles: defineTable({
     storageId: v.id("_storage"),
     // The Slack event the file came from (debugging orphaned blobs); the task
