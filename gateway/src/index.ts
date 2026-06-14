@@ -8,6 +8,7 @@ import { loadConfig } from "./config";
 import { createEventSender } from "./events";
 import { waitForProvisionReady } from "./ready";
 import { type RunningTask, reconcileOrphanedTasks } from "./reconcile";
+import { createScreenRecorder } from "./recorder";
 import { createGatewayServer } from "./server";
 
 const config = loadConfig();
@@ -22,13 +23,17 @@ if (
 }
 
 const browserSession = new BrowserSession();
-const server = createGatewayServer({ config, browserSession });
+const recorder = createScreenRecorder({ config });
+const server = createGatewayServer({ config, browserSession, recorder });
 
 // Close Chrome cleanly on shutdown so the profile unlocks for the next boot;
 // cap the wait so a wedged browser can't hang gateway restarts. (After a hard
-// kill, BrowserSession's launch recovery evicts the orphan instead.)
+// kill, BrowserSession's launch recovery evicts the orphan instead.) Abort any
+// in-flight screen capture too, so a graceful restart mid-task doesn't orphan a
+// screencapture process still writing to disk.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    recorder.abort();
     void Promise.race([
       browserSession.close(),
       new Promise((resolve) => setTimeout(resolve, 3000)),

@@ -91,6 +91,81 @@ describe("SessionManager", () => {
     expect(options?.fallbackModel).toBeUndefined();
   });
 
+  test("starts the screen recorder on launch and finishes it once at terminal", async () => {
+    const { queryFn } = createEchoQueryFn();
+    const { emitEvent } = createEventRecorder();
+    const starts: string[] = [];
+    const finishes: string[] = [];
+    const session = new SessionManager({
+      emitEvent,
+      queryFn,
+      recorder: {
+        start: (taskId) => starts.push(taskId),
+        finish: async (taskId) => {
+          finishes.push(taskId);
+        },
+      },
+    });
+
+    session.start({ taskId: "task-1", prompt: "go" });
+    // Recording begins the moment the agent loop starts.
+    expect(starts).toEqual(["task-1"]);
+
+    await until(() => finishes.length > 0);
+    expect(finishes).toEqual(["task-1"]);
+
+    // A steered follow-up on the finished-but-steerable session must not begin
+    // a second recording, and must not re-finish (the recording is done once).
+    expect(session.pushUserMessage("again")).toBe(true);
+    await until(
+      () =>
+        session.historySnapshot().filter((m) => m.type === "result").length >=
+        2,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(starts).toEqual(["task-1"]);
+    expect(finishes).toEqual(["task-1"]);
+  });
+
+  test("finishes the screen recording when a task is interrupted", async () => {
+    const gate = Promise.withResolvers<void>();
+    let interrupted = false;
+    const queryFn: QueryFn = (params) => {
+      async function* generate(): AsyncGenerator<SDKMessage, void> {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        await iterator.next();
+        yield assistantMessage("working...");
+        await gate.promise;
+        if (!interrupted) yield resultSuccess("finished");
+      }
+      return Object.assign(generate(), {
+        interrupt: async () => {
+          interrupted = true;
+          gate.resolve();
+        },
+        setPermissionMode: async () => {},
+      });
+    };
+    const { emitEvent } = createEventRecorder();
+    const finishes: string[] = [];
+    const session = new SessionManager({
+      emitEvent,
+      queryFn,
+      recorder: {
+        start: () => {},
+        finish: async (taskId) => {
+          finishes.push(taskId);
+        },
+      },
+    });
+
+    session.start({ taskId: "task-1", prompt: "long job" });
+    await session.stop();
+    await until(() => !session.status().running);
+
+    expect(finishes).toEqual(["task-1"]);
+  });
+
   test("rejects a second task while one is running", async () => {
     const { queryFn } = createEchoQueryFn();
     const { session } = makeSession(queryFn);

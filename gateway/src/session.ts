@@ -11,6 +11,7 @@ import {
 import type { PermissionMode, StartTaskRequest } from "../../shared/protocol";
 import type { EventSender } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
+import type { ScreenRecorder } from "./recorder";
 import {
   excerpt,
   extractAskUserQuestion,
@@ -50,6 +51,10 @@ export type SessionManagerDeps = {
   /** Persists the task's transcript when it reaches a terminal status, so
    * the session record outlives the ephemeral VM. Best-effort. */
   uploadTranscript?: (taskId: string, messages: unknown[]) => Promise<void>;
+  /** Screen-recording lifecycle, started when the task's agent loop starts and
+   * finished at its FIRST terminal status (a finished-but-steerable session
+   * keeps running, but the task's recording is done). Best-effort. */
+  recorder?: Pick<ScreenRecorder, "start" | "finish">;
   /** Hang detection thresholds (tests tighten these). */
   watchdog?: { initMs?: number; stallMs?: number; intervalMs?: number };
 };
@@ -147,6 +152,9 @@ export class SessionManager {
   #uploadTranscript:
     | ((taskId: string, messages: unknown[]) => Promise<void>)
     | null = null;
+  #recorder: Pick<ScreenRecorder, "start" | "finish"> | null = null;
+  /** True between a task's recording start and its (once-only) finish. */
+  #recordingActive = false;
 
   #running = false;
   #taskId: string | null = null;
@@ -184,6 +192,7 @@ export class SessionManager {
     this.#historyCapacity = deps.historyCapacity ?? HISTORY_CAPACITY;
     this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
     this.#uploadTranscript = deps.uploadTranscript ?? null;
+    this.#recorder = deps.recorder ?? null;
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
     this.#watchdogConfig = {
       initMs: deps.watchdog?.initMs ?? INIT_WATCHDOG_MS,
@@ -263,6 +272,9 @@ export class SessionManager {
     this.#query = query;
 
     this.#emit("started", `Started task: ${excerpt(request.prompt)}`);
+    // Record the devbox screen for the lifetime of this task (best-effort).
+    this.#recorder?.start(request.taskId);
+    this.#recordingActive = true;
     this.#deps.onStatusChange?.(this.status());
     this.#sessionStartedAt = this.#deps.now();
     this.#lastMessageAt = null;
@@ -310,6 +322,7 @@ export class SessionManager {
     this.#terminalEmitted = true;
     this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
     this.#sendTranscript(taskId);
+    this.#finishRecording(taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
     // interrupt, leaving #run blocked forever — which would wedge a permanent
@@ -442,6 +455,11 @@ export class SessionManager {
         this.#emit("stopped", "Stopped by interrupt.", taskId);
         this.#sendTranscript(taskId);
       }
+      // The recording finishes on any session wind-down too — covering an
+      // interrupt of a finished-but-steerable session whose terminal result
+      // already fired #finishRecording (idempotent) and the rare wind-down
+      // that reached neither a result nor the stopped branch.
+      this.#finishRecording(taskId);
       if (this.#watchdogTimer !== null) {
         clearInterval(this.#watchdogTimer);
         this.#watchdogTimer = null;
@@ -459,6 +477,20 @@ export class SessionManager {
   #sendTranscript(taskId: string | null = this.#taskId): void {
     if (this.#uploadTranscript === null || taskId === null) return;
     void this.#uploadTranscript(taskId, this.#history.snapshot());
+  }
+
+  /** Stop + upload the task's screen recording, exactly once, at its first
+   * terminal status. Unlike the transcript (re-sent on every result so a
+   * steered follow-up refreshes it), the recording is finalized once: the
+   * task is done, and a finished-but-steerable session is no longer the
+   * recording's subject. Fire-and-forget; the upload races the VM-reclaim
+   * grace window. */
+  #finishRecording(taskId: string | null = this.#taskId): void {
+    if (!this.#recordingActive || this.#recorder === null || taskId === null) {
+      return;
+    }
+    this.#recordingActive = false;
+    void this.#recorder.finish(taskId);
   }
 
   #handleLifecycle(message: SDKMessage): void {
@@ -485,6 +517,7 @@ export class SessionManager {
       const terminal = mapResultMessage(message);
       this.#emit(terminal.type, terminal.summary);
       this.#sendTranscript();
+      this.#finishRecording();
     }
   }
 

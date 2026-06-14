@@ -24,6 +24,7 @@ import {
   removeBatchInbox,
   removeTaskInbox,
 } from "./files";
+import { createScreenRecorder, type ScreenRecorder } from "./recorder";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
 import { createShareMcpServer } from "./share";
 import { serveStatic } from "./static";
@@ -53,6 +54,8 @@ export type GatewayServerOptions = {
   port?: number;
   /** Inject the Playwright browser session (index.ts owns its shutdown). */
   browserSession?: BrowserSession;
+  /** Inject the screen recorder (index.ts owns its shutdown/abort). */
+  recorder?: ScreenRecorder;
   vncHost?: string;
   vncPort?: number;
   webDistDir?: string;
@@ -193,6 +196,11 @@ export function createGatewayServer(
 
   const uploadTranscript = createTranscriptSender(config, fetchFn);
 
+  // Records the devbox screen for each task and uploads it to Convex storage;
+  // the SessionManager drives its start/finish around the task lifecycle.
+  const recorder =
+    options.recorder ?? createScreenRecorder({ config, fetchFn });
+
   // One browser for the gateway's lifetime, shared across tasks like the rest
   // of the desktop: Chrome launches lazily on first use and stays open, with
   // logins persisting in its profile. (Construction never launches anything.)
@@ -201,6 +209,7 @@ export function createGatewayServer(
   const session = new SessionManager({
     emitEvent,
     uploadTranscript,
+    recorder,
     createMcpServers: (taskId) => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
       browser: createBrowserMcpServer(browserSession),

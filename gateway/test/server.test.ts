@@ -58,6 +58,9 @@ function makeHarness(
     webDistDir: join(tmpdir(), "gateway-test-no-such-dist"),
     // Keep the cross-task inbox wipe off the real ~/ultraclaude-inbox.
     inboxDir: join(tmpdir(), "gateway-test-inbox"),
+    // No-op recorder: these tests exercise the HTTP surface, and the default
+    // recorder would spawn a real `screencapture` on the test machine.
+    recorder: { start: () => {}, finish: async () => {}, abort: () => {} },
     ...overrides,
   });
   servers.push(server);
