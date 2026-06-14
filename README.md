@@ -58,8 +58,9 @@ should reach live systems; override with `ULTRACLAUDE_SINGLETON_FROM_WORKTREE=1`
   and `bun run deploy:convex` (one-shot deploy — prefer this over raw
   `bunx convex dev --once`).
 - `fleet` lock: `scripts/deploy-payload.sh`, `provision-host.sh`,
-  `adopt-host.sh`, `bake-golden-v2.sh` (Scaleway hosts, golden image). The
-  lock no-ops on fleet hosts themselves, where the payload has no git checkout.
+  `adopt-host.sh`, `bake-golden.sh` (Scaleway hosts, golden image; the bake is
+  version-parameterized — `--from`/`--to`). The lock no-ops on fleet hosts
+  themselves, where the payload has no git checkout.
 
 Merge hygiene across worktrees: never hand-merge `bun.lock` (take both sides'
 package.json, then re-run `bun install`) or `convex/_generated/` (re-run

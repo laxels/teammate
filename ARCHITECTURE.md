@@ -18,22 +18,26 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 - Host: Scaleway Mac mini M2-L (`ultraclaude-host-1`, tailnet 100.121.13.107),
   running Tart VMs (max 2 concurrent macOS VMs per Apple EULA).
-- Golden image: `golden-v3` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v3`) —
+- Golden image: `golden-v4` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v4`) —
   macOS Sequoia with Chrome (logged in, default browser, Claude-in-Chrome
   extension removed), Claude desktop (logged in), Claude Code run at
   `claude-opus-4-8`/`xhigh` (set by the gateway via the Agent SDK `model`
-  option, which is authoritative over the baked `~/.claude/settings.json` pin —
-  that pin still reads `claude-fable-5` until the next golden rebake;
+  option, which is authoritative over the baked `~/.claude/settings.json` pin;
+  v4 also bakes that pin as `claude-opus-4-8` — v3 still read `claude-fable-5`;
   settings.json also carries `autoCompactWindow`, BASH timeout env,
   `cleanupPeriodDays`), `switchModelsOnFlag: false`, subscription OAuth token at
-  `~/claude-oauth-token.txt`. Computer-use prerequisites baked in: `cliclick`
+  `~/claude-oauth-token.txt`. Browser-tool deps (`playwright-core`, PR #23) are
+  baked into node_modules as of v4, so ephemerals no longer install it at
+  provision time. Computer-use prerequisites baked in: `cliclick`
   at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
   (SIP is disabled in the guest; grants persist across clones), 1920x1080
   display (1:1 points==pixels), `en-US` locale, never-sleep/no-screen-lock,
   notifications under an always-on DND schedule, automatic macOS updates off,
   keyboard autocorrect/smart-quotes off.
-- Provisioning (`scripts/provision-devbox.sh`) clones `golden-v2`: golden-v1
-  plus the gateway and its LaunchAgent baked in.
+- Provisioning clones `golden-v4` and overlays the repo's current gateway/web
+  code on top (the image carries the slow-to-build environment + baked
+  node_modules; code goes stale with every merge). The image is rebuilt with
+  `scripts/bake-golden.sh` (version-parameterized: `--from`/`--to`).
 - Each devbox VM joins the tailnet with its own identity at provision time:
   tailscaled's on-disk state (`/Library/Tailscale`, machine key included) is
   wiped — at bake time AND again per-clone before `tailscale up` — because a

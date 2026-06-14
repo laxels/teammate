@@ -73,7 +73,7 @@ export function loadConfig(
     devboxSharedSecret,
     tailscaleAuthkey,
     tailnetSuffix,
-    goldenImage: env.GOLDEN_IMAGE || "golden-v3",
+    goldenImage: env.GOLDEN_IMAGE || "golden-v4",
     payloadDir,
     tartBin: env.TART_BIN || `${home}/tart.app/Contents/MacOS/tart`,
     canProvisionHosts: env.FLEET_PROVISIONER === "1",
