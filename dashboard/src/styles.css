@@ -738,8 +738,8 @@ section[aria-label="task history"] h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   padding: 0;
   border: none;
   background: transparent;
@@ -757,21 +757,28 @@ section[aria-label="task history"] h2 {
 }
 
 .rec-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
 }
 
+/* inline-flex (not inline) keeps the two <Time> elements + separator on a
+ * single row — Vidstack renders each <Time> block-level, so white-space alone
+ * let them stack onto 3 lines and inflated the bar height (issue #72). */
 .rec-time {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1;
   color: rgba(250, 249, 245, 0.85);
   font-variant-numeric: tabular-nums;
-  margin-left: 4px;
+  margin-left: 6px;
   white-space: nowrap;
 }
 
 .rec-time-sep {
-  margin: 0 4px;
   color: rgba(250, 249, 245, 0.45);
 }
 
@@ -825,6 +832,31 @@ section[aria-label="task history"] h2 {
 .rec-slider:hover .rec-slider-thumb,
 .rec-slider[data-dragging] .rec-slider-thumb,
 .rec-slider[data-active] .rec-slider-thumb {
+  opacity: 1;
+}
+
+/* Volume: mute toggle + horizontal level slider (reuses the seek-bar track /
+ * fill / thumb styling; Vidstack drives --slider-fill on both slider types). */
+.rec-volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rec-volume-slider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 68px;
+  height: 18px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* The volume thumb stays visible (no hover-to-reveal like the long seek bar). */
+.rec-volume-slider .rec-slider-thumb {
+  width: 11px;
+  height: 11px;
   opacity: 1;
 }
 
