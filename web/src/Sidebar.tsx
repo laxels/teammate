@@ -87,12 +87,16 @@ function Transcript({
   }, []);
 
   // Follow the bottom of the transcript unless the user scrolled away. The
-  // body only calls the stable callback, but items/thinking are real triggers:
-  // re-run whenever the content grows.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on content growth
+  // body only calls the stable callback, but items/thinking/running are real
+  // triggers. `running` matters because it toggles the 64px bottom padding:
+  // in the local-steer path the user bubble scrolls to the bottom while
+  // running is still false, then the status flip grows scrollHeight by 40px
+  // without moving scrollTop — leaving the last row behind the Stop overlay
+  // unless we re-stick here.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-stick on content growth and the running padding toggle
   useEffect(() => {
     stickToBottom();
-  }, [items, thinking, stickToBottom]);
+  }, [items, thinking, running, stickToBottom]);
 
   return (
     <div
