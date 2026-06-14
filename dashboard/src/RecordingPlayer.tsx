@@ -10,6 +10,7 @@ import {
   TimeSlider,
   useMediaRemote,
   useMediaState,
+  VolumeSlider,
 } from "@vidstack/react";
 import "@vidstack/react/player/styles/base.css";
 import { type ReactNode, useState } from "react";
@@ -99,9 +100,7 @@ function PlayerControls() {
         </span>
         <span className="rec-spacer" />
         <SpeedControl />
-        <MuteButton className="rec-btn">
-          <VolumeGlyph />
-        </MuteButton>
+        <VolumeControl />
         <FullscreenButton className="rec-btn">
           <FullscreenGlyph />
         </FullscreenButton>
@@ -125,37 +124,56 @@ function PlayPauseGlyph() {
 }
 
 function SeekGlyph({ dir }: { dir: "back" | "fwd" }) {
-  // A circular replay arrow with the seek amount; mirrored for forward.
+  // A circular arrow that opens at the top with the seek amount centred inside
+  // the ring. Only the arrow is mirrored for forward; the "10" stays upright and
+  // legible (the old glyph crammed the text over the stroke — issue #72).
   return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      style={dir === "fwd" ? { transform: "scaleX(-1)" } : undefined}
-    >
-      <path
-        d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <g
+        style={
+          dir === "fwd"
+            ? { transform: "scaleX(-1)", transformOrigin: "center" }
+            : undefined
+        }
+      >
+        <path
+          d="M16.5 7.4A7 7 0 1 1 7.5 7.4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+        />
+        {/* Arrowhead at the ring's top-left terminus. */}
+        <path d="M7.9 3.4 6.4 8 11.2 7.7Z" fill="currentColor" />
+      </g>
       <text
-        x="13"
+        x="12"
         y="16"
-        fontSize="8"
+        fontSize="9"
         fontWeight="700"
         fill="currentColor"
         textAnchor="middle"
-        style={
-          dir === "fwd"
-            ? { transform: "scaleX(-1)", transformOrigin: "13px 14px" }
-            : undefined
-        }
       >
         10
       </text>
     </svg>
+  );
+}
+
+/** Mute toggle plus a real volume slider (issue #72). */
+function VolumeControl() {
+  return (
+    <div className="rec-volume">
+      <MuteButton className="rec-btn">
+        <VolumeGlyph />
+      </MuteButton>
+      <VolumeSlider.Root className="rec-volume-slider">
+        <VolumeSlider.Track className="rec-slider-track">
+          <VolumeSlider.TrackFill className="rec-slider-fill" />
+        </VolumeSlider.Track>
+        <VolumeSlider.Thumb className="rec-slider-thumb" />
+      </VolumeSlider.Root>
+    </div>
   );
 }
 
