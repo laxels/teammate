@@ -348,6 +348,21 @@ export const failOrphanedProvisions = mutation({
       });
     }
     if (orphaned.length > 0) {
+      // This mutation is the just-restarted provisioner's first contact with
+      // Convex, so it also serves as a liveness signal: refresh its host row
+      // before re-draining the queue. Otherwise, if the agent was down longer
+      // than HEARTBEAT_FRESHNESS_MS (a crash-loop, a slow deploy, a reboot),
+      // the scheduled requestHostProvisionRow's pickProvisioner would see a
+      // stale provisioner and return no_provisioner — freeing the lock but
+      // never requesting the replacement bootstrap. (The agent's own first
+      // heartbeat refreshes lastSeenAt too, but races this scheduled drain and,
+      // being a plain active heartbeat, schedules no drain of its own.) The
+      // caller owns "provisioning" rows, so it was a credentialed provisioner;
+      // its row already exists.
+      const self = hosts.find((host) => host.hostId === args.provisionerHostId);
+      if (self !== undefined) {
+        await ctx.db.patch(self._id, { lastSeenAt: Date.now() });
+      }
       await ctx.scheduler.runAfter(
         0,
         internal.hosts.placeQueuedEphemeralTasks,

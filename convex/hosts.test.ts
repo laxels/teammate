@@ -296,6 +296,80 @@ test("a provisioner restart mid-bootstrap frees the orphaned lock and a fresh bo
   ).toBe(true);
 });
 
+test("a stale-heartbeat provisioner still requests a replacement bootstrap on restart", async () => {
+  const t = newT();
+  const orphanRequestedAt = Date.now() - 60_000;
+  // The agent was down longer than the freshness window (a crash-loop / slow
+  // deploy / reboot), so its row is stale when it reconciles on restart.
+  const staleSeenAt = Date.now() - 3 * 60_000;
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: staleSeenAt,
+      canProvisionHosts: true,
+    });
+    for (const n of [1, 2]) {
+      await ctx.db.insert("devboxes", {
+        devboxId: `devbox-${n}`,
+        gatewayUrl: `http://devbox-${n}.ts.example.com:8787`,
+        status: "busy",
+        taskId: `busy-${n}`,
+        hostId: "host-1",
+        ephemeral: true,
+        lastSeenAt: now,
+      });
+    }
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-2",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: orphanRequestedAt,
+      provisionRequestedAt: orphanRequestedAt,
+      provisionedBy: "host-1",
+    });
+    await ctx.db.insert("tasks", {
+      taskId: "task-q",
+      title: "Queued task",
+      prompt: "do the thing",
+      status: "queued",
+      placement: "ephemeral",
+      slackChannel: "C1",
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  await t.mutation(api.hosts.failOrphanedProvisions, {
+    provisionerHostId: "host-1",
+    secret: SECRET,
+  });
+  await drainScheduled(t);
+
+  // The reconcile refreshed the provisioner's lastSeenAt (it was the one
+  // calling), so the re-drain picked it as a fresh provisioner and requested a
+  // replacement bootstrap — rather than freeing the lock and stalling.
+  const provisioning = await t.run(async (ctx) =>
+    (await ctx.db.query("hosts").collect()).filter(
+      (h) => h.status === "provisioning",
+    ),
+  );
+  expect(provisioning).toHaveLength(1);
+  expect(provisioning[0]?.provisionRequestedAt ?? 0).toBeGreaterThan(
+    orphanRequestedAt,
+  );
+  const hostCommands = await t.run(async (ctx) =>
+    ctx.db.query("hostCommands").collect(),
+  );
+  expect(
+    hostCommands.some(
+      (c) => c.kind === "provision_host" && c.hostId === "host-1",
+    ),
+  ).toBe(true);
+});
+
 test("failOrphanedProvisions only frees rows this provisioner owns", async () => {
   const t = newT();
   await t.run(async (ctx) => {
