@@ -624,17 +624,25 @@ export const processSlackEvent = internalAction({
       return; // already claimed above; nothing to do or say
     }
 
-    // Now that the message is confirmed for us (past the bystander check, so we
-    // never react to NO_REPLY chatter), drop a :blob_salute: on it before the
-    // multi-second LLM loop — instant "I'm on it" feedback during the spawn
-    // wait. Best-effort: addSlackReaction never throws, and the ack lands ahead
-    // of any reply because we await it here.
-    await addSlackReaction({
-      botToken,
-      channel: trigger.channel,
-      messageTs: trigger.ts,
-      name: ACK_REACTION,
-    });
+    // Drop a :blob_salute: ack on the triggering message before the multi-second
+    // LLM loop — instant "I'm on it" feedback during the ~15s spawn wait.
+    // Gated to message classes that can't legitimately resolve to NO_REPLY:
+    // DMs and @mentions are always addressed to us, but an un-mentioned
+    // channel-thread reply (channelThreadReply) passed the bystander check only
+    // because it anchors a task — it may still be people talking to each other
+    // in that thread, which the model answers with NO_REPLY. Pre-acking those
+    // would react to bystander NO_REPLY chatter, so we skip them and let the
+    // ~15s ack value land where it bites: DMs/mentions starting new work. (#85)
+    // Best-effort: addSlackReaction never throws, and we await so the ack lands
+    // ahead of any reply.
+    if (!trigger.channelThreadReply) {
+      await addSlackReaction({
+        botToken,
+        channel: trigger.channel,
+        messageTs: trigger.ts,
+        name: ACK_REACTION,
+      });
+    }
 
     // Download + stage any shared files before the tool loop: images go to the
     // orchestrator's own model inline, all files are handed to whatever task it
