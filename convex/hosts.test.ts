@@ -218,3 +218,73 @@ test("provisionVmFailed is a no-op on a wrong secret or a missing row", async ()
   });
   expect(await devboxIds(t)).toEqual(["devbox-1", "devbox-2"]);
 });
+
+async function seedPendingHostCommand(
+  t: Tester,
+  commandId: string,
+): Promise<void> {
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hostCommands", {
+      commandId,
+      hostId: "host-1",
+      kind: "provision_vm",
+      payload: JSON.stringify({ devboxId: "devbox-1" }),
+      status: "pending",
+      createdAt: Date.now(),
+    });
+  });
+}
+
+function hostCommandStatus(
+  t: Tester,
+  commandId: string,
+): Promise<string | undefined> {
+  return t.run(async (ctx) => {
+    const row = await ctx.db
+      .query("hostCommands")
+      .withIndex("by_command_id", (q) => q.eq("commandId", commandId))
+      .unique();
+    return row?.status;
+  });
+}
+
+// Same persisted idempotency guard as commands.claim, against hostCommands: a
+// replayed provision_vm would double-allocate a VM, so the claim must win only
+// once even after the host agent's in-memory `seen` set is lost on restart.
+test("host claim wins once then loses; ack finalizes; pendingFor drops it", async () => {
+  const t = newT();
+  await seedPendingHostCommand(t, "hostcmd-1");
+
+  expect(
+    await t.mutation(api.hosts.claim, {
+      commandId: "hostcmd-1",
+      secret: SECRET,
+    }),
+  ).toBe(true);
+  expect(await hostCommandStatus(t, "hostcmd-1")).toBe("running");
+
+  // Re-offered after a restart: the claim loses, so provision_vm never replays.
+  expect(
+    await t.mutation(api.hosts.claim, {
+      commandId: "hostcmd-1",
+      secret: SECRET,
+    }),
+  ).toBe(false);
+
+  // The claimed command is no longer offered to the subscription.
+  expect(
+    await t.query(api.hosts.pendingFor, { hostId: "host-1", secret: SECRET }),
+  ).toEqual([]);
+
+  await t.mutation(api.hosts.ack, { commandId: "hostcmd-1", secret: SECRET });
+  expect(await hostCommandStatus(t, "hostcmd-1")).toBe("acked");
+});
+
+test("host claim no-ops on a wrong secret", async () => {
+  const t = newT();
+  await seedPendingHostCommand(t, "hostcmd-1");
+  expect(
+    await t.mutation(api.hosts.claim, { commandId: "hostcmd-1", secret: "no" }),
+  ).toBe(false);
+  expect(await hostCommandStatus(t, "hostcmd-1")).toBe("pending");
+});

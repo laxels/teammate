@@ -58,6 +58,34 @@ export const pendingFor = query({
   },
 });
 
+/**
+ * Atomically claims a pending command (pending -> running) before the gateway
+ * runs its side effect. Returns true only to the caller that won the
+ * transition; a command already running or acked returns false. This is the
+ * persisted idempotency guard: the in-memory `seen` set is lost on restart, so
+ * without this a crash between a side effect and its ack would replay the
+ * command (re-running a `start` that evicts a live session). Mutations are
+ * serialized, so two overlapping incarnations (a graceful restart's old + new
+ * process) cannot both win the claim.
+ */
+export const claim = mutation({
+  args: { commandId: v.string(), secret: v.string() },
+  handler: async (ctx, args): Promise<boolean> => {
+    if (!devboxSecretOk(args.secret)) {
+      return false;
+    }
+    const row = await ctx.db
+      .query("commands")
+      .withIndex("by_command_id", (q) => q.eq("commandId", args.commandId))
+      .unique();
+    if (row === null || row.status !== "pending") {
+      return false;
+    }
+    await ctx.db.patch(row._id, { status: "running", claimedAt: Date.now() });
+    return true;
+  },
+});
+
 export const ack = mutation({
   args: { commandId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
@@ -68,7 +96,9 @@ export const ack = mutation({
       .query("commands")
       .withIndex("by_command_id", (q) => q.eq("commandId", args.commandId))
       .unique();
-    if (row !== null && row.status === "pending") {
+    // Normal path is running -> acked (the gateway claimed first); tolerate a
+    // direct pending -> acked too so an ack is never silently dropped.
+    if (row !== null && row.status !== "acked") {
       await ctx.db.patch(row._id, { status: "acked" });
     }
   },

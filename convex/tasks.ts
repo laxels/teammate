@@ -308,25 +308,71 @@ export const activeWithLatestEvent = internalQuery({
 });
 
 /**
- * Boot-time orphan check for gateways: tasks Convex still considers running
- * on a devbox. A freshly started gateway owns no sessions, so anything this
- * returns was lost with the previous gateway process (its start command is
- * already acked and will never be redelivered) — the gateway fails these
- * loudly instead of letting them hang silently.
+ * Boot-time orphan check for gateways. A freshly started gateway owns no
+ * sessions, so anything this returns was lost with the previous gateway
+ * process — the gateway fails these loudly instead of letting them hang
+ * silently. Two kinds of orphan:
+ *
+ *   1. `running` tasks assigned to this devbox — the session died mid-task.
+ *   2. `queued` tasks assigned to this devbox whose `start` command has
+ *      already left "pending" (claimed or acked). With the claim lifecycle a
+ *      delivered command is never redelivered, so a gateway that claimed a
+ *      `start` and then crashed before the session emitted "started" would
+ *      otherwise strand the task as queued until the 15-min staleness cron.
+ *      A still-"pending" start is *not* an orphan: it has not been delivered
+ *      yet and this booting gateway will consume it normally.
  */
-export const runningForDevbox = query({
+export const orphansForDevbox = query({
   args: { devboxId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
     if (!devboxSecretOk(args.secret)) {
       return [];
     }
-    const running = await ctx.db
-      .query("tasks")
-      .withIndex("by_status", (q) => q.eq("status", "running"))
+    const running = (
+      await ctx.db
+        .query("tasks")
+        .withIndex("by_status", (q) => q.eq("status", "running"))
+        .collect()
+    ).filter((task) => task.devboxId === args.devboxId);
+
+    // Queued tasks whose start command was already delivered to a dead
+    // process. A delivered start is one no longer "pending" (claimed/acked).
+    const deliveredStartTaskIds = new Set<string>();
+    const commands = await ctx.db
+      .query("commands")
+      .withIndex("by_devbox_status", (q) => q.eq("devboxId", args.devboxId))
       .collect();
-    return running
-      .filter((task) => task.devboxId === args.devboxId)
-      .map((task) => ({ taskId: task.taskId, title: task.title }));
+    for (const command of commands) {
+      if (command.kind !== "start" || command.status === "pending") {
+        continue;
+      }
+      try {
+        const payload = JSON.parse(command.payload) as { taskId?: unknown };
+        if (typeof payload.taskId === "string") {
+          deliveredStartTaskIds.add(payload.taskId);
+        }
+      } catch {
+        // A malformed payload can't be correlated to a task; skip it.
+      }
+    }
+    const strandedQueued =
+      deliveredStartTaskIds.size === 0
+        ? []
+        : (
+            await ctx.db
+              .query("tasks")
+              .withIndex("by_status", (q) => q.eq("status", "queued"))
+              .collect()
+          ).filter(
+            (task) =>
+              task.devboxId === args.devboxId &&
+              deliveredStartTaskIds.has(task.taskId),
+          );
+
+    return [...running, ...strandedQueued].map((task) => ({
+      taskId: task.taskId,
+      title: task.title,
+    }));
   },
 });
 

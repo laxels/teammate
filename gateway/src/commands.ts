@@ -1,9 +1,10 @@
-import { ConvexClient } from "convex/browser";
+import type { ConvexClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
 
 // Referenced by name so the gateway doesn't compile against convex/_generated
 // (a separate TS project). The shapes are pinned by convex/commands.ts.
 const pendingForRef = makeFunctionReference<"query">("commands:pendingFor");
+const claimRef = makeFunctionReference<"mutation">("commands:claim");
 const ackRef = makeFunctionReference<"mutation">("commands:ack");
 const heartbeatRef = makeFunctionReference<"mutation">("commands:heartbeat");
 
@@ -35,7 +36,11 @@ export function selectNewCommands(
 }
 
 export type CommandConsumerOptions = {
-  convexUrl: string;
+  /**
+   * Created by the caller (one outbound WebSocket per process). The returned
+   * stop function takes ownership and closes it.
+   */
+  client: ConvexClient;
   devboxId: string;
   secret: string;
   execute: CommandExecutor;
@@ -47,14 +52,17 @@ export const HEARTBEAT_INTERVAL_MS = 60_000;
 /**
  * Subscribes to this devbox's pending commands over the Convex client
  * (outbound WebSocket — nothing dials into the devbox) and executes them
- * serially. Commands are acked even when execution fails: lifecycle events
- * report the failure, and retrying a broken command forever would wedge the
- * queue. Returns a stop function.
+ * serially. Each command is claimed (pending -> running) before its side
+ * effect and acked (-> acked) after; the claim is what makes execution
+ * idempotent across a crash/restart (the in-memory `seen` set is process-local
+ * — see commands.claim). Commands are acked even when execution fails:
+ * lifecycle events report the failure, and retrying a broken command forever
+ * would wedge the queue. Returns a stop function.
  */
 export function startCommandConsumer(
   options: CommandConsumerOptions,
 ): () => void {
-  const client = new ConvexClient(options.convexUrl);
+  const { client } = options;
   const seen = new Set<string>();
   const auth = { secret: options.secret };
   let chain: Promise<void> = Promise.resolve();
@@ -68,6 +76,27 @@ export function startCommandConsumer(
         seen,
       )) {
         chain = chain.then(async () => {
+          // Claim before executing. A false return means a prior incarnation
+          // already claimed (and ran, or is running) this command after a
+          // crash/restart — never replay it. A claim that throws is left
+          // pending for redelivery, so drop it from `seen` to allow a retry.
+          let won: boolean;
+          try {
+            won = (await client.mutation(claimRef, {
+              commandId: command.commandId,
+              ...auth,
+            })) as boolean;
+          } catch (error) {
+            console.error(
+              `[gateway] failed to claim ${command.commandId}:`,
+              error,
+            );
+            seen.delete(command.commandId);
+            return;
+          }
+          if (!won) {
+            return;
+          }
           try {
             await options.execute(command);
           } catch (error) {

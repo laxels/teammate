@@ -1,25 +1,29 @@
-export type RunningTask = { taskId: string; title?: string };
+export type OrphanTask = { taskId: string; title?: string };
 
 export type ReconcileOptions = {
-  /** Fetches the tasks Convex still considers running on this devbox. */
-  queryRunning: () => Promise<RunningTask[]>;
+  /**
+   * Fetches the tasks this devbox should treat as orphaned on boot: tasks
+   * Convex still considers running here, plus queued tasks whose `start`
+   * command was already delivered (claimed/acked) to a now-dead process.
+   */
+  queryOrphans: () => Promise<OrphanTask[]>;
   emitEvent: (taskId: string, type: "failed", summary: string) => Promise<void>;
 };
 
 /**
- * A freshly booted gateway owns no sessions, so any task Convex still
- * considers running on this devbox was lost with the previous process
- * (crash, watchdog hard-exit, deploy kickstart). Fail those tasks loudly:
- * their start commands are already acked and will never be redelivered, so
- * without this they hang silently forever — nothing else in the system
- * notices a dead session whose gateway came back.
+ * A freshly booted gateway owns no sessions, so any task Convex still treats
+ * as live on this devbox was lost with the previous process (crash, watchdog
+ * hard-exit, deploy kickstart). Fail those tasks loudly: their start commands
+ * were already claimed/acked and will never be redelivered, so without this
+ * they hang silently forever — nothing else in the system notices a dead
+ * session whose gateway came back.
  */
 export async function reconcileOrphanedTasks(
   options: ReconcileOptions,
 ): Promise<void> {
-  let orphans: RunningTask[];
+  let orphans: OrphanTask[];
   try {
-    orphans = await options.queryRunning();
+    orphans = await options.queryOrphans();
   } catch (error) {
     // Boot must survive a flaky control-plane query; the staleness cron is
     // the backstop for anything missed here.

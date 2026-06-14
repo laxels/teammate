@@ -7,6 +7,7 @@ import type { HostCommandKind } from "../../shared/protocol";
 // convex/hosts.ts. Note: shared/protocol imports above must stay type-only —
 // the deployed host (~/hostagent) has no shared/ checkout next to it.
 const pendingForRef = makeFunctionReference<"query">("hosts:pendingFor");
+const claimRef = makeFunctionReference<"mutation">("hosts:claim");
 const ackRef = makeFunctionReference<"mutation">("hosts:ack");
 const heartbeatRef = makeFunctionReference<"mutation">("hosts:heartbeat");
 /** Deletes a devbox row after the host agent tart-deletes its VM. */
@@ -71,7 +72,11 @@ export const HEARTBEAT_INTERVAL_MS = 60_000;
 
 /**
  * Subscribes to this host's pending commands over the Convex client (outbound
- * WebSocket — nothing dials into the host) and executes them serially.
+ * WebSocket — nothing dials into the host) and executes them serially. Each
+ * command is claimed (pending -> running) before its side effect and acked
+ * (-> acked) after; the claim is what makes execution idempotent across a
+ * crash/restart (the in-memory `seen` set is process-local — see hosts.claim,
+ * which prevents a replayed provision_vm from double-allocating a VM).
  * Commands are acked even when execution fails: a failed provision_vm reports
  * itself to Convex (freeing the slot and failing the task; see vm.ts), so
  * there is nothing to retry, and redelivering a broken command forever would
@@ -92,6 +97,27 @@ export function startHostConsumer(options: HostConsumerOptions): () => void {
         seen,
       )) {
         chain = chain.then(async () => {
+          // Claim before executing. A false return means a prior incarnation
+          // already claimed (and ran, or is running) this command after a
+          // crash/restart — never replay it. A claim that throws is left
+          // pending for redelivery, so drop it from `seen` to allow a retry.
+          let won: boolean;
+          try {
+            won = (await client.mutation(claimRef, {
+              commandId: command.commandId,
+              ...auth,
+            })) as boolean;
+          } catch (error) {
+            console.error(
+              `[hostagent] failed to claim ${command.commandId}:`,
+              error,
+            );
+            seen.delete(command.commandId);
+            return;
+          }
+          if (!won) {
+            return;
+          }
           try {
             await options.execute(command);
           } catch (error) {

@@ -7,7 +7,7 @@ import { startCommandConsumer } from "./commands";
 import { loadConfig } from "./config";
 import { createEventSender } from "./events";
 import { waitForProvisionReady } from "./ready";
-import { type RunningTask, reconcileOrphanedTasks } from "./reconcile";
+import { type OrphanTask, reconcileOrphanedTasks } from "./reconcile";
 import { createScreenRecorder } from "./recorder";
 import { createGatewayServer } from "./server";
 
@@ -51,7 +51,7 @@ const localUrl = `http://127.0.0.1:${server.port}`;
 const authHeader = { "x-devbox-secret": config.devboxSharedSecret };
 const startConsumer = () =>
   startCommandConsumer({
-    convexUrl: config.convexUrl,
+    client: new ConvexClient(config.convexUrl),
     devboxId: config.devboxId,
     secret: config.devboxSharedSecret,
     execute: async (command) => {
@@ -140,18 +140,18 @@ const startConsumer = () =>
 // /health serves immediately (provisioning polls it before the ready marker
 // exists), but commands are only consumed on a fully provisioned VM — and
 // only after failing any task a previous gateway process took to its grave.
-const runningForDevboxRef = makeFunctionReference<"query">(
-  "tasks:runningForDevbox",
+const orphansForDevboxRef = makeFunctionReference<"query">(
+  "tasks:orphansForDevbox",
 );
 void (async () => {
   await waitForProvisionReady(join(homedir(), "ultraclaude.ready"));
   const bootClient = new ConvexClient(config.convexUrl);
   await reconcileOrphanedTasks({
-    queryRunning: async () =>
-      (await bootClient.query(runningForDevboxRef, {
+    queryOrphans: async () =>
+      (await bootClient.query(orphansForDevboxRef, {
         devboxId: config.devboxId,
         secret: config.devboxSharedSecret,
-      })) as RunningTask[],
+      })) as OrphanTask[],
     emitEvent,
   });
   await bootClient.close();
