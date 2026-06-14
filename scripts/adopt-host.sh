@@ -2,7 +2,7 @@
 #
 # Adopt an ALREADY-bootstrapped Mac host (passwordless sudo, Homebrew,
 # tailscale, sshpass, tart + golden image, auto-login — e.g. ultraclaude-host-1)
-# as an ultraclaude VM host:
+# as an Ultraclaude VM host:
 #   1. install bun if missing
 #   2. deploy the devbox payload + host agent (scripts/deploy-payload.sh)
 #   3. write ~/hostagent.env and load the hostagent LaunchAgent

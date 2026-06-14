@@ -1,4 +1,4 @@
-# ultraclaude architecture
+# Ultraclaude architecture
 
 A Slack-addressable "virtual teammate". The orchestrator (Claude Opus 4.8,
 effort `xhigh`, no model fallback) receives DMs/mentions, manages tasks, and
@@ -119,7 +119,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 ## Conventions
 
-- **UI branding invariant**: every ultraclaude UI surface (fleet dashboard,
+- **UI branding invariant**: every Ultraclaude UI surface (fleet dashboard,
   monitoring page, anything future) matches Anthropic's styling/theme/branding
   as closely as possible without claiming to be official — warm ivory paper,
   terracotta accent, serif display type (canonical tokens in
