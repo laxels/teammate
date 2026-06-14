@@ -11,7 +11,7 @@ events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 | `SLACK_SIGNING_SECRET` | `http.ts` | Verifies `/slack/events` request signatures |
 | `SLACK_BOT_TOKEN` | `orchestrator.ts`, `notify.ts`, `staleness.ts`, `artifacts.ts` | `chat.postMessage` replies, status updates, and outbound file uploads |
 | `ANTHROPIC_API_KEY` | `orchestrator.ts` | Opus 4.8 tool loop (`claude-opus-4-8`, effort `xhigh`, no fallbacks) |
-| `DEVBOX_SHARED_SECRET` | `http.ts`, `commands.ts`, `hosts.ts` | Authenticates gateway/host posts to the `/devbox/*` endpoints (`x-devbox-secret` header) |
+| `DEVBOX_SHARED_SECRET` | `http.ts`, `commands.ts`, `hosts.ts` | Shared secret for all gateway/host traffic — sent as the `x-devbox-secret` header on the `/devbox/*` HTTP endpoints (`http.ts`), and as a `secret` argument on the Convex functions gateways/host agents call directly (`commands.ts`, `hosts.ts`; they're Convex clients, so there are no request headers) |
 | `DASHBOARD_SECRET` | `dashboard.ts` | Gates the public dashboard query/mutation functions |
 | `TAILNET_SUFFIX` | `hosts.ts` | Derives an ephemeral devbox's gateway URL; required once a host is available (otherwise placement throws) |
 
@@ -42,8 +42,11 @@ to register. When a task starts, `hosts.allocateEphemeral` provisions a VM on an
 available Mac host (`provisioning` → `busy` → `retiring` → row deleted by
 `hosts.removeDevbox`) and derives its gateway URL from `TAILNET_SUFFIX`.
 Ephemeral devboxes never enter the warm pool — no task reuses a previous task's
-VM. When all host VM slots are full, the task queues and the fleet bootstraps a
-new Mac host automatically.
+VM. When all host VM slots are full, the task queues; if a live host holds fleet
+credentials it bootstraps a new Mac host automatically (~20–45 min). With no such
+provisioner host, `requestHostProvisionRow` returns `no_provisioner` and the task
+just waits for a slot to free (the orchestrator tells the user auto-scaling is
+unavailable).
 
 The permanent devbox `devbox-1` is the one exception: it is registered manually
 and cycles `warm` ↔ `busy` so it can carry state across tasks (used only when a
