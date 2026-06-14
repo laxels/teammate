@@ -197,6 +197,244 @@ test("provisionVmFailed never regresses a task that already reached terminal", a
   expect((await getTask(t, "task-1"))?.status).toBe("stopped");
 });
 
+test("a provisioner restart mid-bootstrap frees the orphaned lock and a fresh bootstrap starts", async () => {
+  const t = newT();
+  // Recent enough that the orphan still counts as "in-flight" by the 90-min
+  // stale window — i.e. without reconciliation it would hold the lock.
+  const orphanRequestedAt = Date.now() - 60_000;
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    // The provisioner host, at its EULA cap of 2 VMs (so it can't place VMs but
+    // still holds fleet credentials and bootstraps new hosts).
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: now,
+      canProvisionHosts: true,
+    });
+    for (const n of [1, 2]) {
+      await ctx.db.insert("devboxes", {
+        devboxId: `devbox-${n}`,
+        gatewayUrl: `http://devbox-${n}.ts.example.com:8787`,
+        status: "busy",
+        taskId: `busy-${n}`,
+        hostId: "host-1",
+        ephemeral: true,
+        lastSeenAt: now,
+      });
+    }
+    // The bootstrap host-1 kicked off, now orphaned by host-1's restart: a
+    // "provisioning" row with no live bootstrap behind it.
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-2",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: orphanRequestedAt,
+      provisionRequestedAt: orphanRequestedAt,
+      provisionedBy: "host-1",
+    });
+    // A task stuck waiting on the stalled scale-up.
+    await ctx.db.insert("tasks", {
+      taskId: "task-q",
+      title: "Queued task",
+      prompt: "do the thing",
+      status: "queued",
+      placement: "ephemeral",
+      slackChannel: "C1",
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  const provisioningRows = () =>
+    t.run(async (ctx) =>
+      (await ctx.db.query("hosts").collect()).filter(
+        (h) => h.status === "provisioning",
+      ),
+    );
+
+  // Lock held: with the orphan in flight, a placement attempt does NOT request
+  // a new bootstrap.
+  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
+  expect((await provisioningRows()).map((h) => h.provisionRequestedAt)).toEqual(
+    [orphanRequestedAt],
+  );
+
+  // The restarted provisioner reconciles: fail the orphan it left dangling.
+  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
+    provisionerHostId: "host-1",
+    secret: SECRET,
+  });
+  expect(result.failed).toEqual(["ultraclaude-host-2"]);
+  await drainScheduled(t);
+
+  // A provision_failed event was recorded for the orphan...
+  const events = await t.run(async (ctx) =>
+    ctx.db
+      .query("hostEvents")
+      .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-2"))
+      .collect(),
+  );
+  expect(events.some((e) => e.type === "provision_failed")).toBe(true);
+
+  // ...and the freed lock let placeQueuedEphemeralTasks request a FRESH
+  // bootstrap (new provisioning row with a newer timestamp + provision_host
+  // command to the provisioner) — well under the 90-min stale window.
+  const after = await provisioningRows();
+  expect(after).toHaveLength(1);
+  expect(after[0]?.provisionRequestedAt ?? 0).toBeGreaterThan(
+    orphanRequestedAt,
+  );
+  const hostCommands = await t.run(async (ctx) =>
+    ctx.db.query("hostCommands").collect(),
+  );
+  expect(
+    hostCommands.some(
+      (c) => c.kind === "provision_host" && c.hostId === "host-1",
+    ),
+  ).toBe(true);
+});
+
+test("a stale-heartbeat provisioner still requests a replacement bootstrap on restart", async () => {
+  const t = newT();
+  const orphanRequestedAt = Date.now() - 60_000;
+  // The agent was down longer than the freshness window (a crash-loop / slow
+  // deploy / reboot), so its row is stale when it reconciles on restart.
+  const staleSeenAt = Date.now() - 3 * 60_000;
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: staleSeenAt,
+      canProvisionHosts: true,
+    });
+    for (const n of [1, 2]) {
+      await ctx.db.insert("devboxes", {
+        devboxId: `devbox-${n}`,
+        gatewayUrl: `http://devbox-${n}.ts.example.com:8787`,
+        status: "busy",
+        taskId: `busy-${n}`,
+        hostId: "host-1",
+        ephemeral: true,
+        lastSeenAt: now,
+      });
+    }
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-2",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: orphanRequestedAt,
+      provisionRequestedAt: orphanRequestedAt,
+      provisionedBy: "host-1",
+    });
+    await ctx.db.insert("tasks", {
+      taskId: "task-q",
+      title: "Queued task",
+      prompt: "do the thing",
+      status: "queued",
+      placement: "ephemeral",
+      slackChannel: "C1",
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  await t.mutation(api.hosts.failOrphanedProvisions, {
+    provisionerHostId: "host-1",
+    secret: SECRET,
+  });
+  await drainScheduled(t);
+
+  // The reconcile refreshed the provisioner's lastSeenAt (it was the one
+  // calling), so the re-drain picked it as a fresh provisioner and requested a
+  // replacement bootstrap — rather than freeing the lock and stalling.
+  const provisioning = await t.run(async (ctx) =>
+    (await ctx.db.query("hosts").collect()).filter(
+      (h) => h.status === "provisioning",
+    ),
+  );
+  expect(provisioning).toHaveLength(1);
+  expect(provisioning[0]?.provisionRequestedAt ?? 0).toBeGreaterThan(
+    orphanRequestedAt,
+  );
+  const hostCommands = await t.run(async (ctx) =>
+    ctx.db.query("hostCommands").collect(),
+  );
+  expect(
+    hostCommands.some(
+      (c) => c.kind === "provision_host" && c.hostId === "host-1",
+    ),
+  ).toBe(true);
+});
+
+test("failOrphanedProvisions only frees rows this provisioner owns", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: now,
+      canProvisionHosts: true,
+    });
+    // A bootstrap owned by a DIFFERENT provisioner: host-1's restart must not
+    // abandon another live provisioner's in-flight bootstrap.
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-9",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: now,
+      provisionRequestedAt: now,
+      provisionedBy: "host-other",
+    });
+  });
+
+  // Nothing of host-1's to free, and the other provisioner's row is untouched.
+  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
+    provisionerHostId: "host-1",
+    secret: SECRET,
+  });
+  expect(result.failed).toEqual([]);
+  const other = await t.run(async (ctx) =>
+    ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-9"))
+      .unique(),
+  );
+  expect(other?.status).toBe("provisioning");
+});
+
+test("failOrphanedProvisions is a no-op on a wrong secret", async () => {
+  const t = newT();
+  const requestedAt = Date.now();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-2",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: requestedAt,
+      provisionRequestedAt: requestedAt,
+      provisionedBy: "host-1",
+    });
+  });
+  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
+    provisionerHostId: "host-1",
+    secret: "wrong",
+  });
+  expect(result.failed).toEqual([]);
+  const row = await t.run(async (ctx) =>
+    ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-2"))
+      .unique(),
+  );
+  expect(row?.status).toBe("provisioning");
+});
+
 test("provisionVmFailed is a no-op on a wrong secret or a missing row", async () => {
   const t = newT();
   await seedFullHost(t);

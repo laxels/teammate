@@ -21,6 +21,11 @@ export const provisionVmFailedRef = makeFunctionReference<"mutation">(
 export const recordHostEventRef = makeFunctionReference<"mutation">(
   "hosts:recordHostEvent",
 );
+/** Boot-time reconciliation: fails bootstraps this provisioner left dangling
+ * when its process restarted mid-bootstrap (frees the fleet scale-up lock). */
+export const failOrphanedProvisionsRef = makeFunctionReference<"mutation">(
+  "hosts:failOrphanedProvisions",
+);
 
 export type PendingHostCommand = {
   commandId: string;
