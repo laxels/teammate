@@ -12,6 +12,10 @@ const heartbeatRef = makeFunctionReference<"mutation">("hosts:heartbeat");
 /** Deletes a devbox row after the host agent tart-deletes its VM. */
 export const removeDevboxRef =
   makeFunctionReference<"mutation">("hosts:removeDevbox");
+/** Frees the leaked devbox row and fails the task after a failed provision_vm. */
+export const provisionVmFailedRef = makeFunctionReference<"mutation">(
+  "hosts:provisionVmFailed",
+);
 /** Posts fleet lifecycle events (host bootstrap progress/failures). */
 export const recordHostEventRef = makeFunctionReference<"mutation">(
   "hosts:recordHostEvent",
@@ -68,9 +72,10 @@ export const HEARTBEAT_INTERVAL_MS = 60_000;
 /**
  * Subscribes to this host's pending commands over the Convex client (outbound
  * WebSocket — nothing dials into the host) and executes them serially.
- * Commands are acked even when execution fails: provisioning failures are
- * surfaced by the orchestrator's staleness cron, and retrying a broken
- * command forever would wedge the queue. Returns a stop function.
+ * Commands are acked even when execution fails: a failed provision_vm reports
+ * itself to Convex (freeing the slot and failing the task; see vm.ts), so
+ * there is nothing to retry, and redelivering a broken command forever would
+ * wedge the queue. Returns a stop function.
  */
 export function startHostConsumer(options: HostConsumerOptions): () => void {
   const { client } = options;

@@ -1,8 +1,9 @@
 import { v } from "convex/values";
-import type {
-  HostProvisionPayload,
-  HostVmPayload,
-  StartTaskRequest,
+import {
+  type HostProvisionPayload,
+  type HostVmPayload,
+  isTerminalTaskStatus,
+  type StartTaskRequest,
 } from "../shared/protocol";
 import {
   ephemeralGatewayUrl,
@@ -22,7 +23,7 @@ import {
   type QueryCtx,
   query,
 } from "./_generated/server";
-import { enqueueCommandRow } from "./commands";
+import { deleteCommandsForDevbox, enqueueCommandRow } from "./commands";
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 export const hostCommandKindValidator = v.union(
@@ -33,6 +34,10 @@ export const hostCommandKindValidator = v.union(
 
 /** Apple's EULA allows 2 concurrent macOS VMs per host. */
 const DEFAULT_MAX_VMS = 2;
+
+/** Upper bound on event summaries stored in Convex / posted to Slack, so a
+ * noisy failure tail can't blow the document/payload size limits. */
+const MAX_EVENT_SUMMARY = 500;
 
 /**
  * Host agents authenticate with the same shared secret gateways use, passed
@@ -180,6 +185,81 @@ export const removeDevbox = mutation({
   },
 });
 
+/**
+ * Called by the host agent when provision_vm fails after the partial VM is
+ * torn down: deletes the leaked devbox row (freeing the host VM slot — every
+ * row counts against capacity regardless of status) and fails the associated
+ * task so it surfaces in Slack and the dashboard instead of stalling forever.
+ * Mirrors the provision_host failure path, where recordHostEvent deletes the
+ * pre-created "provisioning" host row. Idempotent: a missing devbox row (an
+ * already-cleaned-up retry) is a no-op.
+ */
+export const provisionVmFailed = mutation({
+  args: { devboxId: v.string(), summary: v.string(), secret: v.string() },
+  handler: async (ctx, args) => {
+    if (!secretOk(args.secret)) {
+      return;
+    }
+    const devbox = await ctx.db
+      .query("devboxes")
+      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
+      .unique();
+    if (devbox === null) {
+      return;
+    }
+    const taskId = devbox.taskId;
+    await ctx.db.delete(devbox._id);
+    // Drop the task's pre-enqueued gateway commands (the `start` command was
+    // inserted before the VM existed) so a future gateway reusing the devboxId
+    // can't pick up this dead task's command.
+    await deleteCommandsForDevbox(ctx, args.devboxId);
+    // The freed VM slot may unblock a queued ephemeral task.
+    await ctx.scheduler.runAfter(
+      0,
+      internal.hosts.placeQueuedEphemeralTasks,
+      {},
+    );
+    if (taskId === undefined) {
+      return;
+    }
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
+      .unique();
+    // Never regress a task that already reached a terminal status (e.g. a user
+    // stopped it before the provision failed).
+    if (task === null || isTerminalTaskStatus(task.status)) {
+      return;
+    }
+    const now = Date.now();
+    // Cap the summary before it lands in a Convex document / Slack payload: a
+    // failing provision step can spew a multi-KB stderr tail, and an oversized
+    // taskEvents insert would roll back this whole mutation — leaving the slot
+    // leaked. Same 500-char bound recordHostEventRow uses.
+    const summary = args.summary.slice(0, MAX_EVENT_SUMMARY);
+    await ctx.db.patch(task._id, {
+      status: "failed",
+      updatedAt: now,
+      finishedAt: now,
+    });
+    await ctx.db.insert("taskEvents", {
+      taskId,
+      devboxId: args.devboxId,
+      type: "failed",
+      summary,
+      ts: now,
+    });
+    // Surface the failure the same way a gateway-posted terminal event would:
+    // create/refresh the status card to "failed", post a threaded ping, react.
+    await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
+      devboxId: args.devboxId,
+      taskId,
+      type: "failed",
+      summary,
+    });
+  },
+});
+
 /** Host agents post fleet lifecycle events (bootstrap progress, failures). */
 export const recordHostEvent = mutation({
   args: {
@@ -215,7 +295,7 @@ async function recordHostEventRow(
   await ctx.db.insert("hostEvents", {
     hostId: args.hostId,
     type: args.type,
-    summary: args.summary.slice(0, 500),
+    summary: args.summary.slice(0, MAX_EVENT_SUMMARY),
     ts: Date.now(),
   });
 }

@@ -45,6 +45,12 @@ export type VmExecutorOptions = {
   config: VmConfig;
   /** Drops the devbox row in Convex after a successful tart delete. */
   removeDevbox: (devboxId: string) => Promise<void>;
+  /**
+   * Reports a failed provision to Convex: drops the leaked devbox row (freeing
+   * the host VM slot) and fails the associated task. Without this a failed
+   * provision permanently occupies one of the host's Apple-EULA-capped slots.
+   */
+  reportProvisionFailure: (devboxId: string, summary: string) => Promise<void>;
   run?: Run;
   /** Injectable for tests; defaults to real timers. */
   sleep?: (ms: number) => Promise<void>;
@@ -81,6 +87,10 @@ const TAILSCALE_RESET =
   'echo "tailscaled did not come back after state wipe" >&2; exit 1';
 
 const POLL_INTERVAL_MS = 5_000;
+// Matches convex hosts.MAX_EVENT_SUMMARY: the provisionVmFailed mutation caps
+// again, but bounding the argument here keeps the failure report from ever
+// being rejected for size (which would re-leak the slot).
+const PROVISION_FAILURE_SUMMARY_MAX = 500;
 const IP_ATTEMPTS = 36; // 3 min
 const SSH_ATTEMPTS = 60; // 5 min
 const HEALTH_ATTEMPTS = 36; // 3 min
@@ -126,7 +136,7 @@ const GATEWAY_KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";
 
 export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
-  const { config, removeDevbox } = options;
+  const { config, removeDevbox, reportProvisionFailure } = options;
   const run = options.run ?? spawnRun;
   const sleep =
     options.sleep ??
@@ -342,15 +352,34 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
         await provisionSteps(devboxId);
         console.log(`[hostagent] ${devboxId} provisioned and healthy`);
       } catch (error) {
-        // Best-effort teardown of the partial VM, then rethrow so the failure
-        // is visible in the log. The consumer acks regardless; the
-        // orchestrator's staleness cron surfaces the stuck task.
+        // Best-effort teardown of the partial VM, then report the failure to
+        // Convex so the pre-created devbox row is dropped (freeing the host
+        // slot) and the task is failed — otherwise the row counts against the
+        // host's VM capacity forever. Rethrow afterwards so the failure is
+        // visible in the log; the consumer acks either way.
         console.error(
           `[hostagent] provisioning ${devboxId} failed; cleaning up partial VM:`,
           error,
         );
         await run([tart, "stop", devboxId]);
         await run([tart, "delete", devboxId]);
+        // Collapse and cap the error: a failing step (rsync, bun install) can
+        // spew a multi-KB stderr tail, and an oversized report would make the
+        // mutation reject — re-leaking the slot this cleanup is meant to free.
+        const detail = (error instanceof Error ? error.message : String(error))
+          .replace(/\s+/g, " ")
+          .trim();
+        const summary = `Provisioning failed: ${detail}`.slice(
+          0,
+          PROVISION_FAILURE_SUMMARY_MAX,
+        );
+        // Best-effort: a Convex hiccup here must not mask the original error.
+        await reportProvisionFailure(devboxId, summary).catch((reportError) => {
+          console.error(
+            `[hostagent] failed to report provision failure for ${devboxId}:`,
+            reportError,
+          );
+        });
         throw error;
       }
     },
