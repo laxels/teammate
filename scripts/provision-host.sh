@@ -6,7 +6,7 @@
 #   2. bootstrap macOS over ssh: passwordless sudo, Homebrew, tailscale (joins
 #      the tailnet as <host-name>), sshpass, tart 2.32.1, auto-login for m1
 #      (kcpassword), key-only sshd, reboot
-#   3. pull the golden image from ghcr and clone it to local "golden-v3"
+#   3. pull the golden image from ghcr and clone it to local "golden-v4"
 #   4. delegate bun + code deploy + host agent setup to scripts/adopt-host.sh
 #
 # Usage: scripts/provision-host.sh <host-name>
@@ -45,8 +45,8 @@ SERVER_TYPE="M2-L"
 SSH_USER="m1"
 TART='~/tart.app/Contents/MacOS/tart'
 TART_URL="https://github.com/openai/tart/releases/download/2.32.1/tart.tar.gz"
-GOLDEN_REMOTE="ghcr.io/laxels/ultraclaude-golden:v3"
-GOLDEN_LOCAL="golden-v3"
+GOLDEN_REMOTE="ghcr.io/laxels/ultraclaude-golden:v4"
+GOLDEN_LOCAL="golden-v4"
 
 log() { printf '\n==> %s\n' "$*"; }
 

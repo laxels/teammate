@@ -7,7 +7,7 @@ import {
 } from "./vm";
 
 const config: VmConfig = {
-  goldenImage: "golden-v2",
+  goldenImage: "golden-v4",
   payloadDir: "/Users/m1/ultraclaude-payload",
   tartBin: "/Users/m1/tart.app/Contents/MacOS/tart",
   tailnetSuffix: "ts.example.com",
@@ -96,7 +96,7 @@ test("provision runs the exact step sequence in order", async () => {
   await executors.provision("dev-1");
 
   expect(calls.map(summarize)).toEqual([
-    `${TART} clone golden-v2 dev-1`,
+    `${TART} clone golden-v4 dev-1`,
     `detached: ${TART} dev-1`,
     `${TART} ip dev-1`,
     `ssh admin@${IP}: true`,
@@ -287,7 +287,7 @@ test("destroy still removes the row when the VM is already gone", async () => {
   const { calls, removed, executors } = harness((command) => {
     if (command[1] === "list") {
       return {
-        stdout: "Source Name      Size State\nlocal  golden-v2 40   stopped\n",
+        stdout: "Source Name      Size State\nlocal  golden-v4 40   stopped\n",
       };
     }
     return { code: 1, stderr: `VM "dev-1" not found` };
