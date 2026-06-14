@@ -57,9 +57,11 @@ export type RecorderDeps = {
   finalizeTimeoutMs?: number;
 };
 
-/** How long finish() waits for screencapture to finalize the .mov after SIGINT
- * before giving up and uploading whatever is on disk. Finalization is near
- * instant in practice; this only bounds a wedged capture. */
+/** How long finish() waits for screencapture to exit after SIGINT before
+ * treating the capture as wedged: past this it force-kills the process and
+ * marks the recording failed (it does NOT upload — a capture that hasn't exited
+ * has no finalized `moov` atom, so the file would be unplayable). Finalization
+ * is near instant in practice; this only bounds a hung capture. */
 export const FINALIZE_TIMEOUT_MS = 30_000;
 
 /** `screencapture -v`: video recording; `-C` cursor; `-k` clicks; `-x` no UI
