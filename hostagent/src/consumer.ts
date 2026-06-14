@@ -66,9 +66,21 @@ export type HostConsumerOptions = {
   /** Advertised in every heartbeat (fleet-provisioner role). */
   canProvisionHosts?: boolean;
   heartbeatIntervalMs?: number;
+  /** Backoff between claim retries; injectable so tests don't wait. */
+  claimRetryDelaysMs?: number[];
 };
 
 export const HEARTBEAT_INTERVAL_MS = 60_000;
+
+/**
+ * Backoff for retrying a failed claim mutation. The claim runs before any side
+ * effect and is idempotent, so retrying is always safe — and necessary: the
+ * pendingFor subscription only re-fires when its result changes, so a claim
+ * that rejects while the row stays pending would otherwise leave the command
+ * idle until an unrelated queue change or a restart. Bounded so a deterministic
+ * failure can't wedge the queue forever.
+ */
+export const CLAIM_RETRY_DELAYS_MS = [250, 1000, 5000, 15000];
 
 /**
  * Subscribes to this host's pending commands over the Convex client (outbound
@@ -86,7 +98,43 @@ export function startHostConsumer(options: HostConsumerOptions): () => void {
   const { client } = options;
   const seen = new Set<string>();
   const auth = { secret: options.secret };
+  const claimRetryDelaysMs =
+    options.claimRetryDelaysMs ?? CLAIM_RETRY_DELAYS_MS;
   let chain: Promise<void> = Promise.resolve();
+
+  // Claim a command, retrying transient mutation failures in-band (the claim is
+  // pre-side-effect and idempotent). Returns the claim outcome, or "give-up"
+  // when every attempt failed — at which point the command is dropped from
+  // `seen` so a reconnect's redelivery (the subscription re-fires on
+  // re-subscribe) gets another shot. Never executes on an unresolved claim.
+  const claimWithRetry = async (
+    commandId: string,
+  ): Promise<boolean | "give-up"> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return (await client.mutation(claimRef, {
+          commandId,
+          ...auth,
+        })) as boolean;
+      } catch (error) {
+        if (attempt >= claimRetryDelaysMs.length) {
+          console.error(
+            `[hostagent] giving up claiming ${commandId} after ${attempt} retries:`,
+            error,
+          );
+          seen.delete(commandId);
+          return "give-up";
+        }
+        console.error(
+          `[hostagent] claim ${commandId} failed (attempt ${attempt + 1}), retrying:`,
+          error,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, claimRetryDelaysMs[attempt]),
+        );
+      }
+    }
+  };
 
   const unsubscribe = client.onUpdate(
     pendingForRef,
@@ -99,23 +147,9 @@ export function startHostConsumer(options: HostConsumerOptions): () => void {
         chain = chain.then(async () => {
           // Claim before executing. A false return means a prior incarnation
           // already claimed (and ran, or is running) this command after a
-          // crash/restart — never replay it. A claim that throws is left
-          // pending for redelivery, so drop it from `seen` to allow a retry.
-          let won: boolean;
-          try {
-            won = (await client.mutation(claimRef, {
-              commandId: command.commandId,
-              ...auth,
-            })) as boolean;
-          } catch (error) {
-            console.error(
-              `[hostagent] failed to claim ${command.commandId}:`,
-              error,
-            );
-            seen.delete(command.commandId);
-            return;
-          }
-          if (!won) {
+          // crash/restart — never replay it.
+          const won = await claimWithRetry(command.commandId);
+          if (won === "give-up" || !won) {
             return;
           }
           try {

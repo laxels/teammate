@@ -155,3 +155,90 @@ test("overlapping incarnations: only the claim winner executes", async () => {
   stopA();
   stopB();
 });
+
+// Fake client whose claim mutation rejects a configurable number of times
+// before succeeding, to exercise the in-band retry path (a transient claim
+// failure leaves the row pending and the subscription won't necessarily
+// re-fire, so the consumer must retry the claim itself).
+function flakyClaimClient(failClaims: number, claimResult = true) {
+  let remaining = failClaims;
+  const calls = { claim: 0, ack: 0 };
+  let subscriber: ((commands: PendingCommand[]) => void) | undefined;
+  const client = {
+    onUpdate: (
+      _ref: unknown,
+      _args: unknown,
+      cb: (commands: PendingCommand[]) => void,
+    ) => {
+      subscriber = cb;
+      return () => {};
+    },
+    mutation: async (ref: unknown, _args: Record<string, unknown>) => {
+      // biome-ignore lint/suspicious/noExplicitAny: duck-typed test stub
+      const name = getFunctionName(ref as any);
+      if (name === "commands:claim") {
+        calls.claim++;
+        if (remaining > 0) {
+          remaining--;
+          throw new Error("convex transient");
+        }
+        return claimResult;
+      }
+      if (name === "commands:ack") {
+        calls.ack++;
+      }
+      return undefined;
+    },
+    close: async () => {},
+  } as unknown as ConvexClient;
+  const push = (commands: PendingCommand[]) => subscriber?.(commands);
+  return { client, calls, push };
+}
+
+const drain = async () => {
+  for (let i = 0; i < 12; i++) await tick();
+};
+
+test("a transient claim failure is retried in-band, then the command executes", async () => {
+  const { client, calls, push } = flakyClaimClient(2); // fail twice, then win
+  const executed: string[] = [];
+  const stop = startCommandConsumer({
+    client,
+    devboxId: "devbox-1",
+    secret: "s",
+    claimRetryDelaysMs: [0, 0, 0],
+    execute: async (command) => {
+      executed.push(command.commandId);
+    },
+  });
+
+  push([cmd("a", 1)]);
+  await drain();
+
+  expect(calls.claim).toBe(3); // 2 rejections + 1 success
+  expect(executed).toEqual(["a"]); // ran once the claim finally landed
+  expect(calls.ack).toBe(1);
+  stop();
+});
+
+test("a claim that never succeeds gives up without executing (no wedge, no run)", async () => {
+  const { client, calls, push } = flakyClaimClient(99); // always rejects
+  const executed: string[] = [];
+  const stop = startCommandConsumer({
+    client,
+    devboxId: "devbox-1",
+    secret: "s",
+    claimRetryDelaysMs: [0, 0], // initial try + 2 retries = 3 attempts, then give up
+    execute: async (command) => {
+      executed.push(command.commandId);
+    },
+  });
+
+  push([cmd("a", 1)]);
+  await drain();
+
+  expect(calls.claim).toBe(3); // bounded: never retries forever
+  expect(executed).toEqual([]); // the side effect never runs on an unresolved claim
+  expect(calls.ack).toBe(0);
+  stop();
+});
