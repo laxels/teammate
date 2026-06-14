@@ -301,6 +301,63 @@ async function recordHostEventRow(
   });
 }
 
+/**
+ * Boot-time reconciliation called by a provisioner host agent on startup. A new
+ * host bootstrap runs as a DETACHED child of the host-agent process, tracked
+ * only by an in-memory flag (hostagent/src/hostProvision.ts). When the agent
+ * restarts mid-bootstrap — a crash, or a deploy-payload `kickstart -k` that
+ * kills the whole launchd job tree — the bootstrap dies WITHOUT emitting
+ * `provision_failed`, so its pre-created "provisioning" host row would keep
+ * holding the fleet-wide scale-up lock until HOST_PROVISION_STALE_MS (90 min),
+ * blocking every queued task that whole time.
+ *
+ * The just-restarted provisioner owns no live bootstrap, so any "provisioning"
+ * row naming it as `provisionedBy` is orphaned. Fail each (delete the row +
+ * record the event), freeing the lock in seconds instead of after 90 min, and
+ * re-drain the queue so a fresh bootstrap starts at once rather than waiting for
+ * an external event. Mirrors the gateway's boot-time orphan reconciliation
+ * (tasks.runningForDevbox).
+ *
+ * Safe even in the rare case the detached bootstrap survived the restart as an
+ * orphaned process: the new host still self-registers an "active" row on its own
+ * first heartbeat, so it comes online regardless; at worst a redundant second
+ * bootstrap runs, which provision-host.sh makes idempotent (it reuses an
+ * existing Scaleway server by name). Idempotent: a second call (nothing
+ * orphaned) returns an empty list and schedules nothing.
+ */
+export const failOrphanedProvisions = mutation({
+  args: { provisionerHostId: v.string(), secret: v.string() },
+  handler: async (ctx, args): Promise<{ failed: string[] }> => {
+    if (!secretOk(args.secret)) {
+      return { failed: [] };
+    }
+    const hosts = await ctx.db.query("hosts").collect();
+    const orphaned = hosts.filter(
+      (host) =>
+        host.status === "provisioning" &&
+        host.provisionedBy === args.provisionerHostId,
+    );
+    for (const host of orphaned) {
+      await ctx.db.delete(host._id);
+      await recordHostEventRow(ctx, {
+        hostId: host.hostId,
+        type: "provision_failed",
+        summary:
+          `Provisioner ${args.provisionerHostId} restarted mid-bootstrap; ` +
+          "freeing the scale-up lock (the detached bootstrap did not survive the restart).",
+      });
+    }
+    if (orphaned.length > 0) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.hosts.placeQueuedEphemeralTasks,
+        {},
+      );
+    }
+    return { failed: orphaned.map((host) => host.hostId) };
+  },
+});
+
 async function enqueueHostCommand(
   ctx: MutationCtx,
   args: {
