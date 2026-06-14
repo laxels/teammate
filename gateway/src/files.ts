@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DeliverableFile } from "../../shared/protocol";
 import type { FetchLike } from "./events";
@@ -35,6 +35,25 @@ function sanitizeName(name: string): string {
   return cleaned === "" ? "file" : cleaned;
 }
 
+/** The per-task inbox directory. Each task's files live under their own dir so
+ * cleanup of one task never touches another's (no shared-base race). */
+export function taskInboxDir(baseDir: string, taskId: string): string {
+  return join(baseDir, sanitizeName(taskId));
+}
+
+/** Best-effort removal of a single task's inbox dir (on task teardown / a
+ * rejected start). Targets only that task's dir, so it can't race a concurrent
+ * or subsequent task's downloads. */
+export async function removeTaskInbox(
+  baseDir: string,
+  taskId: string,
+): Promise<void> {
+  await rm(taskInboxDir(baseDir, taskId), {
+    recursive: true,
+    force: true,
+  }).catch(() => undefined);
+}
+
 export type DownloadDeps = {
   /** Orchestrator HTTP origin (CONVEX_SITE_URL) hosting /devbox/file. */
   convexSiteUrl: string;
@@ -61,7 +80,7 @@ export async function downloadInboundFiles(
   deps: DownloadDeps,
 ): Promise<DownloadedFile[]> {
   const fetchFn = deps.fetchFn ?? fetch;
-  const dir = join(baseDir, sanitizeName(taskId));
+  const dir = taskInboxDir(baseDir, taskId);
   await mkdir(dir, { recursive: true });
   return await Promise.all(
     files.map(async (file, index) => {

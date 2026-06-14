@@ -1,4 +1,3 @@
-import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Server } from "bun";
@@ -19,7 +18,11 @@ import {
   createTranscriptSender,
   type FetchLike,
 } from "./events";
-import { buildInboundFilePromptSuffix, downloadInboundFiles } from "./files";
+import {
+  buildInboundFilePromptSuffix,
+  downloadInboundFiles,
+  removeTaskInbox,
+} from "./files";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
 import { createShareMcpServer } from "./share";
 import { serveStatic } from "./static";
@@ -146,13 +149,13 @@ export function createGatewayServer(
   const fetchFn = options.fetchFn ?? fetch;
 
   // Where inbound Slack files are downloaded before a session starts/steers.
+  // Each task gets its OWN subdir (files.taskInboxDir), so cleaning up one task
+  // never races another's downloads. Inbound Slack files are private, so the
+  // accepted task's dir is removed when that task ends — they never survive
+  // into an unrelated later task on the stateful permanent devbox.
   const inboxDir = options.inboxDir ?? join(homedir(), "ultraclaude-inbox");
-  // Inbound Slack files are private; wipe them between tasks (on task start and
-  // task end) so they never survive into an unrelated later task on the
-  // stateful permanent devbox, nor outlive the Convex-side retention. Steers
-  // (POST /message) do NOT clear — they belong to the running task. Best-effort.
-  const clearInbox = () =>
-    rm(inboxDir, { recursive: true, force: true }).catch(() => undefined);
+  /** The accepted task whose inbox dir to remove on teardown. */
+  let activeInboxTaskId: string | null = null;
   const augmentPromptWithFiles = async (
     taskId: string,
     basePrompt: string,
@@ -194,8 +197,11 @@ export function createGatewayServer(
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
     onStatusChange: (status: SessionStatus) => {
-      // Task finished/stopped: drop its downloaded inbound files.
-      if (!status.running) void clearInbox();
+      // Task finished/stopped: drop its (and only its) downloaded inbound files.
+      if (!status.running && activeInboxTaskId !== null) {
+        void removeTaskInbox(inboxDir, activeInboxTaskId);
+        activeInboxTaskId = null;
+      }
       server.publish(
         STEER_TOPIC,
         send({
@@ -276,17 +282,10 @@ export function createGatewayServer(
             { status: 400 },
           );
         }
-        // Clear any prior task's inbound files (belt-and-suspenders vs. the
-        // task-end wipe, e.g. after a crash/restart), then download this task's
-        // shared files into its cwd and point the prompt at them before the
-        // session starts. Blocks the 202 by seconds; bounded by the timeout.
-        await clearInbox();
-        const prompt = await augmentPromptWithFiles(
-          startRequest.taskId,
-          startRequest.prompt,
-          startRequest.files,
-        );
-        if (!session.start({ ...startRequest, prompt })) {
+        // Reject a concurrent/duplicate task BEFORE any download or cleanup, so
+        // a rejected task never disturbs the running task's inbox. (A 409 here
+        // is the same signal index.ts's evict-and-retry path already handles.)
+        if (session.status().running) {
           return Response.json(
             {
               error: "a task is already running",
@@ -295,6 +294,27 @@ export function createGatewayServer(
             { status: 409 },
           );
         }
+        // Download this task's shared files into its OWN inbox subdir and point
+        // the prompt at them before the session starts. Blocks the 202 by
+        // seconds; bounded by the download timeout.
+        const prompt = await augmentPromptWithFiles(
+          startRequest.taskId,
+          startRequest.prompt,
+          startRequest.files,
+        );
+        if (!session.start({ ...startRequest, prompt })) {
+          // Lost a race during the download (now running): drop only THIS
+          // task's just-downloaded files; the active task's dir is untouched.
+          await removeTaskInbox(inboxDir, startRequest.taskId);
+          return Response.json(
+            {
+              error: "a task is already running",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
+        activeInboxTaskId = startRequest.taskId;
         return Response.json({ accepted: true }, { status: 202 });
       }
 

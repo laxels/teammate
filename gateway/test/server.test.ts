@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -142,6 +142,54 @@ describe("HTTP API", () => {
     expect(events[0]?.taskId).toBe("task-1");
     expect(typeof events[0]?.ts).toBe("number");
     expect(eventHeaders[0]?.["x-devbox-secret"]).toBe("shhh");
+  });
+
+  test("a concurrent /task with files is rejected before any download and leaves the running task's inbox intact", async () => {
+    const inbox = await mkdtemp(join(tmpdir(), "inbox-"));
+    try {
+      const fileGets: string[] = [];
+      const fetchFn: FetchLike = async (urlArg) => {
+        if (String(urlArg).includes("/devbox/file")) {
+          fileGets.push(String(urlArg));
+          return new Response("AAA");
+        }
+        return new Response("ok"); // lifecycle event POSTs
+      };
+      const { base } = makeHarness({ inboxDir: inbox, fetchFn });
+
+      const fileA = {
+        name: "a.png",
+        mimeType: "image/png",
+        size: 3,
+        storageId: "SA",
+      };
+      const accepted = await fetch(`${base}/task`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({ taskId: "task-A", prompt: "A", files: [fileA] }),
+      });
+      expect(accepted.status).toBe(202);
+      const aPath = join(inbox, "task-A", "1-a.png");
+      expect(await readFile(aPath, "utf8")).toBe("AAA");
+      const getsAfterA = fileGets.length;
+
+      // A is now running (finished-but-steerable); a second /task carrying its
+      // own files must be rejected WITHOUT downloading anything or touching A.
+      const conflict = await fetch(`${base}/task`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({
+          taskId: "task-B",
+          prompt: "B",
+          files: [{ ...fileA, storageId: "SB" }],
+        }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(fileGets.length).toBe(getsAfterA); // B never downloaded
+      expect(await readFile(aPath, "utf8")).toBe("AAA"); // A untouched
+    } finally {
+      await rm(inbox, { recursive: true, force: true });
+    }
   });
 
   test("POST /task validates the body", async () => {
