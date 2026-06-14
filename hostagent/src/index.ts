@@ -5,12 +5,14 @@ import type {
 } from "../../shared/protocol";
 import { loadConfig } from "./config";
 import {
+  failOrphanedProvisionsRef,
   provisionVmFailedRef,
   recordHostEventRef,
   removeDevboxRef,
   startHostConsumer,
 } from "./consumer";
 import { createHostProvisioner } from "./hostProvision";
+import { reconcileOrphanedProvisions } from "./reconcile";
 import { createVmExecutors } from "./vm";
 
 const config = loadConfig();
@@ -43,6 +45,21 @@ const provisioner = createHostProvisioner({
       secret: config.devboxSharedSecret,
     });
   },
+});
+
+// Boot-time reconciliation BEFORE consuming commands: a host bootstrap runs
+// detached and is tracked only in memory (hostProvision.ts), so a restart
+// mid-bootstrap orphans its "provisioning" row, which would hold the fleet
+// scale-up lock for up to 90 min. Free any this host left dangling (frees the
+// lock in seconds) while no live bootstrap exists yet in this fresh process.
+await reconcileOrphanedProvisions({
+  failOrphanedProvisions: (args) =>
+    client.mutation(failOrphanedProvisionsRef, args),
+  hostId: config.hostId,
+  secret: config.devboxSharedSecret,
+  canProvisionHosts: config.canProvisionHosts,
+  log: (message) => console.log(`[hostagent] ${message}`),
+  logError: (message, error) => console.error(`[hostagent] ${message}:`, error),
 });
 
 startHostConsumer({
