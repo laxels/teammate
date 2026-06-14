@@ -5,6 +5,7 @@ import type {
 } from "../../shared/protocol";
 import { loadConfig } from "./config";
 import {
+  provisionVmFailedRef,
   recordHostEventRef,
   removeDevboxRef,
   startHostConsumer,
@@ -20,6 +21,13 @@ const executors = createVmExecutors({
   removeDevbox: async (devboxId) => {
     await client.mutation(removeDevboxRef, {
       devboxId,
+      secret: config.devboxSharedSecret,
+    });
+  },
+  reportProvisionFailure: async (devboxId, summary) => {
+    await client.mutation(provisionVmFailedRef, {
+      devboxId,
+      summary,
       secret: config.devboxSharedSecret,
     });
   },
