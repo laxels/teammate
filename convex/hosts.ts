@@ -346,7 +346,7 @@ async function recordHostEventRow(
  * record the event), freeing the lock in seconds instead of after 90 min, and
  * re-drain the queue so a fresh bootstrap starts at once rather than waiting for
  * an external event. Mirrors the gateway's boot-time orphan reconciliation
- * (tasks.runningForDevbox).
+ * (tasks.orphansForDevbox).
  *
  * Safe even in the rare case the detached bootstrap survived the restart as an
  * orphaned process: the new host still self-registers an "active" row on its own

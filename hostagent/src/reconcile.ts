@@ -7,7 +7,7 @@
 // until HOST_PROVISION_STALE_MS (90 min) — blocking every queued task. On
 // startup the just-restarted agent owns no live bootstrap, so it explicitly
 // fails any "provisioning" row it created, freeing the lock in seconds. Mirrors
-// the gateway's boot-time orphan reconciliation (tasks.runningForDevbox).
+// the gateway's boot-time orphan reconciliation (tasks.orphansForDevbox).
 
 export type ReconcileOptions = {
   /** Wraps the hosts:failOrphanedProvisions mutation (injected for testing). */
