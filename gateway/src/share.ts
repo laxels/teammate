@@ -107,12 +107,15 @@ export function createShareFileTool(args: {
         comment: input.comment,
         ...(args.fetchFn ? { fetchFn: args.fetchFn } : {}),
       });
+      // A 2xx only means the orchestrator accepted + queued the upload; the
+      // actual post into Slack happens asynchronously and is best-effort, so
+      // report it as queued rather than confirmed-delivered.
       return result.ok
         ? {
             content: [
               {
                 type: "text",
-                text: `Shared ${result.filename} into the Slack thread.`,
+                text: `Queued ${result.filename} for posting to the Slack thread (delivery is best-effort).`,
               },
             ],
           }

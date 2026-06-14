@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Server } from "bun";
@@ -52,6 +53,9 @@ export type GatewayServerOptions = {
   vncPort?: number;
   webDistDir?: string;
   progressIntervalMs?: number;
+  /** Where inbound Slack files are staged; tests point this at a temp dir so
+   * the cross-task wipe never touches the real ~/ultraclaude-inbox. */
+  inboxDir?: string;
 };
 
 const DEFAULT_WEB_DIST = resolve(import.meta.dir, "../../web/dist");
@@ -142,7 +146,13 @@ export function createGatewayServer(
   const fetchFn = options.fetchFn ?? fetch;
 
   // Where inbound Slack files are downloaded before a session starts/steers.
-  const inboxDir = join(homedir(), "ultraclaude-inbox");
+  const inboxDir = options.inboxDir ?? join(homedir(), "ultraclaude-inbox");
+  // Inbound Slack files are private; wipe them between tasks (on task start and
+  // task end) so they never survive into an unrelated later task on the
+  // stateful permanent devbox, nor outlive the Convex-side retention. Steers
+  // (POST /message) do NOT clear — they belong to the running task. Best-effort.
+  const clearInbox = () =>
+    rm(inboxDir, { recursive: true, force: true }).catch(() => undefined);
   const augmentPromptWithFiles = async (
     taskId: string,
     basePrompt: string,
@@ -183,7 +193,9 @@ export function createGatewayServer(
     }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
-    onStatusChange: (status: SessionStatus) =>
+    onStatusChange: (status: SessionStatus) => {
+      // Task finished/stopped: drop its downloaded inbound files.
+      if (!status.running) void clearInbox();
       server.publish(
         STEER_TOPIC,
         send({
@@ -191,7 +203,8 @@ export function createGatewayServer(
           running: status.running,
           taskId: status.taskId,
         }),
-      ),
+      );
+    },
     ...(options.queryFn ? { queryFn: options.queryFn } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.progressIntervalMs !== undefined
@@ -263,9 +276,11 @@ export function createGatewayServer(
             { status: 400 },
           );
         }
-        // Download shared files into the task's cwd and point the prompt at
-        // them before the session starts (the model sees local paths it can
-        // open). Blocks the 202 by seconds; bounded by the download timeout.
+        // Clear any prior task's inbound files (belt-and-suspenders vs. the
+        // task-end wipe, e.g. after a crash/restart), then download this task's
+        // shared files into its cwd and point the prompt at them before the
+        // session starts. Blocks the 202 by seconds; bounded by the timeout.
+        await clearInbox();
         const prompt = await augmentPromptWithFiles(
           startRequest.taskId,
           startRequest.prompt,

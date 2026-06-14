@@ -56,6 +56,8 @@ function makeHarness(
     fetchFn: fetchStub,
     port: 0,
     webDistDir: join(tmpdir(), "gateway-test-no-such-dist"),
+    // Keep the cross-task inbox wipe off the real ~/ultraclaude-inbox.
+    inboxDir: join(tmpdir(), "gateway-test-inbox"),
     ...overrides,
   });
   servers.push(server);
