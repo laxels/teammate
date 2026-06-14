@@ -156,6 +156,10 @@ export function createGatewayServer(
   const inboxDir = options.inboxDir ?? join(homedir(), "ultraclaude-inbox");
   /** The accepted task whose inbox dir to remove on teardown. */
   let activeInboxTaskId: string | null = null;
+  /** Monotonic per-download batch id: each /task or /message download gets its
+   * own subdir so repeated steers with the same filename don't clobber a path
+   * an earlier turn was already told to use. */
+  let inboxBatchSeq = 0;
   const augmentPromptWithFiles = async (
     taskId: string,
     basePrompt: string,
@@ -167,6 +171,7 @@ export function createGatewayServer(
     const downloaded = await downloadInboundFiles(files, taskId, inboxDir, {
       convexSiteUrl: config.convexSiteUrl,
       secret: config.devboxSharedSecret,
+      subdir: String(++inboxBatchSeq),
       fetchFn,
     });
     return basePrompt + buildInboundFilePromptSuffix(downloaded);

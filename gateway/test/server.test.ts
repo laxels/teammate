@@ -169,7 +169,8 @@ describe("HTTP API", () => {
         body: JSON.stringify({ taskId: "task-A", prompt: "A", files: [fileA] }),
       });
       expect(accepted.status).toBe(202);
-      const aPath = join(inbox, "task-A", "1-a.png");
+      // First download of the server's life → batch subdir "1".
+      const aPath = join(inbox, "task-A", "1", "1-a.png");
       expect(await readFile(aPath, "utf8")).toBe("AAA");
       const getsAfterA = fileGets.length;
 

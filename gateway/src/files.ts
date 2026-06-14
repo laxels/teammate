@@ -60,18 +60,24 @@ export type DownloadDeps = {
   /** Shared secret sent as x-devbox-secret (the file is auth-gated, not a
    * public capability URL). */
   secret: string;
+  /** A unique-per-download segment (e.g. a monotonic counter). Each /task or
+   * /message download gets its own subdir under the task dir, so a later steer
+   * carrying the same filename can't overwrite a path an earlier turn was
+   * already told to use. */
+  subdir: string;
   fetchFn?: FetchLike;
 };
 
 /**
- * Downloads each staged file into <baseDir>/<taskId>/ via the orchestrator's
- * authenticated GET /devbox/file?storageId=... endpoint — the bytes are gated
- * by the shared secret, never a public storage URL, and the bot token never
- * reaches the devbox. Best-effort per file: one failure (including a 404 for a
- * blob pruned while the task sat queued) doesn't sink the others, and the
- * session is told which paths exist (and which failed) via
- * buildInboundFilePromptSuffix. Names are index-prefixed so two attachments
- * with the same name don't collide.
+ * Downloads each staged file into <baseDir>/<taskId>/<subdir>/ via the
+ * orchestrator's authenticated GET /devbox/file?storageId=... endpoint — the
+ * bytes are gated by the shared secret, never a public storage URL, and the
+ * bot token never reaches the devbox. Best-effort per file: one failure
+ * (including a 404 for a blob pruned while the task sat queued) doesn't sink
+ * the others, and the session is told which paths exist (and which failed) via
+ * buildInboundFilePromptSuffix. Names are index-prefixed within a batch, and
+ * each batch has its own subdir, so paths are stable for the whole task even
+ * across repeated steers with the same filename.
  */
 export async function downloadInboundFiles(
   files: DeliverableFile[],
@@ -80,7 +86,7 @@ export async function downloadInboundFiles(
   deps: DownloadDeps,
 ): Promise<DownloadedFile[]> {
   const fetchFn = deps.fetchFn ?? fetch;
-  const dir = taskInboxDir(baseDir, taskId);
+  const dir = join(taskInboxDir(baseDir, taskId), sanitizeName(deps.subdir));
   await mkdir(dir, { recursive: true });
   return await Promise.all(
     files.map(async (file, index) => {

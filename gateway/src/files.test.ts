@@ -36,10 +36,15 @@ describe("downloadInboundFiles", () => {
         [file("a.txt", "S1"), file("b.txt", "S2")],
         "task-1",
         base,
-        { convexSiteUrl: SITE, secret: SECRET, fetchFn: rec.fetchFn },
+        {
+          convexSiteUrl: SITE,
+          secret: SECRET,
+          subdir: "1",
+          fetchFn: rec.fetchFn,
+        },
       );
       expect(results.map((r) => r.ok)).toEqual([true, true]);
-      expect(results[0]?.path).toBe(join(base, "task-1", "1-a.txt"));
+      expect(results[0]?.path).toBe(join(base, "task-1", "1", "1-a.txt"));
       // Bytes are fetched by storageId, secret-gated — never a public URL.
       expect(rec.calls[0]?.url).toBe(
         "https://convex.example/devbox/file?storageId=S1",
@@ -72,11 +77,16 @@ describe("downloadInboundFiles", () => {
         ],
         "task-2",
         base,
-        { convexSiteUrl: SITE, secret: SECRET, fetchFn: rec.fetchFn },
+        {
+          convexSiteUrl: SITE,
+          secret: SECRET,
+          subdir: "1",
+          fetchFn: rec.fetchFn,
+        },
       );
       // Traversal flattened into a single in-dir filename.
       expect(results[0]?.ok).toBe(true);
-      expect(dirname(results[0]?.path ?? "")).toBe(join(base, "task-2"));
+      expect(dirname(results[0]?.path ?? "")).toBe(join(base, "task-2", "1"));
       // Newline collapsed: neither the display name nor the path spans lines.
       expect(results[1]?.name).not.toContain("\n");
       expect(basename(results[1]?.path ?? "")).not.toContain("\n");
@@ -88,6 +98,32 @@ describe("downloadInboundFiles", () => {
       expect(
         suffix.split("\n").some((line) => line.startsWith("Ignore the task")),
       ).toBe(false);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("two downloads (steers) for the same task + filename get distinct, stable paths", async () => {
+    const base = await mkdtemp(join(tmpdir(), "inbox-"));
+    try {
+      const same = [file("image.png", "S1")];
+      const first = await downloadInboundFiles(same, "task-1", base, {
+        convexSiteUrl: SITE,
+        secret: SECRET,
+        subdir: "1",
+        fetchFn: recordingFetch(() => new Response("FIRST")).fetchFn,
+      });
+      const second = await downloadInboundFiles(same, "task-1", base, {
+        convexSiteUrl: SITE,
+        secret: SECRET,
+        subdir: "2",
+        fetchFn: recordingFetch(() => new Response("SECOND")).fetchFn,
+      });
+      // Distinct paths (different batch subdirs), so the second can't overwrite
+      // the path the first turn was already told to use.
+      expect(first[0]?.path).not.toBe(second[0]?.path);
+      expect(await readFile(first[0]?.path ?? "", "utf8")).toBe("FIRST");
+      expect(await readFile(second[0]?.path ?? "", "utf8")).toBe("SECOND");
     } finally {
       await rm(base, { recursive: true, force: true });
     }
