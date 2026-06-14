@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -188,6 +188,52 @@ describe("HTTP API", () => {
       expect(conflict.status).toBe(409);
       expect(fileGets.length).toBe(getsAfterA); // B never downloaded
       expect(await readFile(aPath, "utf8")).toBe("AAA"); // A untouched
+    } finally {
+      await rm(inbox, { recursive: true, force: true });
+    }
+  });
+
+  test("a duplicate concurrent /task (same taskId, with files) never deletes the accepted task's inbox", async () => {
+    const inbox = await mkdtemp(join(tmpdir(), "inbox-"));
+    try {
+      const fetchFn: FetchLike = async (urlArg) =>
+        String(urlArg).includes("/devbox/file")
+          ? new Response("DATA")
+          : new Response("ok");
+      const { base } = makeHarness({ inboxDir: inbox, fetchFn });
+      const opts = {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({
+          taskId: "task-X",
+          prompt: "X",
+          files: [
+            { name: "x.png", mimeType: "image/png", size: 4, storageId: "SX" },
+          ],
+        }),
+      };
+      // Fire both same-taskId starts concurrently; one wins, one is rejected.
+      const [r1, r2] = await Promise.all([
+        fetch(`${base}/task`, opts),
+        fetch(`${base}/task`, opts),
+      ]);
+      expect([r1.status, r2.status].sort()).toEqual([202, 409]);
+
+      // The accepted task's file must survive: the rejected request cleaned
+      // only its own batch, not the shared task dir.
+      const taskDir = join(inbox, "task-X");
+      const batches = await readdir(taskDir).catch(() => [] as string[]);
+      let survived = false;
+      for (const b of batches) {
+        if (
+          await readFile(join(taskDir, b, "1-x.png"), "utf8")
+            .then(() => true)
+            .catch(() => false)
+        ) {
+          survived = true;
+        }
+      }
+      expect(survived).toBe(true);
     } finally {
       await rm(inbox, { recursive: true, force: true });
     }

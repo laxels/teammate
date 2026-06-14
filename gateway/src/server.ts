@@ -21,6 +21,7 @@ import {
 import {
   buildInboundFilePromptSuffix,
   downloadInboundFiles,
+  removeBatchInbox,
   removeTaskInbox,
 } from "./files";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
@@ -164,17 +165,23 @@ export function createGatewayServer(
     taskId: string,
     basePrompt: string,
     files: DeliverableFile[] | undefined,
-  ): Promise<string> => {
+  ): Promise<{ prompt: string; cleanupBatch: () => Promise<void> }> => {
     if (files === undefined || files.length === 0) {
-      return basePrompt;
+      return { prompt: basePrompt, cleanupBatch: async () => undefined };
     }
+    const batch = String(++inboxBatchSeq);
     const downloaded = await downloadInboundFiles(files, taskId, inboxDir, {
       convexSiteUrl: config.convexSiteUrl,
       secret: config.devboxSharedSecret,
-      subdir: String(++inboxBatchSeq),
+      subdir: batch,
       fetchFn,
     });
-    return basePrompt + buildInboundFilePromptSuffix(downloaded);
+    return {
+      prompt: basePrompt + buildInboundFilePromptSuffix(downloaded),
+      // Remove ONLY this batch (not the task dir): a rejected duplicate-start
+      // for the same taskId must never delete the accepted task's files.
+      cleanupBatch: () => removeBatchInbox(inboxDir, taskId, batch),
+    };
   };
 
   const emitEvent = createEventSender(config, fetchFn, options.now ?? Date.now);
@@ -299,18 +306,19 @@ export function createGatewayServer(
             { status: 409 },
           );
         }
-        // Download this task's shared files into its OWN inbox subdir and point
+        // Download this task's shared files into its OWN batch subdir and point
         // the prompt at them before the session starts. Blocks the 202 by
         // seconds; bounded by the download timeout.
-        const prompt = await augmentPromptWithFiles(
+        const { prompt, cleanupBatch } = await augmentPromptWithFiles(
           startRequest.taskId,
           startRequest.prompt,
           startRequest.files,
         );
         if (!session.start({ ...startRequest, prompt })) {
           // Lost a race during the download (now running): drop only THIS
-          // task's just-downloaded files; the active task's dir is untouched.
-          await removeTaskInbox(inboxDir, startRequest.taskId);
+          // request's batch. A same-taskId duplicate that won the race keeps
+          // its own batch; a different task is in its own dir entirely.
+          await cleanupBatch();
           return Response.json(
             {
               error: "a task is already running",
@@ -355,12 +363,14 @@ export function createGatewayServer(
             { status: 409 },
           );
         }
-        const text = await augmentPromptWithFiles(
+        const { prompt: text, cleanupBatch } = await augmentPromptWithFiles(
           payload.taskId,
           payload.text,
           payload.files,
         );
         if (!session.pushUserMessage(text)) {
+          // The session ended during the download: drop this steer's batch.
+          await cleanupBatch();
           return Response.json(
             {
               error: "no live session for that task",

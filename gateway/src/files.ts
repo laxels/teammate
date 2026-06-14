@@ -41,14 +41,27 @@ export function taskInboxDir(baseDir: string, taskId: string): string {
   return join(baseDir, sanitizeName(taskId));
 }
 
-/** Best-effort removal of a single task's inbox dir (on task teardown / a
- * rejected start). Targets only that task's dir, so it can't race a concurrent
- * or subsequent task's downloads. */
+/** Best-effort removal of a whole task's inbox dir (all batches), on task
+ * teardown. Targets only that task's dir, so it can't race another task. */
 export async function removeTaskInbox(
   baseDir: string,
   taskId: string,
 ): Promise<void> {
   await rm(taskInboxDir(baseDir, taskId), {
+    recursive: true,
+    force: true,
+  }).catch(() => undefined);
+}
+
+/** Best-effort removal of a SINGLE download batch's dir. Used when a download
+ * is rejected (a duplicate-start race): cleaning only this batch can't delete
+ * the accepted same-taskId task's own batch under the shared task dir. */
+export async function removeBatchInbox(
+  baseDir: string,
+  taskId: string,
+  subdir: string,
+): Promise<void> {
+  await rm(join(taskInboxDir(baseDir, taskId), sanitizeName(subdir)), {
     recursive: true,
     force: true,
   }).catch(() => undefined);
