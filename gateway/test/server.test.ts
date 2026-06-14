@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -56,6 +56,8 @@ function makeHarness(
     fetchFn: fetchStub,
     port: 0,
     webDistDir: join(tmpdir(), "gateway-test-no-such-dist"),
+    // Keep the cross-task inbox wipe off the real ~/ultraclaude-inbox.
+    inboxDir: join(tmpdir(), "gateway-test-inbox"),
     ...overrides,
   });
   servers.push(server);
@@ -140,6 +142,101 @@ describe("HTTP API", () => {
     expect(events[0]?.taskId).toBe("task-1");
     expect(typeof events[0]?.ts).toBe("number");
     expect(eventHeaders[0]?.["x-devbox-secret"]).toBe("shhh");
+  });
+
+  test("a concurrent /task with files is rejected before any download and leaves the running task's inbox intact", async () => {
+    const inbox = await mkdtemp(join(tmpdir(), "inbox-"));
+    try {
+      const fileGets: string[] = [];
+      const fetchFn: FetchLike = async (urlArg) => {
+        if (String(urlArg).includes("/devbox/file")) {
+          fileGets.push(String(urlArg));
+          return new Response("AAA");
+        }
+        return new Response("ok"); // lifecycle event POSTs
+      };
+      const { base } = makeHarness({ inboxDir: inbox, fetchFn });
+
+      const fileA = {
+        name: "a.png",
+        mimeType: "image/png",
+        size: 3,
+        storageId: "SA",
+      };
+      const accepted = await fetch(`${base}/task`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({ taskId: "task-A", prompt: "A", files: [fileA] }),
+      });
+      expect(accepted.status).toBe(202);
+      // First download of the server's life → batch subdir "1".
+      const aPath = join(inbox, "task-A", "1", "1-a.png");
+      expect(await readFile(aPath, "utf8")).toBe("AAA");
+      const getsAfterA = fileGets.length;
+
+      // A is now running (finished-but-steerable); a second /task carrying its
+      // own files must be rejected WITHOUT downloading anything or touching A.
+      const conflict = await fetch(`${base}/task`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({
+          taskId: "task-B",
+          prompt: "B",
+          files: [{ ...fileA, storageId: "SB" }],
+        }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(fileGets.length).toBe(getsAfterA); // B never downloaded
+      expect(await readFile(aPath, "utf8")).toBe("AAA"); // A untouched
+    } finally {
+      await rm(inbox, { recursive: true, force: true });
+    }
+  });
+
+  test("a duplicate concurrent /task (same taskId, with files) never deletes the accepted task's inbox", async () => {
+    const inbox = await mkdtemp(join(tmpdir(), "inbox-"));
+    try {
+      const fetchFn: FetchLike = async (urlArg) =>
+        String(urlArg).includes("/devbox/file")
+          ? new Response("DATA")
+          : new Response("ok");
+      const { base } = makeHarness({ inboxDir: inbox, fetchFn });
+      const opts = {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({
+          taskId: "task-X",
+          prompt: "X",
+          files: [
+            { name: "x.png", mimeType: "image/png", size: 4, storageId: "SX" },
+          ],
+        }),
+      };
+      // Fire both same-taskId starts concurrently; one wins, one is rejected.
+      const [r1, r2] = await Promise.all([
+        fetch(`${base}/task`, opts),
+        fetch(`${base}/task`, opts),
+      ]);
+      expect([r1.status, r2.status].sort()).toEqual([202, 409]);
+
+      // The accepted task's file must survive: the rejected request cleaned
+      // only its own batch, not the shared task dir.
+      const taskDir = join(inbox, "task-X");
+      const batches = await readdir(taskDir).catch(() => [] as string[]);
+      let survived = false;
+      for (const b of batches) {
+        if (
+          await readFile(join(taskDir, b, "1-x.png"), "utf8")
+            .then(() => true)
+            .catch(() => false)
+        ) {
+          survived = true;
+        }
+      }
+      expect(survived).toBe(true);
+    } finally {
+      await rm(inbox, { recursive: true, force: true });
+    }
   });
 
   test("POST /task validates the body", async () => {

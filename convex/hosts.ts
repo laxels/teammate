@@ -25,6 +25,7 @@ import {
 } from "./_generated/server";
 import { deleteCommandsForDevbox, enqueueCommandRow } from "./commands";
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
+import { resolveDeliverableFiles, type StoredFile } from "./files";
 
 export const hostCommandKindValidator = v.union(
   v.literal("provision_vm"),
@@ -403,16 +404,26 @@ export const allocateEphemeral = internalMutation({
  */
 async function dispatchTaskToSlot(
   ctx: MutationCtx,
-  task: { _id: Id<"tasks">; taskId: string; prompt: string },
+  task: {
+    _id: Id<"tasks">;
+    taskId: string;
+    prompt: string;
+    files?: StoredFile[];
+  },
   slot: { devboxId: string; hostId: string },
 ): Promise<void> {
   await ctx.db.patch(task._id, {
     devboxId: slot.devboxId,
     updatedAt: Date.now(),
   });
+  // Shared Slack attachments staged in storage: the freshly booted gateway
+  // fetches each by storageId from the secret-gated /devbox/file endpoint (the
+  // bot token never reaches the devbox).
+  const files = resolveDeliverableFiles(task.files);
   const request: StartTaskRequest = {
     taskId: task.taskId,
     prompt: task.prompt,
+    ...(files.length > 0 ? { files } : {}),
   };
   await enqueueCommandRow(ctx, {
     devboxId: slot.devboxId,

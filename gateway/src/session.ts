@@ -40,8 +40,9 @@ export type SessionManagerDeps = {
   /** Called for every SDK message (broadcast to steer clients). */
   onMessage?: (message: SDKMessage) => void;
   onStatusChange?: (status: SessionStatus) => void;
-  /** Built fresh per task so in-process MCP servers carry no session state. */
-  createMcpServers?: () => Record<string, McpServerConfig>;
+  /** Built fresh per task so in-process MCP servers carry no session state.
+   * Receives the task id so tools (e.g. share_file) can attribute their work. */
+  createMcpServers?: (taskId: string) => Record<string, McpServerConfig>;
   queryFn?: QueryFn;
   now?: () => number;
   progressIntervalMs?: number;
@@ -137,7 +138,9 @@ export class SessionManager {
   #deps: Required<Pick<SessionManagerDeps, "emitEvent" | "now">> &
     Pick<SessionManagerDeps, "onMessage" | "onStatusChange">;
   #queryFn: QueryFn;
-  #createMcpServers: (() => Record<string, McpServerConfig>) | null;
+  #createMcpServers:
+    | ((taskId: string) => Record<string, McpServerConfig>)
+    | null;
   #progressIntervalMs: number;
   #history: RingBuffer<SDKMessage>;
   #historyCapacity: number = HISTORY_CAPACITY;
@@ -248,10 +251,10 @@ export class SessionManager {
         const line = data.trimEnd();
         if (line.length > 0) console.error("[gateway] sdk-stderr:", line);
       },
-      // In-process MCP servers (desktop computer use) — every task gets GUI
-      // control; no per-task flag.
+      // In-process MCP servers (desktop computer use, file sharing) — every
+      // task gets GUI control and a Slack-file path; no per-task flag.
       ...(this.#createMcpServers !== null
-        ? { mcpServers: this.#createMcpServers() }
+        ? { mcpServers: this.#createMcpServers(request.taskId) }
         : {}),
     };
     // Auth: CLAUDE_CODE_OAUTH_TOKEN is inherited from process.env (we do not

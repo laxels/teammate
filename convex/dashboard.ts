@@ -387,6 +387,10 @@ export const retryTask = mutation({
       ...(source.slackPermalink === undefined
         ? {}
         : { slackPermalink: source.slackPermalink }),
+      // Carry the original shared attachments by storageId. Safe to re-use even
+      // if a blob was pruned since: the gateway's /devbox/file fetch 404s and
+      // it tells the session the file couldn't be downloaded (no silent drop).
+      ...(source.files === undefined ? {} : { files: source.files }),
     });
     const placement = await placeEphemeralTaskRow(ctx, retryTaskId);
     await ctx.scheduler.runAfter(0, internal.notify.taskNote, {

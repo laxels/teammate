@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { Server } from "bun";
 import type {
+  DeliverableFile,
   GatewayHealth,
   StartTaskRequest,
   SteerServerMessage,
@@ -16,7 +18,14 @@ import {
   createTranscriptSender,
   type FetchLike,
 } from "./events";
+import {
+  buildInboundFilePromptSuffix,
+  downloadInboundFiles,
+  removeBatchInbox,
+  removeTaskInbox,
+} from "./files";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
+import { createShareMcpServer } from "./share";
 import { serveStatic } from "./static";
 import { dispatchSteerMessage } from "./steer";
 import {
@@ -48,6 +57,9 @@ export type GatewayServerOptions = {
   vncPort?: number;
   webDistDir?: string;
   progressIntervalMs?: number;
+  /** Where inbound Slack files are staged; tests point this at a temp dir so
+   * the cross-task wipe never touches the real ~/ultraclaude-inbox. */
+  inboxDir?: string;
 };
 
 const DEFAULT_WEB_DIST = resolve(import.meta.dir, "../../web/dist");
@@ -63,6 +75,31 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/** Validates the optional `files` array (DeliverableFile[]) on a start/steer
+ * payload, dropping malformed entries. Returns undefined when absent/empty. */
+function parseDeliverableFiles(raw: unknown): DeliverableFile[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const files: DeliverableFile[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const f = item as Record<string, unknown>;
+    if (
+      typeof f.name === "string" &&
+      typeof f.mimeType === "string" &&
+      typeof f.size === "number" &&
+      typeof f.storageId === "string"
+    ) {
+      files.push({
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size,
+        storageId: f.storageId,
+      });
+    }
+  }
+  return files.length > 0 ? files : undefined;
+}
+
 function parseUserMessagePayload(body: unknown): UserMessagePayload | null {
   if (typeof body !== "object" || body === null) return null;
   const candidate = body as Record<string, unknown>;
@@ -72,7 +109,12 @@ function parseUserMessagePayload(body: unknown): UserMessagePayload | null {
   if (typeof candidate.text !== "string" || candidate.text.trim() === "") {
     return null;
   }
-  return { taskId: candidate.taskId, text: candidate.text };
+  const files = parseDeliverableFiles(candidate.files);
+  return {
+    taskId: candidate.taskId,
+    text: candidate.text,
+    ...(files === undefined ? {} : { files }),
+  };
 }
 
 function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
@@ -87,10 +129,12 @@ function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
   if (candidate.cwd !== undefined && typeof candidate.cwd !== "string") {
     return null;
   }
+  const files = parseDeliverableFiles(candidate.files);
   return {
     taskId: candidate.taskId,
     prompt: candidate.prompt,
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
+    ...(files === undefined ? {} : { files }),
   };
 }
 
@@ -103,22 +147,51 @@ export function createGatewayServer(
   const vncHost = options.vncHost ?? "127.0.0.1";
   const vncPort = options.vncPort ?? 5900;
   const webDistDir = options.webDistDir ?? DEFAULT_WEB_DIST;
+  const fetchFn = options.fetchFn ?? fetch;
 
-  const emitEvent = createEventSender(
-    config,
-    options.fetchFn ?? fetch,
-    options.now ?? Date.now,
-  );
+  // Where inbound Slack files are downloaded before a session starts/steers.
+  // Each task gets its OWN subdir (files.taskInboxDir), so cleaning up one task
+  // never races another's downloads. Inbound Slack files are private, so the
+  // accepted task's dir is removed when that task ends — they never survive
+  // into an unrelated later task on the stateful permanent devbox.
+  const inboxDir = options.inboxDir ?? join(homedir(), "ultraclaude-inbox");
+  /** The accepted task whose inbox dir to remove on teardown. */
+  let activeInboxTaskId: string | null = null;
+  /** Monotonic per-download batch id: each /task or /message download gets its
+   * own subdir so repeated steers with the same filename don't clobber a path
+   * an earlier turn was already told to use. */
+  let inboxBatchSeq = 0;
+  const augmentPromptWithFiles = async (
+    taskId: string,
+    basePrompt: string,
+    files: DeliverableFile[] | undefined,
+  ): Promise<{ prompt: string; cleanupBatch: () => Promise<void> }> => {
+    if (files === undefined || files.length === 0) {
+      return { prompt: basePrompt, cleanupBatch: async () => undefined };
+    }
+    const batch = String(++inboxBatchSeq);
+    const downloaded = await downloadInboundFiles(files, taskId, inboxDir, {
+      convexSiteUrl: config.convexSiteUrl,
+      secret: config.devboxSharedSecret,
+      subdir: batch,
+      fetchFn,
+    });
+    return {
+      prompt: basePrompt + buildInboundFilePromptSuffix(downloaded),
+      // Remove ONLY this batch (not the task dir): a rejected duplicate-start
+      // for the same taskId must never delete the accepted task's files.
+      cleanupBatch: () => removeBatchInbox(inboxDir, taskId, batch),
+    };
+  };
+
+  const emitEvent = createEventSender(config, fetchFn, options.now ?? Date.now);
 
   const send = (message: SteerServerMessage): string => JSON.stringify(message);
 
   // `server` is assigned below; the callbacks only run once it is listening.
   let server: Server<WsData>;
 
-  const uploadTranscript = createTranscriptSender(
-    config,
-    options.fetchFn ?? fetch,
-  );
+  const uploadTranscript = createTranscriptSender(config, fetchFn);
 
   // One browser for the gateway's lifetime, shared across tasks like the rest
   // of the desktop: Chrome launches lazily on first use and stays open, with
@@ -128,13 +201,19 @@ export function createGatewayServer(
   const session = new SessionManager({
     emitEvent,
     uploadTranscript,
-    createMcpServers: () => ({
+    createMcpServers: (taskId) => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
       browser: createBrowserMcpServer(browserSession),
+      "share-file": createShareMcpServer({ config, taskId, fetchFn }),
     }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
-    onStatusChange: (status: SessionStatus) =>
+    onStatusChange: (status: SessionStatus) => {
+      // Task finished/stopped: drop its (and only its) downloaded inbound files.
+      if (!status.running && activeInboxTaskId !== null) {
+        void removeTaskInbox(inboxDir, activeInboxTaskId);
+        activeInboxTaskId = null;
+      }
       server.publish(
         STEER_TOPIC,
         send({
@@ -142,7 +221,8 @@ export function createGatewayServer(
           running: status.running,
           taskId: status.taskId,
         }),
-      ),
+      );
+    },
     ...(options.queryFn ? { queryFn: options.queryFn } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.progressIntervalMs !== undefined
@@ -214,7 +294,10 @@ export function createGatewayServer(
             { status: 400 },
           );
         }
-        if (!session.start(startRequest)) {
+        // Reject a concurrent/duplicate task BEFORE any download or cleanup, so
+        // a rejected task never disturbs the running task's inbox. (A 409 here
+        // is the same signal index.ts's evict-and-retry path already handles.)
+        if (session.status().running) {
           return Response.json(
             {
               error: "a task is already running",
@@ -223,6 +306,28 @@ export function createGatewayServer(
             { status: 409 },
           );
         }
+        // Download this task's shared files into its OWN batch subdir and point
+        // the prompt at them before the session starts. Blocks the 202 by
+        // seconds; bounded by the download timeout.
+        const { prompt, cleanupBatch } = await augmentPromptWithFiles(
+          startRequest.taskId,
+          startRequest.prompt,
+          startRequest.files,
+        );
+        if (!session.start({ ...startRequest, prompt })) {
+          // Lost a race during the download (now running): drop only THIS
+          // request's batch. A same-taskId duplicate that won the race keeps
+          // its own batch; a different task is in its own dir entirely.
+          await cleanupBatch();
+          return Response.json(
+            {
+              error: "a task is already running",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
+        activeInboxTaskId = startRequest.taskId;
         return Response.json({ accepted: true }, { status: 202 });
       }
 
@@ -243,12 +348,29 @@ export function createGatewayServer(
         // The taskId match keeps a stale command (aimed at a previous
         // occupant of this devbox) out of the current session; the
         // terminalEmitted check drops steers that lost the race against task
-        // completion (a late message must not re-open a finished task).
+        // completion (a late message must not re-open a finished task). Both
+        // are checked BEFORE downloading any attachments, so a doomed steer
+        // wastes no bandwidth.
         if (
           session.status().taskId !== payload.taskId ||
-          session.terminalEmitted() ||
-          !session.pushUserMessage(payload.text)
+          session.terminalEmitted()
         ) {
+          return Response.json(
+            {
+              error: "no live session for that task",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
+        const { prompt: text, cleanupBatch } = await augmentPromptWithFiles(
+          payload.taskId,
+          payload.text,
+          payload.files,
+        );
+        if (!session.pushUserMessage(text)) {
+          // The session ended during the download: drop this steer's batch.
+          await cleanupBatch();
           return Response.json(
             {
               error: "no live session for that task",

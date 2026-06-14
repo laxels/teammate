@@ -21,6 +21,16 @@ type _TaskStatusMatchesProtocol = [
 const _taskStatusMatchesProtocol: _TaskStatusMatchesProtocol = true;
 void _taskStatusMatchesProtocol;
 
+/** A file the requester shared in Slack, staged in Convex storage for the
+ * task's devbox to fetch (see shared/protocol.ts DeliverableFile). The bytes
+ * live in storage; only the id + metadata ride on the task row. */
+export const taskFileValidator = v.object({
+  name: v.string(),
+  mimeType: v.string(),
+  size: v.number(),
+  storageId: v.id("_storage"),
+});
+
 export default defineSchema({
   // Raw inbound Slack events, deduplicated by Slack's event_id.
   // Slack retries deliveries that aren't acked within 3s, so ingestion
@@ -70,6 +80,11 @@ export default defineSchema({
     finishedAt: v.optional(v.number()),
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
+    // Files the requester shared in Slack, staged in Convex storage. The
+    // storageId rides the start command (hosts.dispatchTaskToSlot / orchestrator
+    // permanent path); the devbox fetches the bytes from the secret-gated
+    // /devbox/file endpoint, never a public storage URL.
+    files: v.optional(v.array(taskFileValidator)),
   })
     .index("by_task_id", ["taskId"])
     .index("by_status", ["status"])
@@ -181,6 +196,19 @@ export default defineSchema({
     json: v.string(),
     uploadedAt: v.number(),
   }).index("by_task_id", ["taskId"]),
+
+  // Bookkeeping for inbound Slack files staged in Convex storage: the daily
+  // cleanup cron deletes the storage blob + this row past INBOUND_FILE_RETENTION_MS
+  // (= QUEUE_RETENTION_MS, 7 days), so a task that waits through a host bootstrap
+  // keeps its attachments; past that a queued task is effectively abandoned and a
+  // missing blob 404s the gateway's /devbox/file fetch. Pruned by cleanup.pruneExpired.
+  inboundFiles: defineTable({
+    storageId: v.id("_storage"),
+    // The Slack event the file came from (debugging orphaned blobs); the task
+    // it lands on may not exist yet when the blob is staged.
+    eventId: v.string(),
+    createdAt: v.number(),
+  }),
 
   // Lifecycle events posted by devbox gateways to /devbox/events, plus
   // orchestrator-recorded events for tasks that never reached a devbox

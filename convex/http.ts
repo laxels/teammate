@@ -1,8 +1,12 @@
 import { httpRouter } from "convex/server";
-import { MAX_TRANSCRIPT_BYTES } from "../shared/protocol";
+import {
+  MAX_OUTBOUND_FILE_BYTES,
+  MAX_TRANSCRIPT_BYTES,
+} from "../shared/protocol";
 import { parseDevboxEvent } from "../src/orchestration";
 import { timingSafeEqual, verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 
 const http = httpRouter();
@@ -156,6 +160,94 @@ http.route({
       json: JSON.stringify(payload.messages),
     });
     return new Response(null, { status: 200 });
+  }),
+});
+
+// Gateway -> orchestrator artifact upload (see shared/protocol.ts): a devbox's
+// `share_file` tool POSTs a file here as multipart/form-data; we stage it in
+// Convex storage and hand off to artifacts.uploadToSlack, which posts it into
+// the task's thread and then deletes the blob.
+http.route({
+  path: "/devbox/artifact",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return new Response("expected multipart/form-data", { status: 400 });
+    }
+    const file = form.get("file");
+    const taskId = form.get("taskId");
+    const filename = form.get("filename");
+    if (
+      !(file instanceof Blob) ||
+      typeof taskId !== "string" ||
+      typeof filename !== "string"
+    ) {
+      return new Response("expected file, taskId, filename", { status: 400 });
+    }
+    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
+      return new Response("payload too large", { status: 413 });
+    }
+    const title = form.get("title");
+    const comment = form.get("comment");
+    const storageId = await ctx.storage.store(file);
+    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
+      taskId,
+      storageId,
+      filename,
+      ...(typeof title === "string" && title !== "" ? { title } : {}),
+      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
+    });
+    return new Response(null, { status: 202 });
+  }),
+});
+
+// Orchestrator -> gateway inbound-file serve (see shared/protocol.ts): the
+// gateway GETs a staged Slack attachment by storageId, authenticated with the
+// shared secret. Serving the bytes through this secret-gated endpoint (instead
+// of a public ctx.storage.getUrl link in the command payload) keeps private
+// Slack files from being fetchable by anyone who sees the payload or a log.
+http.route({
+  path: "/devbox/file",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const storageId = new URL(request.url).searchParams.get("storageId");
+    if (storageId === null || storageId === "") {
+      return new Response("missing storageId", { status: 400 });
+    }
+    // get() returns null for a missing/pruned blob; an invalid id throws —
+    // either way the gateway gets a non-2xx and reports the file as undownloadable.
+    let blob: Blob | null;
+    try {
+      blob = await ctx.storage.get(storageId as Id<"_storage">);
+    } catch {
+      blob = null;
+    }
+    if (blob === null) {
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(blob);
   }),
 });
 

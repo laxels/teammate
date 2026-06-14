@@ -8,12 +8,14 @@
  * @module
  */
 
+import type * as artifacts from "../artifacts.js";
 import type * as cleanup from "../cleanup.js";
 import type * as commands from "../commands.js";
 import type * as constants from "../constants.js";
 import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as devboxes from "../devboxes.js";
+import type * as files from "../files.js";
 import type * as hosts from "../hosts.js";
 import type * as http from "../http.js";
 import type * as notify from "../notify.js";
@@ -30,12 +32,14 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  artifacts: typeof artifacts;
   cleanup: typeof cleanup;
   commands: typeof commands;
   constants: typeof constants;
   crons: typeof crons;
   dashboard: typeof dashboard;
   devboxes: typeof devboxes;
+  files: typeof files;
   hosts: typeof hosts;
   http: typeof http;
   notify: typeof notify;

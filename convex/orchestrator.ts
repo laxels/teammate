@@ -5,22 +5,32 @@ import { v } from "convex/values";
 import {
   type InterruptPayload,
   isTerminalTaskStatus,
+  MAX_INBOUND_FILE_BYTES,
+  MAX_ORCHESTRATOR_IMAGE_BYTES,
+  MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES,
   type StartTaskRequest,
   type UserMessagePayload,
 } from "../shared/protocol";
 import {
+  type AttachmentInfo,
   buildOrchestratorUserMessage,
   classifySlackEvent,
   monitoringUrl,
   resolveThreadTarget,
+  type SlackFileRef,
   steerRejection,
   stopRejection,
   type ThreadTarget,
   taskActionAuthorization,
 } from "../src/orchestration";
-import { getSlackPermalink, postSlackMessage } from "../src/slackApi";
+import {
+  downloadSlackFile,
+  getSlackPermalink,
+  postSlackMessage,
+} from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { type ActionCtx, internalAction } from "./_generated/server";
+import { resolveDeliverableFiles, type StoredFile } from "./files";
 
 // Model policy (ARCHITECTURE.md): claude-opus-4-8 at xhigh everywhere, no
 // fallback model, no `fallbacks` parameter — flagged requests refuse rather
@@ -131,11 +141,118 @@ function toolError(message: string): string {
   return JSON.stringify({ error: message });
 }
 
+/** Result of downloading + staging a message's Slack attachments. */
+type StagedFiles = {
+  /** Storage ids + metadata persisted on the task row / handed to the devbox. */
+  stored: StoredFile[];
+  /** Images small enough for the orchestrator's own model to view inline. */
+  imageBlocks: Anthropic.ImageBlockParam[];
+  /** Per-file outcome the user message reports (status reflects reality, so
+   * the model is never told a file is ready/viewable when it isn't). */
+  attachments: AttachmentInfo[];
+};
+
+/**
+ * Downloads each shared file with the bot token, stores the bytes in Convex
+ * storage (the devbox later fetches them by storageId from the secret-gated
+ * /devbox/file endpoint — the bot token never leaves the orchestrator), and
+ * records a cleanup row. Images within the inline cap are also base64'd into
+ * image blocks so the orchestrator can see them itself. Failures are collected,
+ * not thrown: a bad attachment must not sink the turn.
+ */
+async function stageInboundFiles(
+  ctx: ActionCtx,
+  botToken: string,
+  eventId: string,
+  files: SlackFileRef[],
+): Promise<StagedFiles> {
+  const stored: StoredFile[] = [];
+  const imageBlocks: Anthropic.ImageBlockParam[] = [];
+  const attachments: AttachmentInfo[] = [];
+  // Running total of raw bytes already inlined as image blocks, so a burst of
+  // large screenshots can't push the request past Anthropic's 32 MB cap.
+  let inlineBytesUsed = 0;
+  for (const file of files) {
+    // Slack Connect files arrive with no fetchable URL (file_access:
+    // check_file_info); surface them as undownloadable rather than dropping.
+    if (file.urlPrivate === "" || file.size > MAX_INBOUND_FILE_BYTES) {
+      attachments.push({
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        available: false,
+        viewableInline: false,
+      });
+      continue;
+    }
+    const download = await downloadSlackFile({
+      botToken,
+      urlPrivate: file.urlPrivate,
+      maxBytes: MAX_INBOUND_FILE_BYTES,
+      expectedMimeType: file.mimeType,
+    });
+    if (!download.ok) {
+      attachments.push({
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        available: false,
+        viewableInline: false,
+      });
+      continue;
+    }
+    const storageId = await ctx.storage.store(
+      new Blob([download.bytes], { type: download.mimeType }),
+    );
+    await ctx.runMutation(internal.files.recordInbound, { storageId, eventId });
+    stored.push({
+      name: file.name,
+      mimeType: file.mimeType,
+      size: download.bytes.byteLength,
+      storageId,
+    });
+    // Only mark viewable inline when an image block is ACTUALLY produced: an
+    // image over the per-image cap, or one that would push the aggregate past
+    // the request budget, is delivered to the devbox but unseen here.
+    const viewableInline =
+      file.isImage &&
+      download.bytes.byteLength <= MAX_ORCHESTRATOR_IMAGE_BYTES &&
+      inlineBytesUsed + download.bytes.byteLength <=
+        MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES;
+    if (viewableInline) {
+      inlineBytesUsed += download.bytes.byteLength;
+      imageBlocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: file.mimeType as
+            | "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp",
+          data: Buffer.from(download.bytes).toString("base64"),
+        },
+      });
+    }
+    attachments.push({
+      name: file.name,
+      mimeType: file.mimeType,
+      size: download.bytes.byteLength,
+      available: true,
+      viewableInline,
+    });
+  }
+  return { stored, imageBlocks, attachments };
+}
+
 async function executeTool(
   ctx: ActionCtx,
   target: ThreadTarget,
   /** Slack user id of the message author — authorizes steer/stop. */
   requester: string,
+  /** Files shared on the triggering message, staged for the task that this
+   * call starts or steers. */
+  inboundFiles: StoredFile[],
   block: Anthropic.ToolUseBlock,
 ): Promise<string> {
   const input = (block.input ?? {}) as Record<string, unknown>;
@@ -198,6 +315,11 @@ async function executeTool(
       });
       const permalinkArgs =
         permalink === null ? {} : { slackPermalink: permalink };
+      // Shared attachments ride along: stored on the task row (resolved for
+      // the devbox at placement) and, for the permanent path, baked into the
+      // start command here.
+      const fileArgs = inboundFiles.length > 0 ? { files: inboundFiles } : {};
+      const deliverable = resolveDeliverableFiles(inboundFiles);
 
       // Explicit opt-in: the always-on permanent devbox. State can persist
       // between tasks there, so this path is never chosen silently.
@@ -210,7 +332,11 @@ async function executeTool(
             "the permanent devbox is busy (or not heartbeating). Options: run the task on an ephemeral devbox instead (the default), or stop the task currently occupying it.",
           );
         }
-        const request: StartTaskRequest = { taskId, prompt };
+        const request: StartTaskRequest = {
+          taskId,
+          prompt,
+          ...(deliverable.length > 0 ? { files: deliverable } : {}),
+        };
         await ctx.runMutation(internal.commands.enqueue, {
           devboxId: claimed.devboxId,
           kind: "start",
@@ -226,6 +352,7 @@ async function executeTool(
           slackThreadTs: target.threadTs,
           slackUser: requester,
           ...permalinkArgs,
+          ...fileArgs,
         });
         return JSON.stringify({
           ok: true,
@@ -252,6 +379,7 @@ async function executeTool(
         slackThreadTs: target.threadTs,
         slackUser: requester,
         ...permalinkArgs,
+        ...fileArgs,
       });
       const placement = await ctx.runMutation(
         internal.hosts.placeEphemeralTask,
@@ -315,7 +443,12 @@ async function executeTool(
       if (rejection !== null || devbox === null) {
         return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
       }
-      const payload: UserMessagePayload = { taskId, text: message };
+      const deliverable = resolveDeliverableFiles(inboundFiles);
+      const payload: UserMessagePayload = {
+        taskId,
+        text: message,
+        ...(deliverable.length > 0 ? { files: deliverable } : {}),
+      };
       await ctx.runMutation(internal.commands.enqueue, {
         devboxId: devbox.devboxId,
         kind: "user_message",
@@ -480,10 +613,27 @@ export const processSlackEvent = internalAction({
     if (trigger.channelThreadReply && threadTasks.length === 0) {
       return; // already claimed above; nothing to do or say
     }
+
+    // Download + stage any shared files before the tool loop: images go to the
+    // orchestrator's own model inline, all files are handed to whatever task it
+    // starts or steers in response. The attachment manifest reflects the actual
+    // staging outcome (see buildOrchestratorUserMessage).
+    const staged: StagedFiles =
+      trigger.files.length > 0
+        ? await stageInboundFiles(ctx, botToken, args.eventId, trigger.files)
+        : { stored: [], imageBlocks: [], attachments: [] };
+    const userText = buildOrchestratorUserMessage({
+      trigger,
+      threadTasks,
+      attachments: staged.attachments,
+    });
     const messages: Anthropic.MessageParam[] = [
       {
         role: "user",
-        content: buildOrchestratorUserMessage({ trigger, threadTasks }),
+        content:
+          staged.imageBlocks.length > 0
+            ? [{ type: "text", text: userText }, ...staged.imageBlocks]
+            : userText,
       },
     ];
 
@@ -514,7 +664,13 @@ export const processSlackEvent = internalAction({
           results.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: await executeTool(ctx, target, trigger.user, toolUse),
+            content: await executeTool(
+              ctx,
+              target,
+              trigger.user,
+              staged.stored,
+              toolUse,
+            ),
           });
         }
         messages.push({ role: "user", content: results });
