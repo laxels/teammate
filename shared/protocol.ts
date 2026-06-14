@@ -53,22 +53,24 @@ export type StartTaskRequest = {
   prompt: string;
   cwd?: string;
   /** Files the requester shared in Slack, already downloaded by the
-   * orchestrator into Convex storage. The gateway fetches each `url` (a public
-   * Convex storage link — the bot token never reaches the devbox) into the
-   * task's cwd and points the session at the local paths. */
+   * orchestrator into Convex storage. The gateway fetches each by `storageId`
+   * from the authenticated GET /devbox/file endpoint (bot token never reaches
+   * the devbox) into the task's cwd and points the session at the local paths. */
   files?: DeliverableFile[];
 };
 
 /**
  * A file the orchestrator has staged in Convex storage for a devbox to fetch.
  * The bytes live in storage (not in the command row, which is capped near
- * 1 MB); `url` is a public `ctx.storage.getUrl()` link the devbox can GET.
+ * 1 MB); only the `storageId` rides the wire. The devbox fetches the bytes
+ * from the secret-gated GET /devbox/file?storageId=... endpoint — NOT a public
+ * `ctx.storage.getUrl()` capability URL, so a leaked payload grants no access.
  */
 export type DeliverableFile = {
   name: string;
   mimeType: string;
   size: number;
-  url: string;
+  storageId: string;
 };
 
 /** A Slack-relayed steering message for a running task's live session (same
@@ -155,10 +157,22 @@ export const MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
 // /devbox/artifact. Kept under Convex's 20 MB HTTP-action request cap with
 // headroom for the multipart envelope.
 export const MAX_OUTBOUND_FILE_BYTES = 18 * 1024 * 1024;
-// The largest image the orchestrator feeds to its OWN model inline (so it can
-// answer about a screenshot in chat). Larger images still reach the devbox;
-// they're just not shown to the orchestrator (Anthropic image-size limits).
+// The largest single image the orchestrator feeds to its OWN model inline (so
+// it can answer about a screenshot in chat). Larger images still reach the
+// devbox; they're just not shown to the orchestrator (per-image limit).
 export const MAX_ORCHESTRATOR_IMAGE_BYTES = 5 * 1024 * 1024;
+// AGGREGATE cap across all inline images in one orchestrator request. Anthropic
+// caps a standard request at 32 MB; base64 inflates ~4/3, so 20 MB of raw image
+// bytes (~27 MB base64) leaves headroom for the prompt/system/tools. Beyond
+// this, further images are delivered to the devbox but not shown inline — so a
+// burst of large screenshots can't 413 the request after the event is claimed.
+export const MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES = 20 * 1024 * 1024;
+
+// ---- Gateway -> orchestrator: GET {CONVEX_SITE_URL}/devbox/file?storageId=... ----
+// Auth: `x-devbox-secret` header (same shared secret as /devbox/events). Streams
+// the staged inbound-file bytes from Convex storage so the devbox never receives
+// a public capability URL; 404 when the blob is missing/pruned (the gateway then
+// tells the session the file couldn't be downloaded).
 
 // ---- Devbox -> orchestrator: POST {CONVEX_SITE_URL}/devbox/artifact ----
 // Auth: `x-devbox-secret` header (same shared secret as /devbox/events).

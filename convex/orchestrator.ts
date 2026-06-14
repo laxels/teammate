@@ -7,6 +7,7 @@ import {
   isTerminalTaskStatus,
   MAX_INBOUND_FILE_BYTES,
   MAX_ORCHESTRATOR_IMAGE_BYTES,
+  MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES,
   type StartTaskRequest,
   type UserMessagePayload,
 } from "../shared/protocol";
@@ -167,8 +168,13 @@ async function stageInboundFiles(
   const stored: StoredFile[] = [];
   const imageBlocks: Anthropic.ImageBlockParam[] = [];
   const attachments: AttachmentInfo[] = [];
+  // Running total of raw bytes already inlined as image blocks, so a burst of
+  // large screenshots can't push the request past Anthropic's 32 MB cap.
+  let inlineBytesUsed = 0;
   for (const file of files) {
-    if (file.size > MAX_INBOUND_FILE_BYTES) {
+    // Slack Connect files arrive with no fetchable URL (file_access:
+    // check_file_info); surface them as undownloadable rather than dropping.
+    if (file.urlPrivate === "" || file.size > MAX_INBOUND_FILE_BYTES) {
       attachments.push({
         name: file.name,
         mimeType: file.mimeType,
@@ -205,10 +211,15 @@ async function stageInboundFiles(
       storageId,
     });
     // Only mark viewable inline when an image block is ACTUALLY produced: an
-    // image over the inline cap is delivered to the devbox but unseen here.
+    // image over the per-image cap, or one that would push the aggregate past
+    // the request budget, is delivered to the devbox but unseen here.
     const viewableInline =
-      file.isImage && download.bytes.byteLength <= MAX_ORCHESTRATOR_IMAGE_BYTES;
+      file.isImage &&
+      download.bytes.byteLength <= MAX_ORCHESTRATOR_IMAGE_BYTES &&
+      inlineBytesUsed + download.bytes.byteLength <=
+        MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES;
     if (viewableInline) {
+      inlineBytesUsed += download.bytes.byteLength;
       imageBlocks.push({
         type: "image",
         source: {
@@ -303,14 +314,11 @@ async function executeTool(
       });
       const permalinkArgs =
         permalink === null ? {} : { slackPermalink: permalink };
-      // Shared attachments ride along: stored on the task row (resolved to
-      // URLs for the devbox at placement) and, for the permanent path, baked
-      // into the start command here.
+      // Shared attachments ride along: stored on the task row (resolved for
+      // the devbox at placement) and, for the permanent path, baked into the
+      // start command here.
       const fileArgs = inboundFiles.length > 0 ? { files: inboundFiles } : {};
-      const deliverable = await resolveDeliverableFiles(
-        ctx.storage,
-        inboundFiles,
-      );
+      const deliverable = resolveDeliverableFiles(inboundFiles);
 
       // Explicit opt-in: the always-on permanent devbox. State can persist
       // between tasks there, so this path is never chosen silently.
@@ -434,10 +442,7 @@ async function executeTool(
       if (rejection !== null || devbox === null) {
         return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
       }
-      const deliverable = await resolveDeliverableFiles(
-        ctx.storage,
-        inboundFiles,
-      );
+      const deliverable = resolveDeliverableFiles(inboundFiles);
       const payload: UserMessagePayload = {
         taskId,
         text: message,

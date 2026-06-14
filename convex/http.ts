@@ -6,6 +6,7 @@ import {
 import { parseDevboxEvent } from "../src/orchestration";
 import { timingSafeEqual, verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 
 const http = httpRouter();
@@ -210,6 +211,43 @@ http.route({
       ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
     });
     return new Response(null, { status: 202 });
+  }),
+});
+
+// Orchestrator -> gateway inbound-file serve (see shared/protocol.ts): the
+// gateway GETs a staged Slack attachment by storageId, authenticated with the
+// shared secret. Serving the bytes through this secret-gated endpoint (instead
+// of a public ctx.storage.getUrl link in the command payload) keeps private
+// Slack files from being fetchable by anyone who sees the payload or a log.
+http.route({
+  path: "/devbox/file",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const storageId = new URL(request.url).searchParams.get("storageId");
+    if (storageId === null || storageId === "") {
+      return new Response("missing storageId", { status: 400 });
+    }
+    // get() returns null for a missing/pruned blob; an invalid id throws —
+    // either way the gateway gets a non-2xx and reports the file as undownloadable.
+    let blob: Blob | null;
+    try {
+      blob = await ctx.storage.get(storageId as Id<"_storage">);
+    } catch {
+      blob = null;
+    }
+    if (blob === null) {
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(blob);
   }),
 });
 

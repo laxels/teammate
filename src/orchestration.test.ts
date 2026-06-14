@@ -387,8 +387,15 @@ describe("parseSlackFiles", () => {
     expect(files[1]).toMatchObject({ name: "out.log", isImage: false });
   });
 
-  test("drops entries with no private URL (tombstoned/external)", () => {
-    expect(parseSlackFiles([{ id: "F3", name: "gone.png" }])).toEqual([]);
+  test("keeps a real file with no URL (Slack Connect) as unavailable, drops non-files", () => {
+    // A Slack Connect file: has an id but no url_private until files.info.
+    const connect = parseSlackFiles([
+      { id: "F3", name: "shared.png", file_access: "check_file_info" },
+    ]);
+    expect(connect).toHaveLength(1);
+    expect(connect[0]).toMatchObject({ id: "F3", urlPrivate: "" });
+    // Garbage entries (no id, no url) and non-arrays are still dropped.
+    expect(parseSlackFiles([{ name: "no-id.png" }])).toEqual([]);
     expect(parseSlackFiles(undefined)).toEqual([]);
     expect(parseSlackFiles("nope")).toEqual([]);
   });

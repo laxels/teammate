@@ -13,28 +13,26 @@ export type StoredFile = {
 };
 
 /**
- * Turns staged task files (Convex storage ids) into DeliverableFiles the
- * devbox can fetch, resolving each storage id to a public URL. Files whose
- * blob has already been pruned (getUrl -> null) are dropped silently — the
- * gateway simply receives fewer files. Shared by hosts.dispatchTaskToSlot
+ * Turns staged task files into DeliverableFiles for a devbox: just the metadata
+ * plus the storage id (as a wire string). No public URL is minted — the gateway
+ * fetches the bytes from the secret-gated GET /devbox/file endpoint, so a leaked
+ * command payload grants no access. A blob pruned while the task sat queued is
+ * NOT filtered here: the gateway's fetch 404s and it tells the session the file
+ * couldn't be downloaded (no silent drop). Shared by hosts.dispatchTaskToSlot
  * (ephemeral start) and the orchestrator (permanent start / steer).
  */
-export async function resolveDeliverableFiles(
-  storage: { getUrl: (id: Id<"_storage">) => Promise<string | null> },
+export function resolveDeliverableFiles(
   files: StoredFile[] | undefined,
-): Promise<DeliverableFile[]> {
+): DeliverableFile[] {
   if (files === undefined || files.length === 0) {
     return [];
   }
-  const resolved = await Promise.all(
-    files.map(async (file) => {
-      const url = await storage.getUrl(file.storageId);
-      return url === null
-        ? null
-        : { name: file.name, mimeType: file.mimeType, size: file.size, url };
-    }),
-  );
-  return resolved.filter((file): file is DeliverableFile => file !== null);
+  return files.map((file) => ({
+    name: file.name,
+    mimeType: file.mimeType,
+    size: file.size,
+    storageId: file.storageId,
+  }));
 }
 
 /**

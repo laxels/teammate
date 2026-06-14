@@ -416,10 +416,10 @@ async function dispatchTaskToSlot(
     devboxId: slot.devboxId,
     updatedAt: Date.now(),
   });
-  // Shared Slack attachments staged in storage become public URLs the freshly
-  // booted gateway fetches into the task's cwd (the bot token never reaches
-  // the devbox).
-  const files = await resolveDeliverableFiles(ctx.storage, task.files);
+  // Shared Slack attachments staged in storage: the freshly booted gateway
+  // fetches each by storageId from the secret-gated /devbox/file endpoint (the
+  // bot token never reaches the devbox).
+  const files = resolveDeliverableFiles(task.files);
   const request: StartTaskRequest = {
     taskId: task.taskId,
     prompt: task.prompt,

@@ -50,8 +50,12 @@ const ORCHESTRATOR_IMAGE_MIMES: ReadonlySet<string> = new Set([
   "image/webp",
 ]);
 
-/** Parses the Slack event `files` array into SlackFileRefs, dropping entries
- * with no private URL (tombstoned/external files we can't fetch). */
+/** Parses the Slack event `files` array into SlackFileRefs. A real file with
+ * no fetchable private URL (Slack Connect `file_access: "check_file_info"`,
+ * whose metadata isn't in the event) is KEPT with an empty `urlPrivate` so the
+ * orchestrator reports it as an attachment it couldn't access — silently
+ * dropping it would make "inspect this screenshot" look like a fileless
+ * message. Only entries that aren't real files (no id and no url) are dropped. */
 export function parseSlackFiles(raw: unknown): SlackFileRef[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -67,14 +71,15 @@ export function parseSlackFiles(raw: unknown): SlackFileRef[] {
         ? f.url_private_download
         : typeof f.url_private === "string"
           ? f.url_private
-          : undefined;
-    if (url === undefined) {
+          : "";
+    const id = typeof f.id === "string" ? f.id : "";
+    if (url === "" && id === "") {
       continue;
     }
     const mimeType =
       typeof f.mimetype === "string" ? f.mimetype : "application/octet-stream";
     files.push({
-      id: typeof f.id === "string" ? f.id : "",
+      id,
       name: typeof f.name === "string" && f.name !== "" ? f.name : "file",
       mimeType,
       size: typeof f.size === "number" ? f.size : 0,

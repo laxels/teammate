@@ -4,7 +4,7 @@ import type { DeliverableFile } from "../../shared/protocol";
 import type { FetchLike } from "./events";
 
 export type DownloadedFile = {
-  /** Original Slack filename. */
+  /** Sanitized display name (safe to put in the prompt). */
   name: string;
   /** Where it was written on this machine (absolute). */
   path: string;
@@ -14,48 +14,74 @@ export type DownloadedFile = {
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 
-/** Strip path separators and leading dots so a hostile name can't escape the
- * task directory. */
-function safeName(name: string): string {
-  const base = name.replace(/[/\\]/g, "_").replace(/^\.+/, "").trim();
-  return base === "" ? "file" : base;
+/**
+ * Makes a Slack filename safe for BOTH the on-disk path and the model prompt.
+ * Slack names are attacker-controlled: a newline-bearing name would otherwise
+ * inject an instruction-looking line into the devbox prompt, and control chars
+ * / path separators could escape the task dir. Replace every control char with
+ * a space, drop path separators + leading dots, and collapse whitespace runs.
+ */
+function sanitizeName(name: string): string {
+  let stripped = "";
+  for (const ch of name) {
+    const code = ch.codePointAt(0) ?? 0;
+    stripped += code < 0x20 || code === 0x7f ? " " : ch;
+  }
+  const cleaned = stripped
+    .replace(/[/\\]/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .trim();
+  return cleaned === "" ? "file" : cleaned;
 }
 
+export type DownloadDeps = {
+  /** Orchestrator HTTP origin (CONVEX_SITE_URL) hosting /devbox/file. */
+  convexSiteUrl: string;
+  /** Shared secret sent as x-devbox-secret (the file is auth-gated, not a
+   * public capability URL). */
+  secret: string;
+  fetchFn?: FetchLike;
+};
+
 /**
- * Downloads each staged file (a public Convex storage URL — the bot token
- * never reaches the devbox) into <baseDir>/<taskId>/ and reports where each
- * landed. Best-effort per file: one failure doesn't sink the others, and the
- * session is told which paths exist via buildInboundFilePromptSuffix. Names
- * are index-prefixed so two attachments with the same name don't collide.
+ * Downloads each staged file into <baseDir>/<taskId>/ via the orchestrator's
+ * authenticated GET /devbox/file?storageId=... endpoint — the bytes are gated
+ * by the shared secret, never a public storage URL, and the bot token never
+ * reaches the devbox. Best-effort per file: one failure (including a 404 for a
+ * blob pruned while the task sat queued) doesn't sink the others, and the
+ * session is told which paths exist (and which failed) via
+ * buildInboundFilePromptSuffix. Names are index-prefixed so two attachments
+ * with the same name don't collide.
  */
 export async function downloadInboundFiles(
   files: DeliverableFile[],
   taskId: string,
   baseDir: string,
-  fetchFn: FetchLike = fetch,
+  deps: DownloadDeps,
 ): Promise<DownloadedFile[]> {
-  const dir = join(baseDir, safeName(taskId));
+  const fetchFn = deps.fetchFn ?? fetch;
+  const dir = join(baseDir, sanitizeName(taskId));
   await mkdir(dir, { recursive: true });
   return await Promise.all(
     files.map(async (file, index) => {
-      const path = join(dir, `${index + 1}-${safeName(file.name)}`);
+      const name = sanitizeName(file.name);
+      const path = join(dir, `${index + 1}-${name}`);
       try {
-        const response = await fetchFn(file.url, {
+        const url = new URL("/devbox/file", deps.convexSiteUrl);
+        url.searchParams.set("storageId", file.storageId);
+        const response = await fetchFn(url.toString(), {
+          headers: { "x-devbox-secret": deps.secret },
           signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
         });
         if (!response.ok) {
-          return {
-            name: file.name,
-            path,
-            ok: false,
-            error: `HTTP ${response.status}`,
-          };
+          return { name, path, ok: false, error: `HTTP ${response.status}` };
         }
         await writeFile(path, new Uint8Array(await response.arrayBuffer()));
-        return { name: file.name, path, ok: true };
+        return { name, path, ok: true };
       } catch (error) {
         return {
-          name: file.name,
+          name,
           path,
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -67,8 +93,8 @@ export async function downloadInboundFiles(
 
 /**
  * Builds a prompt block pointing the session at the downloaded files (and
- * naming any that failed). Returns "" when there were no files, so a fileless
- * task's prompt is untouched.
+ * naming any that failed). Names are already sanitized by downloadInboundFiles.
+ * Returns "" when there were no files, so a fileless task's prompt is untouched.
  */
 export function buildInboundFilePromptSuffix(
   downloaded: DownloadedFile[],

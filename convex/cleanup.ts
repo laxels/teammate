@@ -31,10 +31,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export const QUEUE_RETENTION_MS = 7 * DAY_MS;
 export const EVENT_RETENTION_MS = 30 * DAY_MS;
-/** Inbound Slack files staged in storage. The gateway fetches each within
- * minutes (up to ~45 min if its task sits queued), so a 1-day window is
- * generous while bounding storage growth. */
-export const INBOUND_FILE_RETENTION_MS = 1 * DAY_MS;
+/** Inbound Slack files staged in storage. A task normally places within
+ * minutes (up to ~45 min if it sits queued), but a saturated/no-provisioner
+ * fleet can hold it longer — so match the queue/command retention (7 days)
+ * rather than racing it. Past that a queued task is effectively abandoned; if
+ * its blob is gone, the gateway's /devbox/file fetch 404s and the session is
+ * told the file couldn't be downloaded (no silent loss). */
+export const INBOUND_FILE_RETENTION_MS = QUEUE_RETENTION_MS;
 
 export const PRUNE_TABLES = [
   { table: "slackEvents", retentionMs: QUEUE_RETENTION_MS },

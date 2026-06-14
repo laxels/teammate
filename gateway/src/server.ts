@@ -79,13 +79,13 @@ function parseDeliverableFiles(raw: unknown): DeliverableFile[] | undefined {
       typeof f.name === "string" &&
       typeof f.mimeType === "string" &&
       typeof f.size === "number" &&
-      typeof f.url === "string"
+      typeof f.storageId === "string"
     ) {
       files.push({
         name: f.name,
         mimeType: f.mimeType,
         size: f.size,
-        url: f.url,
+        storageId: f.storageId,
       });
     }
   }
@@ -151,12 +151,11 @@ export function createGatewayServer(
     if (files === undefined || files.length === 0) {
       return basePrompt;
     }
-    const downloaded = await downloadInboundFiles(
-      files,
-      taskId,
-      inboxDir,
+    const downloaded = await downloadInboundFiles(files, taskId, inboxDir, {
+      convexSiteUrl: config.convexSiteUrl,
+      secret: config.devboxSharedSecret,
       fetchFn,
-    );
+    });
     return basePrompt + buildInboundFilePromptSuffix(downloaded);
   };
 
