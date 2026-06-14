@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { Server } from "bun";
 import type {
+  DeliverableFile,
   GatewayHealth,
   StartTaskRequest,
   SteerServerMessage,
@@ -16,7 +18,9 @@ import {
   createTranscriptSender,
   type FetchLike,
 } from "./events";
+import { buildInboundFilePromptSuffix, downloadInboundFiles } from "./files";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
+import { createShareMcpServer } from "./share";
 import { serveStatic } from "./static";
 import { dispatchSteerMessage } from "./steer";
 import {
@@ -63,6 +67,31 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/** Validates the optional `files` array (DeliverableFile[]) on a start/steer
+ * payload, dropping malformed entries. Returns undefined when absent/empty. */
+function parseDeliverableFiles(raw: unknown): DeliverableFile[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const files: DeliverableFile[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const f = item as Record<string, unknown>;
+    if (
+      typeof f.name === "string" &&
+      typeof f.mimeType === "string" &&
+      typeof f.size === "number" &&
+      typeof f.url === "string"
+    ) {
+      files.push({
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size,
+        url: f.url,
+      });
+    }
+  }
+  return files.length > 0 ? files : undefined;
+}
+
 function parseUserMessagePayload(body: unknown): UserMessagePayload | null {
   if (typeof body !== "object" || body === null) return null;
   const candidate = body as Record<string, unknown>;
@@ -72,7 +101,12 @@ function parseUserMessagePayload(body: unknown): UserMessagePayload | null {
   if (typeof candidate.text !== "string" || candidate.text.trim() === "") {
     return null;
   }
-  return { taskId: candidate.taskId, text: candidate.text };
+  const files = parseDeliverableFiles(candidate.files);
+  return {
+    taskId: candidate.taskId,
+    text: candidate.text,
+    ...(files === undefined ? {} : { files }),
+  };
 }
 
 function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
@@ -87,10 +121,12 @@ function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
   if (candidate.cwd !== undefined && typeof candidate.cwd !== "string") {
     return null;
   }
+  const files = parseDeliverableFiles(candidate.files);
   return {
     taskId: candidate.taskId,
     prompt: candidate.prompt,
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
+    ...(files === undefined ? {} : { files }),
   };
 }
 
@@ -103,22 +139,35 @@ export function createGatewayServer(
   const vncHost = options.vncHost ?? "127.0.0.1";
   const vncPort = options.vncPort ?? 5900;
   const webDistDir = options.webDistDir ?? DEFAULT_WEB_DIST;
+  const fetchFn = options.fetchFn ?? fetch;
 
-  const emitEvent = createEventSender(
-    config,
-    options.fetchFn ?? fetch,
-    options.now ?? Date.now,
-  );
+  // Where inbound Slack files are downloaded before a session starts/steers.
+  const inboxDir = join(homedir(), "ultraclaude-inbox");
+  const augmentPromptWithFiles = async (
+    taskId: string,
+    basePrompt: string,
+    files: DeliverableFile[] | undefined,
+  ): Promise<string> => {
+    if (files === undefined || files.length === 0) {
+      return basePrompt;
+    }
+    const downloaded = await downloadInboundFiles(
+      files,
+      taskId,
+      inboxDir,
+      fetchFn,
+    );
+    return basePrompt + buildInboundFilePromptSuffix(downloaded);
+  };
+
+  const emitEvent = createEventSender(config, fetchFn, options.now ?? Date.now);
 
   const send = (message: SteerServerMessage): string => JSON.stringify(message);
 
   // `server` is assigned below; the callbacks only run once it is listening.
   let server: Server<WsData>;
 
-  const uploadTranscript = createTranscriptSender(
-    config,
-    options.fetchFn ?? fetch,
-  );
+  const uploadTranscript = createTranscriptSender(config, fetchFn);
 
   // One browser for the gateway's lifetime, shared across tasks like the rest
   // of the desktop: Chrome launches lazily on first use and stays open, with
@@ -128,9 +177,10 @@ export function createGatewayServer(
   const session = new SessionManager({
     emitEvent,
     uploadTranscript,
-    createMcpServers: () => ({
+    createMcpServers: (taskId) => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
       browser: createBrowserMcpServer(browserSession),
+      "share-file": createShareMcpServer({ config, taskId, fetchFn }),
     }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
@@ -214,7 +264,15 @@ export function createGatewayServer(
             { status: 400 },
           );
         }
-        if (!session.start(startRequest)) {
+        // Download shared files into the task's cwd and point the prompt at
+        // them before the session starts (the model sees local paths it can
+        // open). Blocks the 202 by seconds; bounded by the download timeout.
+        const prompt = await augmentPromptWithFiles(
+          startRequest.taskId,
+          startRequest.prompt,
+          startRequest.files,
+        );
+        if (!session.start({ ...startRequest, prompt })) {
           return Response.json(
             {
               error: "a task is already running",
@@ -243,12 +301,27 @@ export function createGatewayServer(
         // The taskId match keeps a stale command (aimed at a previous
         // occupant of this devbox) out of the current session; the
         // terminalEmitted check drops steers that lost the race against task
-        // completion (a late message must not re-open a finished task).
+        // completion (a late message must not re-open a finished task). Both
+        // are checked BEFORE downloading any attachments, so a doomed steer
+        // wastes no bandwidth.
         if (
           session.status().taskId !== payload.taskId ||
-          session.terminalEmitted() ||
-          !session.pushUserMessage(payload.text)
+          session.terminalEmitted()
         ) {
+          return Response.json(
+            {
+              error: "no live session for that task",
+              taskId: session.status().taskId,
+            },
+            { status: 409 },
+          );
+        }
+        const text = await augmentPromptWithFiles(
+          payload.taskId,
+          payload.text,
+          payload.files,
+        );
+        if (!session.pushUserMessage(text)) {
           return Response.json(
             {
               error: "no live session for that task",

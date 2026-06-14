@@ -52,14 +52,34 @@ export type StartTaskRequest = {
   taskId: string;
   prompt: string;
   cwd?: string;
+  /** Files the requester shared in Slack, already downloaded by the
+   * orchestrator into Convex storage. The gateway fetches each `url` (a public
+   * Convex storage link — the bot token never reaches the devbox) into the
+   * task's cwd and points the session at the local paths. */
+  files?: DeliverableFile[];
+};
+
+/**
+ * A file the orchestrator has staged in Convex storage for a devbox to fetch.
+ * The bytes live in storage (not in the command row, which is capped near
+ * 1 MB); `url` is a public `ctx.storage.getUrl()` link the devbox can GET.
+ */
+export type DeliverableFile = {
+  name: string;
+  mimeType: string;
+  size: number;
+  url: string;
 };
 
 /** A Slack-relayed steering message for a running task's live session (same
  * effect as typing into the monitoring page's steering box). taskId guards
- * against a stale command reaching a devbox that moved on to another task. */
+ * against a stale command reaching a devbox that moved on to another task.
+ * `files` carries attachments shared in the steering message (same staging as
+ * StartTaskRequest.files), downloaded into the session's cwd before delivery. */
 export type UserMessagePayload = {
   taskId: string;
   text: string;
+  files?: DeliverableFile[];
 };
 
 /** Payload for "interrupt". With taskId, the gateway only stops the session
@@ -126,6 +146,27 @@ export type TranscriptUpload = {
 };
 
 export const MAX_TRANSCRIPT_BYTES = 900_000;
+
+// ---- File handling caps (Slack <-> devbox, see src/slackApi.ts) ----
+// Inbound: the largest Slack attachment the orchestrator downloads + stages
+// for a task (oversized files are skipped with a note to the model).
+export const MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
+// Outbound: the largest artifact a devbox may push back through
+// /devbox/artifact. Kept under Convex's 20 MB HTTP-action request cap with
+// headroom for the multipart envelope.
+export const MAX_OUTBOUND_FILE_BYTES = 18 * 1024 * 1024;
+// The largest image the orchestrator feeds to its OWN model inline (so it can
+// answer about a screenshot in chat). Larger images still reach the devbox;
+// they're just not shown to the orchestrator (Anthropic image-size limits).
+export const MAX_ORCHESTRATOR_IMAGE_BYTES = 5 * 1024 * 1024;
+
+// ---- Devbox -> orchestrator: POST {CONVEX_SITE_URL}/devbox/artifact ----
+// Auth: `x-devbox-secret` header (same shared secret as /devbox/events).
+// Body: multipart/form-data — fields `taskId`, `filename`, optional
+// `title`/`comment`, and the binary `file`. The orchestrator stores the bytes
+// in Convex storage and posts them into the task's Slack thread via the modern
+// external-upload flow, then deletes the storage blob (outbound artifacts are
+// transient). The devbox's `share_file` MCP tool drives this.
 
 export type DevboxEventType =
   | "started"

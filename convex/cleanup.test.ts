@@ -7,6 +7,7 @@ import {
 import { internal } from "./_generated/api";
 import {
   EVENT_RETENTION_MS,
+  INBOUND_FILE_RETENTION_MS,
   PRUNE_BATCH_SIZE,
   QUEUE_RETENTION_MS,
 } from "./cleanup";
@@ -174,6 +175,46 @@ test("prunes rows past each table's window, keeps rows inside it", async () => {
     taskEvents: ["task-new"],
     hostEvents: ["host-new"],
   });
+});
+
+test("prunes inbound file blobs + rows past the window, keeps fresh ones", async () => {
+  const t = newT();
+
+  const staleId = await agedBy(INBOUND_FILE_RETENTION_MS + HOUR_MS, () =>
+    t.run(async (ctx) => {
+      const storageId = await ctx.storage.store(new Blob(["old bytes"]));
+      await ctx.db.insert("inboundFiles", {
+        storageId,
+        eventId: "evt-old",
+        createdAt: Date.now(),
+      });
+      return storageId;
+    }),
+  );
+  const freshId = await agedBy(INBOUND_FILE_RETENTION_MS - HOUR_MS, () =>
+    t.run(async (ctx) => {
+      const storageId = await ctx.storage.store(new Blob(["new bytes"]));
+      await ctx.db.insert("inboundFiles", {
+        storageId,
+        eventId: "evt-new",
+        createdAt: Date.now(),
+      });
+      return storageId;
+    }),
+  );
+
+  const result = await t.mutation(internal.cleanup.pruneExpired, {});
+  expect(result.deleted.inboundFiles).toBe(1);
+
+  const remaining = await t.run(async (ctx) => ({
+    rows: (await ctx.db.query("inboundFiles").collect()).map((r) => r.eventId),
+    staleBlobExists: (await ctx.storage.get(staleId)) !== null,
+    freshBlobExists: (await ctx.storage.get(freshId)) !== null,
+  }));
+  expect(remaining.rows).toEqual(["evt-new"]);
+  // The stale blob is gone; the fresh one survives.
+  expect(remaining.staleBlobExists).toBe(false);
+  expect(remaining.freshBlobExists).toBe(true);
 });
 
 test("never prunes a slack event the dead-letter replay could still pick up", async () => {

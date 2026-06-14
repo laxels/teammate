@@ -25,9 +25,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *   remain — a running task with no event in 30 days was already maximally
  *   stale, so nudging behavior is unchanged).
  * - hostEvents: only read as the fleet snapshot's recent tail (last 15).
+ *
+ * inboundFiles is pruned separately (below) because each row owns a storage
+ * blob that must be deleted with it.
  */
 export const QUEUE_RETENTION_MS = 7 * DAY_MS;
 export const EVENT_RETENTION_MS = 30 * DAY_MS;
+/** Inbound Slack files staged in storage. The gateway fetches each within
+ * minutes (up to ~45 min if its task sits queued), so a 1-day window is
+ * generous while bounding storage growth. */
+export const INBOUND_FILE_RETENTION_MS = 1 * DAY_MS;
 
 export const PRUNE_TABLES = [
   { table: "slackEvents", retentionMs: QUEUE_RETENTION_MS },
@@ -63,6 +70,26 @@ export const pruneExpired = internalMutation({
       }
       more ||= rows.length === PRUNE_BATCH_SIZE;
     }
+
+    // inboundFiles each own a storage blob: delete the blob, then the row.
+    const staleFiles = await ctx.db
+      .query("inboundFiles")
+      .withIndex("by_creation_time", (q) =>
+        q.lt("_creationTime", now - INBOUND_FILE_RETENTION_MS),
+      )
+      .take(PRUNE_BATCH_SIZE);
+    for (const row of staleFiles) {
+      // .catch so a missing/failed blob can't roll back the whole prune
+      // transaction and wedge the sweep on the same row forever; the bookkeeping
+      // row is still removed (mirrors artifacts.uploadToSlack's cleanup).
+      await ctx.storage.delete(row.storageId).catch(() => undefined);
+      await ctx.db.delete(row._id);
+    }
+    if (staleFiles.length > 0) {
+      deleted.inboundFiles = staleFiles.length;
+    }
+    more ||= staleFiles.length === PRUNE_BATCH_SIZE;
+
     if (Object.keys(deleted).length > 0) {
       console.log(`pruned expired rows: ${JSON.stringify(deleted)}`);
     }

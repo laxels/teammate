@@ -1,5 +1,8 @@
 import { httpRouter } from "convex/server";
-import { MAX_TRANSCRIPT_BYTES } from "../shared/protocol";
+import {
+  MAX_OUTBOUND_FILE_BYTES,
+  MAX_TRANSCRIPT_BYTES,
+} from "../shared/protocol";
 import { parseDevboxEvent } from "../src/orchestration";
 import { timingSafeEqual, verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
@@ -156,6 +159,57 @@ http.route({
       json: JSON.stringify(payload.messages),
     });
     return new Response(null, { status: 200 });
+  }),
+});
+
+// Gateway -> orchestrator artifact upload (see shared/protocol.ts): a devbox's
+// `share_file` tool POSTs a file here as multipart/form-data; we stage it in
+// Convex storage and hand off to artifacts.uploadToSlack, which posts it into
+// the task's thread and then deletes the blob.
+http.route({
+  path: "/devbox/artifact",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return new Response("expected multipart/form-data", { status: 400 });
+    }
+    const file = form.get("file");
+    const taskId = form.get("taskId");
+    const filename = form.get("filename");
+    if (
+      !(file instanceof Blob) ||
+      typeof taskId !== "string" ||
+      typeof filename !== "string"
+    ) {
+      return new Response("expected file, taskId, filename", { status: 400 });
+    }
+    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
+      return new Response("payload too large", { status: 413 });
+    }
+    const title = form.get("title");
+    const comment = form.get("comment");
+    const storageId = await ctx.storage.store(file);
+    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
+      taskId,
+      storageId,
+      filename,
+      ...(typeof title === "string" && title !== "" ? { title } : {}),
+      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
+    });
+    return new Response(null, { status: 202 });
   }),
 });
 

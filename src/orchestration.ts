@@ -10,6 +10,20 @@ import {
 
 // ---- Slack event filtering ----
 
+/** A file shared on a Slack message, parsed from the event's `files` array.
+ * The orchestrator downloads these (auth via bot token) and stages them for
+ * the task; `isImage` marks the types it can also show its own model inline. */
+export type SlackFileRef = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  /** url_private_download (preferred) or url_private — fetched with the bot
+   * token. */
+  urlPrivate: string;
+  isImage: boolean;
+};
+
 /** A Slack event we should respond to (human DM or channel mention). */
 export type SlackTrigger = {
   type: "message" | "app_mention";
@@ -20,12 +34,67 @@ export type SlackTrigger = {
   text: string;
   ts: string;
   threadTs: string | undefined;
-  /** Slack attachments on the message; we can't fetch their contents yet. */
-  fileCount: number;
+  /** Files shared on the message (downloaded + handed to the task). */
+  files: SlackFileRef[];
   /** An un-mentioned reply inside a channel thread: only act on it when the
    * thread anchors one of our tasks (the orchestrator drops it otherwise). */
   channelThreadReply: boolean;
 };
+
+/** Image types the orchestrator can render to its own model inline (Anthropic
+ * image-block media types). Other types are only handed to the devbox. */
+const ORCHESTRATOR_IMAGE_MIMES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+/** Parses the Slack event `files` array into SlackFileRefs, dropping entries
+ * with no private URL (tombstoned/external files we can't fetch). */
+export function parseSlackFiles(raw: unknown): SlackFileRef[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const files: SlackFileRef[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const f = item as Record<string, unknown>;
+    const url =
+      typeof f.url_private_download === "string"
+        ? f.url_private_download
+        : typeof f.url_private === "string"
+          ? f.url_private
+          : undefined;
+    if (url === undefined) {
+      continue;
+    }
+    const mimeType =
+      typeof f.mimetype === "string" ? f.mimetype : "application/octet-stream";
+    files.push({
+      id: typeof f.id === "string" ? f.id : "",
+      name: typeof f.name === "string" && f.name !== "" ? f.name : "file",
+      mimeType,
+      size: typeof f.size === "number" ? f.size : 0,
+      urlPrivate: url,
+      isImage: ORCHESTRATOR_IMAGE_MIMES.has(mimeType),
+    });
+  }
+  return files;
+}
+
+/** Human-readable byte size for Slack status copy. */
+export function formatBytes(n: number): string {
+  if (n < 1024) {
+    return `${n} B`;
+  }
+  if (n < 1024 * 1024) {
+    return `${(n / 1024).toFixed(1)} KB`;
+  }
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export type SlackEventClassification =
   | { kind: "trigger"; trigger: SlackTrigger }
@@ -130,7 +199,7 @@ export function classifySlackEvent(
       text: event.text,
       ts: event.ts,
       threadTs: event.thread_ts,
-      fileCount: Array.isArray(event.files) ? event.files.length : 0,
+      files: parseSlackFiles(event.files),
       channelThreadReply,
     },
   };
@@ -205,36 +274,87 @@ export type ThreadTaskContext = {
 };
 
 /**
+ * Per-file status the orchestrator message reports, derived from the actual
+ * staging outcome (not the raw Slack list) so the model is never told a file
+ * is delivered or viewable when it isn't.
+ */
+export type AttachmentInfo = {
+  name: string;
+  mimeType: string;
+  size: number;
+  /** Downloaded + staged for the devbox. */
+  available: boolean;
+  /** An image block for this file is included in the message — only then may
+   * the model be told it can see the image. */
+  viewableInline: boolean;
+};
+
+/** Neutralizes the structural tags the orchestrator prompt trusts, so
+ * untrusted Slack content can never forge or break out of a
+ * <user_message>/<thread_context> block. */
+function neutralizeStructuralTags(text: string): string {
+  return text.replace(/<(\/?)(thread_context|user_message)/gi, "&lt;$1$2");
+}
+
+/** Field-safe variant for interpolated values (filenames, mimetypes): also
+ * collapses whitespace so a crafted value can't span lines or pad structure. */
+function neutralizeField(text: string): string {
+  return neutralizeStructuralTags(text).replace(/\s+/g, " ").trim();
+}
+
+/**
  * Builds the single user message handed to the orchestrator model. When the
  * triggering message is a reply inside a thread that anchors one or more
  * tasks, a <thread_context> block names them so the model treats the message
  * as being about that work instead of asking which task is meant.
  *
- * The Slack text is untrusted: it goes inside its own <user_message> block,
- * and tag sequences that could forge or break out of the structural blocks
- * are neutralized so prose can never fabricate a thread-task association.
+ * Everything from Slack is untrusted: the message text goes inside its own
+ * <user_message> block and attachment names/types are field-neutralized, so
+ * neither prose nor a crafted filename can forge or break out of the
+ * structural blocks (e.g. fabricate a thread-task association). The attachment
+ * manifest reflects the staging OUTCOME — only successfully downloaded files
+ * are described as delivered, and only files with an image block are marked
+ * viewable inline.
  */
 export function buildOrchestratorUserMessage(args: {
   trigger: SlackTrigger;
   threadTasks: ThreadTaskContext[];
+  attachments?: AttachmentInfo[];
 }): string {
   const { trigger, threadTasks } = args;
+  const attachments = args.attachments ?? [];
   const source =
     trigger.type === "app_mention"
       ? `mention in channel ${trigger.channel}`
       : "direct message";
-  const safeText = trigger.text.replace(
-    /<(\/?)(thread_context|user_message)/gi,
-    "&lt;$1$2",
-  );
+  const safeText = neutralizeStructuralTags(trigger.text);
   const parts = [
     `Slack ${source} from <@${trigger.user}>:`,
     `<user_message>\n${safeText}\n</user_message>`,
   ];
-  if (trigger.fileCount > 0) {
-    parts.push(
-      `[The user attached ${trigger.fileCount} file(s). You cannot view Slack attachments yet — if they matter for the request, say so instead of guessing their contents.]`,
-    );
+  if (attachments.length > 0) {
+    const available = attachments.filter((a) => a.available);
+    const unavailable = attachments.filter((a) => !a.available);
+    const lines: string[] = [];
+    if (available.length > 0) {
+      lines.push(
+        `[The user shared ${available.length} file(s), downloaded and handed to any task you start or steer (the devbox reads them from local paths):`,
+      );
+      for (const a of available) {
+        lines.push(
+          `- ${neutralizeField(a.name)} (${neutralizeField(a.mimeType)}, ${formatBytes(a.size)})${a.viewableInline ? " — image, shown to you inline in this message" : ""}`,
+        );
+      }
+      lines.push("Inspect non-image types by delegating to a task.]");
+    }
+    if (unavailable.length > 0) {
+      lines.push(
+        `[${unavailable.length} shared file(s) could NOT be downloaded (${unavailable
+          .map((a) => neutralizeField(a.name))
+          .join(", ")}); tell the user if they matter for the request.]`,
+      );
+    }
+    parts.push(lines.join("\n"));
   }
   if (threadTasks.length > 0) {
     const lines = threadTasks.map(

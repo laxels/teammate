@@ -237,3 +237,232 @@ export async function addSlackReaction(
     return false;
   }
 }
+
+// ---- File handling (files:read download + files:write external upload) ----
+
+export type SlackFileDownload =
+  | { ok: true; bytes: Uint8Array<ArrayBuffer>; mimeType: string }
+  | { ok: false; error: string };
+
+/**
+ * Downloads a file a user shared, via its `url_private`/`url_private_download`
+ * link. Slack gates these behind the bot token (Authorization: Bearer) and —
+ * crucially — answers an UNAUTHORIZED request with a 200 HTML login page
+ * rather than an error. So a text/html response is treated as that failure,
+ * UNLESS the file was itself expected to be HTML (pass `expectedMimeType` from
+ * the Slack metadata), which lets genuine .html attachments through.
+ * Best-effort: never throws; returns the reason on failure so the caller can
+ * tell the user instead of handing the model garbage bytes.
+ */
+export async function downloadSlackFile(
+  args: {
+    botToken: string;
+    urlPrivate: string;
+    maxBytes: number;
+    expectedMimeType?: string | undefined;
+  },
+  deps: SlackApiDeps = {},
+): Promise<SlackFileDownload> {
+  const fetchFn = deps.fetchFn ?? fetch;
+  try {
+    const response = await fetchFn(args.urlPrivate, {
+      headers: { authorization: `Bearer ${args.botToken}` },
+    });
+    if (!response.ok) {
+      return { ok: false, error: `download HTTP ${response.status}` };
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    const expectsHtml = (args.expectedMimeType ?? "").includes("html");
+    if (contentType.includes("text/html") && !expectsHtml) {
+      return {
+        ok: false,
+        error: "got an HTML page, not file bytes (bot token lacks files:read?)",
+      };
+    }
+    // Honor a declared length before buffering, so a misreported attachment
+    // can't make us pull megabytes we will only discard.
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > args.maxBytes) {
+      return {
+        ok: false,
+        error: `file is ${declared} bytes (over the ${args.maxBytes}-byte cap)`,
+      };
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > args.maxBytes) {
+      return {
+        ok: false,
+        error: `file is ${buffer.byteLength} bytes (over the ${args.maxBytes}-byte cap)`,
+      };
+    }
+    const mimeType =
+      contentType.split(";")[0]?.trim() || "application/octet-stream";
+    return { ok: true, bytes: new Uint8Array(buffer), mimeType };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export type SlackUploadResult =
+  | { ok: true; fileId: string }
+  | { ok: false; error: string };
+
+/** Step 1 of the external-upload flow: reserve a single-use upload URL.
+ * Form-encoded (these methods reject JSON bodies). */
+async function getUploadUrlExternal(
+  fetchFn: typeof fetch,
+  botToken: string,
+  filename: string,
+  length: number,
+): Promise<
+  { ok: true; uploadUrl: string; fileId: string } | { ok: false; error: string }
+> {
+  const response = await fetchFn(
+    "https://slack.com/api/files.getUploadURLExternal",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${botToken}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        filename,
+        length: String(length),
+      }).toString(),
+    },
+  );
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: `files.getUploadURLExternal HTTP ${response.status}`,
+    };
+  }
+  const result = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    upload_url?: string;
+    file_id?: string;
+  };
+  if (
+    result.ok === true &&
+    typeof result.upload_url === "string" &&
+    typeof result.file_id === "string"
+  ) {
+    return { ok: true, uploadUrl: result.upload_url, fileId: result.file_id };
+  }
+  return {
+    ok: false,
+    error: `files.getUploadURLExternal failed: ${result.error ?? "unknown"}`,
+  };
+}
+
+/** Step 3: finalize the upload and share the file into the thread. */
+async function completeUploadExternal(
+  fetchFn: typeof fetch,
+  botToken: string,
+  args: {
+    fileId: string;
+    title: string;
+    channel: string;
+    threadTs?: string | undefined;
+    initialComment?: string | undefined;
+  },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const body = new URLSearchParams({
+    files: JSON.stringify([{ id: args.fileId, title: args.title }]),
+    channel_id: args.channel,
+  });
+  if (args.threadTs !== undefined) body.set("thread_ts", args.threadTs);
+  if (args.initialComment !== undefined) {
+    body.set("initial_comment", args.initialComment);
+  }
+  const response = await fetchFn(
+    "https://slack.com/api/files.completeUploadExternal",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${botToken}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    },
+  );
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: `files.completeUploadExternal HTTP ${response.status}`,
+    };
+  }
+  const result = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+  };
+  if (result.ok === true) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    error: `files.completeUploadExternal failed: ${result.error ?? "unknown"}`,
+  };
+}
+
+/**
+ * Uploads a file into a Slack thread via the modern external-upload flow:
+ * reserve an upload URL (files.getUploadURLExternal) -> POST the raw bytes to
+ * it -> finalize and share (files.completeUploadExternal). Best-effort: the
+ * reserved URL is single-use, so a mid-flow failure isn't retried here —
+ * callers log and move on (an artifact failing to post must never crash a
+ * task). Returns the reason on failure.
+ */
+export async function uploadSlackFile(
+  args: {
+    botToken: string;
+    channel: string;
+    threadTs?: string | undefined;
+    filename: string;
+    bytes: Uint8Array<ArrayBuffer>;
+    title?: string | undefined;
+    initialComment?: string | undefined;
+  },
+  deps: SlackApiDeps = {},
+): Promise<SlackUploadResult> {
+  const fetchFn = deps.fetchFn ?? fetch;
+  try {
+    const reserved = await getUploadUrlExternal(
+      fetchFn,
+      args.botToken,
+      args.filename,
+      args.bytes.byteLength,
+    );
+    if (!reserved.ok) {
+      return reserved;
+    }
+    const put = await fetchFn(reserved.uploadUrl, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: args.bytes,
+    });
+    if (!put.ok) {
+      return { ok: false, error: `upload POST HTTP ${put.status}` };
+    }
+    const completed = await completeUploadExternal(fetchFn, args.botToken, {
+      fileId: reserved.fileId,
+      title: args.title ?? args.filename,
+      channel: args.channel,
+      threadTs: args.threadTs,
+      initialComment: args.initialComment,
+    });
+    if (!completed.ok) {
+      return completed;
+    }
+    return { ok: true, fileId: reserved.fileId };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}

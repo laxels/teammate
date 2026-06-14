@@ -6,7 +6,8 @@ import {
   query,
 } from "./_generated/server";
 import { devboxSecretOk } from "./commands";
-import { taskStatusValidator } from "./schema";
+import type { StoredFile } from "./files";
+import { taskFileValidator, taskStatusValidator } from "./schema";
 
 const MAX_LISTED_TASKS = 50;
 const MAX_TASK_EVENTS = 10;
@@ -96,6 +97,9 @@ export type NewTaskArgs = {
   slackThreadTs?: string;
   slackUser?: string;
   slackPermalink?: string;
+  /** Slack attachments staged in Convex storage (see schema.taskFileValidator).
+   * Resolved to URLs and handed to the devbox at start. */
+  files?: StoredFile[];
 };
 
 /** Plain-function form so other mutations (dashboard retry) can insert a
@@ -120,6 +124,9 @@ export async function insertTaskRow(
     ...(args.slackPermalink === undefined
       ? {}
       : { slackPermalink: args.slackPermalink }),
+    ...(args.files === undefined || args.files.length === 0
+      ? {}
+      : { files: args.files }),
     createdAt: now,
     updatedAt: now,
   });
@@ -138,6 +145,7 @@ export const create = internalMutation({
     slackThreadTs: v.optional(v.string()),
     slackUser: v.optional(v.string()),
     slackPermalink: v.optional(v.string()),
+    files: v.optional(v.array(taskFileValidator)),
   },
   handler: async (ctx, args) => {
     await insertTaskRow(ctx, args);

@@ -387,6 +387,10 @@ export const retryTask = mutation({
       ...(source.slackPermalink === undefined
         ? {}
         : { slackPermalink: source.slackPermalink }),
+      // Carry the original shared attachments: resolveDeliverableFiles drops
+      // any storage blob already pruned, so re-using the ids is safe (a
+      // same-day retry still gets them; later retries degrade to none).
+      ...(source.files === undefined ? {} : { files: source.files }),
     });
     const placement = await placeEphemeralTaskRow(ctx, retryTaskId);
     await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
