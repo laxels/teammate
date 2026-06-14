@@ -379,6 +379,20 @@ export function buildOrchestratorUserMessage(args: {
   return parts.join("\n\n");
 }
 
+// ---- Orchestrator reply gating ----
+
+/**
+ * Whether the model's final reply is its "stay silent" sentinel for
+ * channel-thread chatter not addressed to us. Matched as a PREFIX (after
+ * trimming), not by equality: the model intermittently appends trailing text
+ * after the sentinel — `"NO_REPLY\n\nWait — actually this is a DM…"` — and an
+ * equality check lets that through, posting the literal `NO_REPLY…` string into
+ * Slack. Any reply that opens with the sentinel means stay silent.
+ */
+export function isNoReplySignal(finalText: string): boolean {
+  return finalText.trim().startsWith("NO_REPLY");
+}
+
 // ---- Steer/stop authorization ----
 
 /**

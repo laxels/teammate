@@ -4,6 +4,7 @@ import {
   buildOrchestratorUserMessage,
   buildStatusCard,
   classifySlackEvent,
+  isNoReplySignal,
   monitoringUrl,
   parseDevboxEvent,
   parseSlackFiles,
@@ -911,5 +912,32 @@ describe("buildDevboxEventMessage", () => {
     });
     expect(msg).not.toContain("null");
     expect(msg).toContain("Fix login bug");
+  });
+});
+
+describe("isNoReplySignal", () => {
+  test("matches the bare sentinel, ignoring surrounding whitespace", () => {
+    expect(isNoReplySignal("NO_REPLY")).toBe(true);
+    expect(isNoReplySignal("  NO_REPLY\n")).toBe(true);
+  });
+
+  // The leak this guard exists for: the model intermittently emits the sentinel
+  // followed by second-guessing prose. An equality check would post that whole
+  // string into Slack; a prefix match keeps us silent.
+  test("matches the sentinel even with trailing text, so nothing is posted", () => {
+    expect(
+      isNoReplySignal(
+        "NO_REPLY\n\nWait — actually this is a DM, I should reply.",
+      ),
+    ).toBe(true);
+  });
+
+  test("does not suppress a genuine reply", () => {
+    expect(isNoReplySignal("On it — spinning up a devbox now.")).toBe(false);
+    expect(isNoReplySignal("")).toBe(false);
+    // The sentinel only counts at the start; merely mentioning it does not gag us.
+    expect(isNoReplySignal("I won't respond with NO_REPLY to that.")).toBe(
+      false,
+    );
   });
 });

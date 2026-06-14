@@ -15,6 +15,7 @@ import {
   type AttachmentInfo,
   buildOrchestratorUserMessage,
   classifySlackEvent,
+  isNoReplySignal,
   monitoringUrl,
   resolveThreadTarget,
   type SlackFileRef,
@@ -24,6 +25,7 @@ import {
   taskActionAuthorization,
 } from "../src/orchestration";
 import {
+  addSlackReaction,
   downloadSlackFile,
   getSlackPermalink,
   postSlackMessage,
@@ -37,6 +39,14 @@ import { resolveDeliverableFiles, type StoredFile } from "./files";
 // than downgrade.
 const MODEL = "claude-opus-4-8";
 const MAX_TOOL_ITERATIONS = 12;
+
+// Instant "I'm on it" acknowledgement, reacted onto the triggering message the
+// moment we confirm it's for us — visible feedback during the ~15s spawn wait,
+// before the LLM loop. Custom workspace emoji; left in place after the reply
+// posts (the reply itself is the completion signal). reactions.add returns
+// invalid_name if it's ever removed from the workspace — addSlackReaction
+// swallows that, so a missing emoji degrades to no ack, never an error.
+const ACK_REACTION = "blob_salute";
 
 const SYSTEM_PROMPT = `You are Ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
 
@@ -614,6 +624,26 @@ export const processSlackEvent = internalAction({
       return; // already claimed above; nothing to do or say
     }
 
+    // Drop a :blob_salute: ack on the triggering message before the multi-second
+    // LLM loop — instant "I'm on it" feedback during the ~15s spawn wait.
+    // Gated to message classes that can't legitimately resolve to NO_REPLY:
+    // DMs and @mentions are always addressed to us, but an un-mentioned
+    // channel-thread reply (channelThreadReply) passed the bystander check only
+    // because it anchors a task — it may still be people talking to each other
+    // in that thread, which the model answers with NO_REPLY. Pre-acking those
+    // would react to bystander NO_REPLY chatter, so we skip them and let the
+    // ~15s ack value land where it bites: DMs/mentions starting new work. (#85)
+    // Best-effort: addSlackReaction never throws, and we await so the ack lands
+    // ahead of any reply.
+    if (!trigger.channelThreadReply) {
+      await addSlackReaction({
+        botToken,
+        channel: trigger.channel,
+        messageTs: trigger.ts,
+        name: ACK_REACTION,
+      });
+    }
+
     // Download + stage any shared files before the tool loop: images go to the
     // orchestrator's own model inline, all files are handed to whatever task it
     // starts or steers in response. The attachment manifest reflects the actual
@@ -645,6 +675,15 @@ export const processSlackEvent = internalAction({
           max_tokens: 16000,
           thinking: { type: "adaptive" },
           output_config: { effort: "xhigh" },
+          // Automatic prompt caching: marks the stable tools+system prefix as
+          // cacheable so the loop's later iterations read what the first wrote.
+          // A NO-OP TODAY ON PURPOSE — the prefix (~1.8K tok) is below Opus
+          // 4.8's 4096-token cache floor, so nothing caches and no metric
+          // moves. It only starts paying off if a request's stable prefix ever
+          // crosses 4096 tok (large <thread_context> + staged images, or a
+          // grown system prompt). One line, zero correctness risk; kept for
+          // that free future win — do not remove as "useless." (#85)
+          cache_control: { type: "ephemeral" },
           system: SYSTEM_PROMPT,
           tools: TOOLS,
           messages,
@@ -681,8 +720,11 @@ export const processSlackEvent = internalAction({
           "I hit my orchestration step limit before finishing — please check `list_tasks` state with me again.";
       }
       // The model's explicit "stay silent" signal for thread chatter that
-      // isn't addressed to us.
-      if (finalText.trim() === "NO_REPLY") {
+      // isn't addressed to us. Matched as a prefix, not by equality: the model
+      // intermittently appends trailing text ("NO_REPLY\n\nWait — actually…"),
+      // which an equality check would leak verbatim into Slack (see
+      // isNoReplySignal).
+      if (isNoReplySignal(finalText)) {
         return;
       }
     } catch (error) {
