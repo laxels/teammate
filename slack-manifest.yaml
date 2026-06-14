@@ -1,4 +1,4 @@
-# Slack app manifest for ultraclaude.
+# Slack app manifest for Ultraclaude.
 # Create at https://api.slack.com/apps → "Create New App" → "From a manifest"
 # → pick your workspace → paste this YAML → Create.
 #
@@ -10,7 +10,7 @@
 #      App Manifest page → "Verify" the events request URL (the endpoint
 #      answers Slack's url_verification challenge).
 display_information:
-  name: ultraclaude
+  name: Ultraclaude
   description: Virtual teammate — delegates tasks to Claude Code devboxes
   background_color: "#5c3b58"
 features:
@@ -20,12 +20,12 @@ features:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: ultraclaude
+    display_name: Ultraclaude
     always_online: true
 oauth_config:
   scopes:
     bot:
-      - app_mentions:read # receive @ultraclaude mentions in channels
+      - app_mentions:read # receive @Ultraclaude mentions in channels
       - chat:write # post messages and thread replies
       - chat:write.public # post status updates to public channels without invite
       - im:history # receive and read DMs sent to the bot

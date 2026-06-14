@@ -191,7 +191,7 @@ export default defineSchema({
 
   // Fleet-level lifecycle events (host provisioning progress, failures),
   // posted by host agents. The orchestrator's get_fleet tool surfaces the
-  // recent tail so ultraclaude can monitor and debug scale-ups.
+  // recent tail so Ultraclaude can monitor and debug scale-ups.
   hostEvents: defineTable({
     hostId: v.string(),
     type: v.string(),

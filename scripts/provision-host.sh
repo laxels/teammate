@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Provision a brand-new Scaleway Apple Silicon (M2-L) Mac host end to end and
-# adopt it as an ultraclaude VM host:
+# adopt it as an Ultraclaude VM host:
 #   1. create the server via the Scaleway API (zone fr-par-1), wait until ready
 #   2. bootstrap macOS over ssh: passwordless sudo, Homebrew, tailscale (joins
 #      the tailnet as <host-name>), sshpass, tart 2.32.1, auto-login for m1

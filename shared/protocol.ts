@@ -1,4 +1,4 @@
-// Wire contracts between the three ultraclaude components:
+// Wire contracts between the three Ultraclaude components:
 // monitoring page (web/) <-> devbox gateway (gateway/) <-> orchestrator (convex/).
 //
 // The gateway runs INSIDE each devbox VM and is reachable only over the

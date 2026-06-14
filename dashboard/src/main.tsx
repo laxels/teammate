@@ -49,7 +49,7 @@ const config = await loadConfig();
 if (config === null) {
   root.render(
     <div className="boot-error">
-      <h1>ultraclaude fleet</h1>
+      <h1>Ultraclaude fleet</h1>
       <p>
         No configuration. Serve a <code>config.json</code> next to this page (
         <code>{"{ convexUrl, secret }"}</code>) — see
