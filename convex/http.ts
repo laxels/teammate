@@ -214,6 +214,85 @@ http.route({
   }),
 });
 
+// Gateway -> orchestrator screen-recording upload URL (see shared/protocol.ts):
+// returns a short-lived Convex storage upload URL the gateway POSTs the
+// recording bytes to. The generateUploadUrl flow keeps the (multi-MB) .mov off
+// the size-capped HTTP-action path used by /devbox/artifact.
+http.route({
+  path: "/devbox/recording/upload-url",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const url = await ctx.storage.generateUploadUrl();
+    return Response.json({ url });
+  }),
+});
+
+// Gateway -> orchestrator screen-recording lifecycle (see shared/protocol.ts):
+// JSON { taskId, devboxId, status, storageId?, bytes? } records a recording
+// transition on the task row. storageId is required for status "available"
+// (the storageId returned by the upload-URL POST above).
+http.route({
+  path: "/devbox/recording",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.DEVBOX_SHARED_SECRET;
+    const provided = request.headers.get("x-devbox-secret");
+    if (
+      secret === undefined ||
+      provided === null ||
+      !timingSafeEqual(provided, secret)
+    ) {
+      return new Response("unauthorized", { status: 401 });
+    }
+
+    let payload: {
+      taskId?: unknown;
+      status?: unknown;
+      storageId?: unknown;
+      bytes?: unknown;
+    };
+    try {
+      payload = JSON.parse(await request.text()) as typeof payload;
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    const { taskId, status } = payload;
+    if (
+      typeof taskId !== "string" ||
+      (status !== "recording" &&
+        status !== "uploading" &&
+        status !== "available" &&
+        status !== "failed")
+    ) {
+      return new Response("expected { taskId, status }", { status: 400 });
+    }
+    if (status === "available" && typeof payload.storageId !== "string") {
+      return new Response("status 'available' requires storageId", {
+        status: 400,
+      });
+    }
+
+    await ctx.runMutation(internal.recordings.setStatus, {
+      taskId,
+      status,
+      ...(typeof payload.storageId === "string"
+        ? { storageId: payload.storageId as Id<"_storage"> }
+        : {}),
+      ...(typeof payload.bytes === "number" ? { bytes: payload.bytes } : {}),
+    });
+    return new Response(null, { status: 200 });
+  }),
+});
+
 // Orchestrator -> gateway inbound-file serve (see shared/protocol.ts): the
 // gateway GETs a staged Slack attachment by storageId, authenticated with the
 // shared secret. Serving the bytes through this secret-gated endpoint (instead

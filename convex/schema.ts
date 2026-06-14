@@ -1,6 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { type Infer, v } from "convex/values";
-import type { TaskStatus } from "../shared/protocol";
+import type { RecordingStatus, TaskStatus } from "../shared/protocol";
 
 export const taskStatusValidator = v.union(
   v.literal("queued"),
@@ -29,6 +29,36 @@ export const taskFileValidator = v.object({
   mimeType: v.string(),
   size: v.number(),
   storageId: v.id("_storage"),
+});
+
+export const recordingStatusValidator = v.union(
+  v.literal("recording"),
+  v.literal("uploading"),
+  v.literal("available"),
+  v.literal("failed"),
+);
+
+// Compile-time check: the validator stays in lockstep with the wire contract.
+type _RecordingStatusMatchesProtocol = [
+  Infer<typeof recordingStatusValidator>,
+  RecordingStatus,
+] extends [RecordingStatus, Infer<typeof recordingStatusValidator>]
+  ? true
+  : never;
+const _recordingStatusMatchesProtocol: _RecordingStatusMatchesProtocol = true;
+void _recordingStatusMatchesProtocol;
+
+/** The devbox screen recording for a task (see gateway/src/recorder.ts and
+ * shared/protocol.ts RecordingStatus). The gateway records with `screencapture`
+ * while the task runs and uploads the .mov to Convex storage at the end; the
+ * status + storageId ride the task row so both the live board and the
+ * task-details page can show the right state. storageId is set only once
+ * status reaches "available". */
+export const taskRecordingValidator = v.object({
+  status: recordingStatusValidator,
+  storageId: v.optional(v.id("_storage")),
+  bytes: v.optional(v.number()),
+  uploadedAt: v.optional(v.number()),
 });
 
 export default defineSchema({
@@ -85,6 +115,9 @@ export default defineSchema({
     // permanent path); the devbox fetches the bytes from the secret-gated
     // /devbox/file endpoint, never a public storage URL.
     files: v.optional(v.array(taskFileValidator)),
+    // Devbox screen recording lifecycle + stored .mov (see recordings.ts and
+    // gateway/src/recorder.ts). Absent on tasks that predate the feature.
+    recording: v.optional(taskRecordingValidator),
   })
     .index("by_task_id", ["taskId"])
     .index("by_status", ["status"])

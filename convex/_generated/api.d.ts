@@ -20,6 +20,7 @@ import type * as hosts from "../hosts.js";
 import type * as http from "../http.js";
 import type * as notify from "../notify.js";
 import type * as orchestrator from "../orchestrator.js";
+import type * as recordings from "../recordings.js";
 import type * as slack from "../slack.js";
 import type * as staleness from "../staleness.js";
 import type * as tasks from "../tasks.js";
@@ -44,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   notify: typeof notify;
   orchestrator: typeof orchestrator;
+  recordings: typeof recordings;
   slack: typeof slack;
   staleness: typeof staleness;
   tasks: typeof tasks;

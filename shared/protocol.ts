@@ -182,6 +182,43 @@ export const MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES = 20 * 1024 * 1024;
 // external-upload flow, then deletes the storage blob (outbound artifacts are
 // transient). The devbox's `share_file` MCP tool drives this.
 
+// ---- Devbox screen recording (see gateway/src/recorder.ts) ----
+// The gateway records the devbox screen with macOS `screencapture -v` for the
+// duration of each task (cursor + clicks included), then uploads the .mov to
+// Convex file storage so it outlives the ephemeral VM. The four lifecycle
+// states ride on the task row's `recording` field:
+//   recording  — capture in progress (task still running)
+//   uploading  — task ended; finalizing + pushing the file to storage
+//   available  — stored and playable (storageId set; dashboard resolves a URL)
+//   failed     — capture never produced a valid file, or the upload failed
+// A task with no `recording` field at all predates the feature → "unavailable".
+//
+// Upload is the Convex generateUploadUrl flow (NOT an HTTP-action multipart
+// POST like /devbox/artifact): a recording easily exceeds the ~20 MB HTTP
+// request cap (~13 MB/min). The whole finalize+upload must land inside the
+// EPHEMERAL_RETIRE_GRACE_MS window before the VM is reclaimed; a recording too
+// large to push in a single (non-resumable) upload POST is simply lost (the
+// state goes "failed" → the dashboard shows "unavailable"). Acceptable for MVP.
+export type RecordingStatus =
+  | "recording"
+  | "uploading"
+  | "available"
+  | "failed";
+
+// Recordings are .mov (QuickTime container, H.264) — what `screencapture -v`
+// emits, which plays natively in browsers without transcoding.
+export const RECORDING_CONTENT_TYPE = "video/quicktime";
+
+// ---- Devbox -> orchestrator: POST {CONVEX_SITE_URL}/devbox/recording/upload-url ----
+// Auth: `x-devbox-secret`. Returns { url } — a short-lived Convex storage
+// upload URL the gateway POSTs the recording bytes to (which yields a
+// storageId), keeping the large file off the size-capped HTTP-action path.
+//
+// ---- Devbox -> orchestrator: POST {CONVEX_SITE_URL}/devbox/recording ----
+// Auth: `x-devbox-secret`. JSON body { taskId, devboxId, status, storageId?,
+// bytes? } records a recording lifecycle transition on the task row. storageId
+// is required for (and only for) status "available".
+
 export type DevboxEventType =
   | "started"
   | "progress"

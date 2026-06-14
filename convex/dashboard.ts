@@ -161,9 +161,27 @@ export const taskDetail = query({
       .query("transcripts")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
       .unique();
+    // Resolve the recording's storageId to a playable URL here (the dashboard
+    // never sees a raw storageId). getUrl is null for a missing/pruned blob, so
+    // an "available" recording whose blob vanished safely degrades to a
+    // placeholder rather than a broken player. Absent `recording` => the task
+    // predates the feature (the page shows "no recording available").
+    const recording =
+      task.recording === undefined
+        ? null
+        : {
+            status: task.recording.status,
+            url:
+              task.recording.storageId === undefined
+                ? null
+                : await ctx.storage.getUrl(task.recording.storageId),
+            bytes: task.recording.bytes ?? null,
+            uploadedAt: task.recording.uploadedAt ?? null,
+          };
     return {
       task: { ...publicTask(task), prompt: task.prompt },
       hasTranscript: transcriptRow !== null,
+      recording,
       events: events.reverse().map((e) => ({
         type: e.type,
         summary: e.summary,
