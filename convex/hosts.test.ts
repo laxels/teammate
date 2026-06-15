@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { convexTest } from "convex-test";
+import type { TaskEffort } from "../shared/protocol";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
@@ -212,7 +213,7 @@ function allHostCommands(t: Tester) {
 async function seedQueuedTask(
   t: Tester,
   taskId: string,
-  effort?: "low" | "medium" | "high" | "xhigh" | "max",
+  effort?: TaskEffort,
 ): Promise<void> {
   await t.run(async (ctx) => {
     const now = Date.now();
