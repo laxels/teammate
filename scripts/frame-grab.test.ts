@@ -5,6 +5,7 @@ import {
   ffmpegFrameArgs,
   grabFrame,
   parseFrameGrabRequest,
+  type RecordingDownload,
   timingSafeEqual,
 } from "./frame-grab";
 
@@ -47,17 +48,20 @@ describe("timingSafeEqual", () => {
 
 describe("ffmpegFrameArgs", () => {
   test("input-seeks to the timestamp and writes one PNG to stdout", () => {
-    const args = ffmpegFrameArgs("https://blob/x.mov", 12.5);
-    // -ss must precede -i (input seek -> HTTP range, no full download).
+    const args = ffmpegFrameArgs("/tmp/rec.mov", 12.5);
+    // -ss must precede -i (input seek via the local moov index).
     expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
     expect(args).toContain("12.5");
-    expect(args).toContain("https://blob/x.mov");
+    // Seeks the LOCAL temp file, not the URL (#102).
+    expect(args).toContain("/tmp/rec.mov");
     expect(args.slice(-1)).toEqual(["pipe:1"]);
     expect(args).toContain("png");
   });
 });
 
-/** A scripted fetch over the three Convex hops the pipeline makes. */
+/** A scripted fetch over the Convex hops the pipeline makes via fetchFn:
+ * resolve the recording URL, get an upload URL, upload the PNG. (The recording
+ * download itself goes through the separate `downloadRecording` dep.) */
 function makeFetch(
   handlers: Partial<{
     recordingUrl: () => Response;
@@ -90,47 +94,156 @@ function makeFetch(
   };
 }
 
+/** Stubs the download + cleanup deps and records their calls so tests can
+ * assert which URL was downloaded and that the temp file is always removed. */
+function makeDownloadDeps(
+  outcome: RecordingDownload = { ok: true, path: "/tmp/frame-0.mov", bytes: 3 },
+) {
+  const log = { downloaded: [] as string[], removed: [] as string[] };
+  return {
+    log,
+    downloadRecording: async (url: string) => {
+      log.downloaded.push(url);
+      return outcome;
+    },
+    removeFile: async (path: string) => {
+      log.removed.push(path);
+    },
+  };
+}
+
 describe("grabFrame pipeline", () => {
   const req = { taskId: "task-1", videoTimeSec: 3 };
 
-  test("resolve -> ffmpeg -> upload -> storageId (happy path)", async () => {
+  test("resolve -> download -> ffmpeg -> upload -> storageId (happy path)", async () => {
     const log = { urls: [] as string[] };
     const fetchFn = makeFetch({}, log);
-    const runFfmpeg = async () => new Uint8Array([1, 2, 3, 4]);
-    const result = await grabFrame(CONFIG, req, { fetchFn, runFfmpeg });
+    const dl = makeDownloadDeps();
+    const ffmpegInput: string[] = [];
+    const runFfmpeg = async (args: string[]) => {
+      ffmpegInput.push(args[args.indexOf("-i") + 1] ?? "");
+      return new Uint8Array([1, 2, 3, 4]);
+    };
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn,
+      runFfmpeg,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
     expect(result).toEqual({ ok: true, storageId: "stor-1" });
     // The recording-url hop is keyed by taskId, secret-gated.
     expect(log.urls[0]).toContain("/devbox/recording-url?taskId=task-1");
+    // The resolved signed URL was downloaded, ffmpeg seeked the LOCAL temp file
+    // (not the URL), then the temp file was removed.
+    expect(dl.log.downloaded).toEqual(["https://blob/rec.mov"]);
+    expect(ffmpegInput).toEqual(["/tmp/frame-0.mov"]);
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 
   test("404 when the recording isn't available (null url)", async () => {
+    const dl = makeDownloadDeps();
     const fetchFn = makeFetch({
       recordingUrl: () => Response.json({ url: null }),
     });
     const result = await grabFrame(CONFIG, req, {
       fetchFn,
       runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
+    expect(result).toMatchObject({ ok: false, status: 404 });
+    // Never got far enough to download.
+    expect(dl.log.downloaded).toEqual([]);
+  });
+
+  test("502 when the recording download fails", async () => {
+    const dl = makeDownloadDeps({ ok: false, reason: "fetch-failed" });
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 502,
+      reason: "recording fetch failed",
+    });
+    // The downloader owns cleanup of its own partial file — nothing to remove.
+    expect(dl.log.removed).toEqual([]);
+  });
+
+  test("502 when the recording is too large", async () => {
+    const dl = makeDownloadDeps({ ok: false, reason: "too-large" });
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 502,
+      reason: "recording too large",
+    });
+  });
+
+  test("404 when the downloaded recording is empty", async () => {
+    const dl = makeDownloadDeps({ ok: false, reason: "empty" });
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 404 });
   });
 
-  test("500 when ffmpeg throws", async () => {
-    const fetchFn = makeFetch({});
+  test("500 when ffmpeg throws — and the temp file is still removed", async () => {
+    const dl = makeDownloadDeps();
     const runFfmpeg = async () => {
       throw new Error("ffmpeg boom");
     };
-    const result = await grabFrame(CONFIG, req, { fetchFn, runFfmpeg });
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
     expect(result).toMatchObject({ ok: false, status: 500 });
+    // The grab failed, but we must not leak the downloaded .mov.
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
+  });
+
+  test("500 on an empty frame — and the temp file is still removed", async () => {
+    const dl = makeDownloadDeps();
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg: async () => new Uint8Array([]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 500,
+      reason: "empty frame",
+    });
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 
   test("502 when the PNG upload fails", async () => {
+    const dl = makeDownloadDeps();
     const fetchFn = makeFetch({
       upload: () => new Response("nope", { status: 500 }),
     });
     const result = await grabFrame(CONFIG, req, {
       fetchFn,
       runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 502 });
+    // ffmpeg ran, so the temp file must have been cleaned up.
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 });
