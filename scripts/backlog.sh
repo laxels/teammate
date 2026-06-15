@@ -7,7 +7,9 @@
 # Usage: scripts/backlog.sh list
 #          Open issues in priority order (P0 first; project rank within a
 #          tier). Open issues not yet in the project show as UNTRACKED.
-#        scripts/backlog.sh set <issue#> <P0|P1|P2>
+#          Graveyard (parked — kept visible, not closed) sorts dead last,
+#          below the untriaged rows so triage gaps stay surfaced.
+#        scripts/backlog.sh set <issue#> <P0|P1|P2|Graveyard>
 #          Set an issue's priority, adding it to the project if needed.
 #
 # Requires: gh (token with the `project` scope), jq.
@@ -27,7 +29,8 @@ option_id() {
     P0) echo da1146d2 ;;
     P1) echo 5bb99df4 ;;
     P2) echo 57a11fd7 ;;
-    *) echo "priority must be P0, P1, or P2" >&2; exit 1 ;;
+    Graveyard) echo d1335398 ;;
+    *) echo "priority must be P0, P1, P2, or Graveyard" >&2; exit 1 ;;
   esac
 }
 
@@ -47,7 +50,7 @@ cmd_list() {
       | from_entries) as $by_number
     | $issues
     | map(. + ($by_number[.number | tostring] // {priority: "UNTRACKED", rank: 0}))
-    | sort_by([({P0: 0, P1: 1, P2: 2, "(none)": 3, UNTRACKED: 4}[.priority]), .rank])
+    | sort_by([({P0: 0, P1: 1, P2: 2, "(none)": 3, UNTRACKED: 4, Graveyard: 5}[.priority]), .rank])
     | .[] | [.priority, "#\(.number)", .title] | @tsv'
 }
 
@@ -69,13 +72,13 @@ case "${1:-}" in
   list) cmd_list ;;
   set)
     if [[ $# -ne 3 ]]; then
-      echo "Usage: $0 set <issue#> <P0|P1|P2>" >&2
+      echo "Usage: $0 set <issue#> <P0|P1|P2|Graveyard>" >&2
       exit 1
     fi
     cmd_set "$2" "$3"
     ;;
   *)
-    echo "Usage: $0 list | $0 set <issue#> <P0|P1|P2>" >&2
+    echo "Usage: $0 list | $0 set <issue#> <P0|P1|P2|Graveyard>" >&2
     exit 1
     ;;
 esac
