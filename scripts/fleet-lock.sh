@@ -21,10 +21,16 @@
 #   scripts/fleet-lock.sh release [holder]      # release if we own it
 #   scripts/fleet-lock.sh renew-loop [holder]   # renew forever (background it)
 #   scripts/fleet-lock.sh with <command> [args] # acquire → renew → run → release
+#   scripts/fleet-lock.sh guard <command> [args]# (lock already held) renew → run,
+#                                               #   aborting the command if the
+#                                               #   lease is lost; no acquire/release
 #
 # The `with` form is what provision-host.sh / adopt-host.sh re-exec through; it
 # also guards against running from a linked worktree (divergent code must not
-# reach live systems — same rule as singleton-lock.sh).
+# reach live systems — same rule as singleton-lock.sh). The `guard` form is for
+# the GitHub Actions matrix: the run's `lock` job already holds the lock, so each
+# parallel job only renews + aborts-on-loss while it provisions, and a single
+# `release` job frees it at the end.
 #
 # Env:
 #   CONVEX_SITE_URL        deployment .convex.site URL (default: prod)
@@ -160,6 +166,25 @@ renew_loop() {
   done
 }
 
+# Background lease-keeper shared by `with` and `guard`: renew immediately, then
+# every RENEW_SECS, and KILL the given child pid the moment the lease is lost
+# (stolen / expired-and-reclaimed) — continuing to mutate the fleet without the
+# lock would break fleet-wide mutual exclusion. Returns when the lease is lost
+# or the child has exited. Run it backgrounded.
+abort_on_lost_lease() {
+  local child="$1" rc
+  while true; do
+    renew_once && rc=0 || rc=$?
+    if (( rc == 2 )); then
+      echo "ERROR: fleet lease lost; aborting the in-flight op." >&2
+      kill "$child" 2>/dev/null || true
+      return 0
+    fi
+    kill -0 "$child" 2>/dev/null || return 0
+    sleep "$RENEW_SECS"
+  done
+}
+
 # Refuse to drive live fleet ops from a linked worktree (same guard as
 # singleton-lock.sh): a worktree's code may diverge from what the fleet runs.
 # A clean clone (GitHub Actions) or the primary checkout passes; outside a git
@@ -190,6 +215,8 @@ case "$cmd" in
   release) [[ -n "${1:-}" ]] && HOLDER="$1"; release_once ;;
   renew-loop) [[ -n "${1:-}" ]] && HOLDER="$1"; renew_loop ;;
   with)
+    # Full shepherd: acquire the lock, run the command while renewing, release
+    # on exit. Aborts the command if the lease is ever lost mid-op.
     if (( $# < 1 )); then
       echo "Usage: $0 with <command> [args...]" >&2
       exit 1
@@ -201,19 +228,7 @@ case "$cmd" in
     # body directly instead of acquiring again.
     FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" "$@" &
     CHILD=$!
-    # Background renewer that ABORTS the op if the lease is ever lost — running
-    # on without the lock would break fleet-wide mutual exclusion.
-    (
-      while kill -0 "$CHILD" 2>/dev/null; do
-        sleep "$RENEW_SECS"
-        renew_once && continue || rc=$?
-        if (( ${rc:-0} == 2 )); then
-          echo "ERROR: fleet lock lost mid-op; aborting." >&2
-          kill "$CHILD" 2>/dev/null || true
-          break
-        fi
-      done
-    ) &
+    abort_on_lost_lease "$CHILD" &
     RENEWER=$!
     # Always stop renewing, kill a still-running child, and release on exit.
     trap 'kill "$RENEWER" "$CHILD" 2>/dev/null || true; release_once' EXIT
@@ -223,8 +238,30 @@ case "$cmd" in
     set -e
     exit "$code"
     ;;
+  guard)
+    # Like `with`, but the lock is ALREADY held by this holder (e.g. the GH
+    # Actions `lock` job holds it for the whole run). Renew it and ABORT the
+    # command if the lease is lost — but never acquire or release (the run-level
+    # lock/release jobs own that). This is what each parallel matrix job wraps
+    # provision-host.sh in: a lost lease kills the provision instead of letting
+    # it keep mutating the fleet unlocked.
+    if (( $# < 1 )); then
+      echo "Usage: $0 guard <command> [args...]" >&2
+      exit 1
+    fi
+    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" "$@" &
+    CHILD=$!
+    abort_on_lost_lease "$CHILD" &
+    RENEWER=$!
+    trap 'kill "$RENEWER" "$CHILD" 2>/dev/null || true' EXIT
+    set +e
+    wait "$CHILD"
+    code=$?
+    set -e
+    exit "$code"
+    ;;
   *)
-    echo "Usage: $0 {acquire|renew|release|renew-loop|with <command...>} [holder]" >&2
+    echo "Usage: $0 {acquire|renew|release|renew-loop|with <command...>|guard <command...>} [holder]" >&2
     exit 1
     ;;
 esac

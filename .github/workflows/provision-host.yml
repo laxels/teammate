@@ -117,15 +117,14 @@ jobs:
           TAILSCALE_EPHEMERAL_AUTHKEY: ${{ secrets.TAILSCALE_EPHEMERAL_AUTHKEY }}
           DEVBOX_SHARED_SECRET: ${{ secrets.DEVBOX_SHARED_SECRET }}
           # The run already holds the fleet lock — don't re-acquire it (that
-          # would serialize the matrix). Just keep its lease renewed while we
-          # work; the renewer dies with the step's shell at job end. Same 90-min
-          # lease as the lock job so renewals don't shrink the ceiling.
-          FLEET_LOCK_HELD: "1"
+          # would serialize the matrix). `guard` keeps the run's lease renewed
+          # while provisioning AND aborts provision-host.sh if the lease is ever
+          # lost (stolen / expired), so a matrix job never keeps mutating the
+          # fleet unlocked. It does NOT release — the run-level `release` job
+          # owns that. Same 90-min lease as the lock job (no shrinking ceiling).
           FLEET_LOCK_HOLDER: gh:${{ github.run_id }}
           FLEET_LOCK_TTL_MS: "5400000"
-        run: |
-          nohup scripts/fleet-lock.sh renew-loop >/tmp/fleet-renew.log 2>&1 &
-          scripts/provision-host.sh "${{ matrix.host }}"
+        run: scripts/fleet-lock.sh guard scripts/provision-host.sh "${{ matrix.host }}"
 
   # Release the lock once, however the run ended (success, failure, or skip).
   release:
