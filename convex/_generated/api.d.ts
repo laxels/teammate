@@ -16,6 +16,7 @@ import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as devboxes from "../devboxes.js";
 import type * as files from "../files.js";
+import type * as fleetLock from "../fleetLock.js";
 import type * as hosts from "../hosts.js";
 import type * as http from "../http.js";
 import type * as notify from "../notify.js";
@@ -41,6 +42,7 @@ declare const fullApi: ApiFromModules<{
   dashboard: typeof dashboard;
   devboxes: typeof devboxes;
   files: typeof files;
+  fleetLock: typeof fleetLock;
   hosts: typeof hosts;
   http: typeof http;
   notify: typeof notify;

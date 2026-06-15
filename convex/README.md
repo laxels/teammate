@@ -11,7 +11,7 @@ events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 | `SLACK_SIGNING_SECRET` | `http.ts` | Verifies `/slack/events` request signatures |
 | `SLACK_BOT_TOKEN` | `orchestrator.ts`, `notify.ts`, `staleness.ts`, `artifacts.ts` | `chat.postMessage` replies, status updates, and outbound file uploads |
 | `ANTHROPIC_API_KEY` | `orchestrator.ts` | Opus 4.8 tool loop (`claude-opus-4-8`, effort `xhigh`, no fallbacks) |
-| `DEVBOX_SHARED_SECRET` | `http.ts`, `commands.ts`, `hosts.ts` | Shared secret for all gateway/host traffic — sent as the `x-devbox-secret` header on the `/devbox/*` HTTP endpoints (`http.ts`), and as a `secret` argument on the Convex functions gateways/host agents call directly (`commands.ts`, `hosts.ts`; they're Convex clients, so there are no request headers) |
+| `DEVBOX_SHARED_SECRET` | `http.ts`, `commands.ts`, `hosts.ts`, `fleetLock.ts` | Shared secret for all gateway/host/provisioner traffic — sent as the `x-devbox-secret` header on the `/devbox/*` and `/fleet/*` HTTP endpoints (`http.ts`), and as a `secret` argument on the Convex functions gateways/host agents call directly (`commands.ts`, `hosts.ts`; they're Convex clients, so there are no request headers) |
 | `DASHBOARD_SECRET` | `dashboard.ts` | Gates the public dashboard query/mutation functions |
 | `TAILNET_SUFFIX` | `hosts.ts` | Derives an ephemeral devbox's gateway URL; required once a host is available (otherwise placement throws) |
 
@@ -20,9 +20,9 @@ local `.env` at runtime.
 
 ## HTTP endpoints (convex.site)
 
-Every `/devbox/*` endpoint is authenticated by the shared secret (401 unless
-`x-devbox-secret` matches `DEVBOX_SHARED_SECRET`); `/slack/events` is verified by
-the Slack signature instead.
+Every `/devbox/*` and `/fleet/*` endpoint is authenticated by the shared secret
+(401 unless `x-devbox-secret` matches `DEVBOX_SHARED_SECRET`); `/slack/events` is
+verified by the Slack signature instead.
 
 - `POST /slack/events` — Slack Events API (url_verification + event_callback,
   deduped into `slackEvents`, processed async by `orchestrator.processSlackEvent`).
@@ -34,6 +34,15 @@ the Slack signature instead.
   storage, posted into the task's Slack thread, then the blob is deleted.
 - `GET /devbox/file` — serves a staged inbound Slack attachment to the gateway by
   `storageId` (secret-gated instead of a public storage URL).
+- `POST /fleet/lock/{acquire,renew,release}` — the authoritative cross-origin
+  fleet lock (`fleetLock.ts`), so a Linux GitHub Actions runner / laptop can
+  serialize fleet provisioning with just curl + the secret (no Convex client).
+- `GET /fleet/status` — fleet snapshot (`hosts.fleetSnapshot`) for the
+  provisioner's smoke test ("is this host active + recently seen?").
+- `POST /fleet/event` — fleet lifecycle event (`{ hostId, type, summary }`) from
+  the GH Actions provisioner / a laptop run into `hostEvents` (get_fleet shows
+  them); a `provision_failed` event also drops a stale pre-created `provisioning`
+  row.
 
 ## Devbox placement
 
@@ -42,11 +51,18 @@ to register. When a task starts, `hosts.allocateEphemeral` provisions a VM on an
 available Mac host (`provisioning` → `busy` → `retiring` → row deleted by
 `hosts.removeDevbox`) and derives its gateway URL from `TAILNET_SUFFIX`.
 Ephemeral devboxes never enter the warm pool — no task reuses a previous task's
-VM. When all host VM slots are full, the task queues; if a live host holds fleet
-credentials it bootstraps a new Mac host automatically (~20–45 min). With no such
-provisioner host, `requestHostProvisionRow` returns `no_provisioner` and the task
-just waits for a slot to free (the orchestrator tells the user auto-scaling is
-unavailable).
+VM. When all host VM slots are full, the task simply **queues** and drains the
+moment a slot frees (`hosts.placeQueuedEphemeralTasks`, scheduled on every
+`removeDevbox` and host `heartbeat`).
+
+The fleet is a **standing warm set**: on-demand autoscale on task spillover is
+gated off (#87), so an unplaceable task never blocks on a ~30–45 min bootstrap.
+New Mac hosts are provisioned out-of-band by the GitHub Actions provisioner
+([provision-host.yml](../.github/workflows/provision-host.yml)), serialized by
+the Convex fleet lock (`fleetLock.ts`). The Convex decision/serialization
+machinery (`hosts.requestHostProvision`, `inflightProvision`, `pickProvisioner`)
+is kept for the proactive capacity monitor in #88, which will grow the fleet
+ahead of demand and fire the provisioner via `repository_dispatch`.
 
 The permanent devbox `devbox-1` is the one exception: it is registered manually
 and cycles `warm` ↔ `busy` so it can carry state across tasks (used only when a

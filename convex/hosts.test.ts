@@ -197,46 +197,23 @@ test("provisionVmFailed never regresses a task that already reached terminal", a
   expect((await getTask(t, "task-1"))?.status).toBe("stopped");
 });
 
-test("a provisioner restart mid-bootstrap frees the orphaned lock and a fresh bootstrap starts", async () => {
-  const t = newT();
-  // Recent enough that the orphan still counts as "in-flight" by the 90-min
-  // stale window — i.e. without reconciliation it would hold the lock.
-  const orphanRequestedAt = Date.now() - 60_000;
+function provisioningHosts(t: Tester) {
+  return t.run(async (ctx) =>
+    (await ctx.db.query("hosts").collect()).filter(
+      (h) => h.status === "provisioning",
+    ),
+  );
+}
+
+function allHostCommands(t: Tester) {
+  return t.run(async (ctx) => ctx.db.query("hostCommands").collect());
+}
+
+async function seedQueuedTask(t: Tester, taskId: string): Promise<void> {
   await t.run(async (ctx) => {
     const now = Date.now();
-    // The provisioner host, at its EULA cap of 2 VMs (so it can't place VMs but
-    // still holds fleet credentials and bootstraps new hosts).
-    await ctx.db.insert("hosts", {
-      hostId: "host-1",
-      maxVms: 2,
-      status: "active",
-      lastSeenAt: now,
-      canProvisionHosts: true,
-    });
-    for (const n of [1, 2]) {
-      await ctx.db.insert("devboxes", {
-        devboxId: `devbox-${n}`,
-        gatewayUrl: `http://devbox-${n}.ts.example.com:8787`,
-        status: "busy",
-        taskId: `busy-${n}`,
-        hostId: "host-1",
-        ephemeral: true,
-        lastSeenAt: now,
-      });
-    }
-    // The bootstrap host-1 kicked off, now orphaned by host-1's restart: a
-    // "provisioning" row with no live bootstrap behind it.
-    await ctx.db.insert("hosts", {
-      hostId: "ultraclaude-host-2",
-      maxVms: 2,
-      status: "provisioning",
-      lastSeenAt: orphanRequestedAt,
-      provisionRequestedAt: orphanRequestedAt,
-      provisionedBy: "host-1",
-    });
-    // A task stuck waiting on the stalled scale-up.
     await ctx.db.insert("tasks", {
-      taskId: "task-q",
+      taskId,
       title: "Queued task",
       prompt: "do the thing",
       status: "queued",
@@ -246,30 +223,140 @@ test("a provisioner restart mid-bootstrap frees the orphaned lock and a fresh bo
       updatedAt: now,
     });
   });
+}
 
-  const provisioningRows = () =>
-    t.run(async (ctx) =>
-      (await ctx.db.query("hosts").collect()).filter(
-        (h) => h.status === "provisioning",
-      ),
-    );
+// #87: on-demand autoscale on task spillover is gated off. An unplaceable task
+// must simply stay queued — no "provisioning" row pre-created, no host command
+// enqueued. (Proactive growth moves to the #88 background monitor.)
+test("an unplaceable task stays queued without auto-provisioning", async () => {
+  const t = newT();
+  await seedFullHost(t); // host-1 at its 2-VM cap
+  await seedQueuedTask(t, "task-new");
 
-  // Lock held: with the orphan in flight, a placement attempt does NOT request
-  // a new bootstrap.
-  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
-  expect((await provisioningRows()).map((h) => h.provisionRequestedAt)).toEqual(
-    [orphanRequestedAt],
-  );
-
-  // The restarted provisioner reconciles: fail the orphan it left dangling.
-  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
-    provisionerHostId: "host-1",
-    secret: SECRET,
+  const result = await t.mutation(internal.hosts.placeEphemeralTask, {
+    taskId: "task-new",
   });
-  expect(result.failed).toEqual(["ultraclaude-host-2"]);
-  await drainScheduled(t);
+  expect(result.placed).toBe(false);
+  expect(result).toMatchObject({
+    placed: false,
+    scaling: { kind: "autoscale_disabled" },
+  });
+  // The trigger is gated: nothing was provisioned and nothing was enqueued.
+  expect(await provisioningHosts(t)).toEqual([]);
+  expect(await allHostCommands(t)).toEqual([]);
+  expect((await getTask(t, "task-new"))?.status).toBe("queued");
+});
 
-  // A provision_failed event was recorded for the orphan...
+test("placeQueuedEphemeralTasks leaves a task queued when full, enqueuing nothing", async () => {
+  const t = newT();
+  await seedFullHost(t);
+  await seedQueuedTask(t, "task-new");
+
+  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
+
+  expect((await getTask(t, "task-new"))?.devboxId).toBeUndefined();
+  expect(await provisioningHosts(t)).toEqual([]);
+  expect(await allHostCommands(t)).toEqual([]);
+});
+
+test("placeQueuedEphemeralTasks drains a queued task into a free slot", async () => {
+  const t = newT();
+  // An active host with both slots free.
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+    });
+  });
+  await seedQueuedTask(t, "task-new");
+
+  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
+
+  // The task got a devbox, and the slot's host agent got a provision_vm command.
+  expect((await getTask(t, "task-new"))?.devboxId).toBeDefined();
+  const commands = await allHostCommands(t);
+  expect(commands.map((c) => c.kind)).toEqual(["provision_vm"]);
+});
+
+// #87 keeps the Convex decision/serialization machinery for the #88 monitor.
+// requestHostProvision pre-creates a serialized "provisioning" row but — since
+// GitHub Actions is the doer now — enqueues no host-agent command.
+test("requestHostProvision reserves a serialized provisioning slot, no command", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+      canProvisionHosts: true,
+    });
+  });
+
+  const first = await t.mutation(internal.hosts.requestHostProvision, {});
+  expect(first.kind).toBe("provisioning_started");
+  expect(await provisioningHosts(t)).toHaveLength(1);
+  // GH Actions is the doer — nothing is enqueued to a host agent.
+  expect(await allHostCommands(t)).toEqual([]);
+
+  // Serialized: a second request rides the in-flight one.
+  const second = await t.mutation(internal.hosts.requestHostProvision, {});
+  expect(second.kind).toBe("already_provisioning");
+  expect(await provisioningHosts(t)).toHaveLength(1);
+});
+
+test("requestHostProvision returns no_provisioner when none holds creds", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+      // canProvisionHosts absent → not a provisioner of record.
+    });
+  });
+
+  const result = await t.mutation(internal.hosts.requestHostProvision, {});
+  expect(result.kind).toBe("no_provisioner");
+  expect(await provisioningHosts(t)).toEqual([]);
+});
+
+// The GH Actions provisioner / a laptop run reports a failed bootstrap via
+// /fleet/event -> recordFleetEvent; a provision_failed drops the stale
+// pre-created "provisioning" row so it stops counting as the in-flight scale-up.
+test("recordFleetEvent provision_failed drops the stale provisioning row", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "ultraclaude-host-2",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: now,
+      provisionRequestedAt: now,
+      provisionedBy: "host-1",
+    });
+    // An ACTIVE host must NOT be deleted by a stray provision_failed event.
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: now,
+    });
+  });
+
+  await t.mutation(internal.hosts.recordFleetEvent, {
+    hostId: "ultraclaude-host-2",
+    type: "provision_failed",
+    summary: "bootstrap exited 1",
+  });
+
+  expect(await provisioningHosts(t)).toEqual([]);
+  const hosts = await t.run(async (ctx) => ctx.db.query("hosts").collect());
+  expect(hosts.map((h) => h.hostId)).toEqual(["host-1"]); // active row untouched
   const events = await t.run(async (ctx) =>
     ctx.db
       .query("hostEvents")
@@ -277,57 +364,21 @@ test("a provisioner restart mid-bootstrap frees the orphaned lock and a fresh bo
       .collect(),
   );
   expect(events.some((e) => e.type === "provision_failed")).toBe(true);
-
-  // ...and the freed lock let placeQueuedEphemeralTasks request a FRESH
-  // bootstrap (new provisioning row with a newer timestamp + provision_host
-  // command to the provisioner) — well under the 90-min stale window.
-  const after = await provisioningRows();
-  expect(after).toHaveLength(1);
-  expect(after[0]?.provisionRequestedAt ?? 0).toBeGreaterThan(
-    orphanRequestedAt,
-  );
-  const hostCommands = await t.run(async (ctx) =>
-    ctx.db.query("hostCommands").collect(),
-  );
-  expect(
-    hostCommands.some(
-      (c) => c.kind === "provision_host" && c.hostId === "host-1",
-    ),
-  ).toBe(true);
 });
 
-test("a stale-heartbeat provisioner still requests a replacement bootstrap on restart", async () => {
+// The sole handoff that makes a GH-Actions-provisioned host usable: its first
+// heartbeat flips the pre-created "provisioning" row to "active" AND drains the
+// queue onto it.
+test("a new host's first heartbeat flips provisioning->active and drains the queue", async () => {
   const t = newT();
-  const orphanRequestedAt = Date.now() - 60_000;
-  // The agent was down longer than the freshness window (a crash-loop / slow
-  // deploy / reboot), so its row is stale when it reconciles on restart.
-  const staleSeenAt = Date.now() - 3 * 60_000;
   await t.run(async (ctx) => {
     const now = Date.now();
-    await ctx.db.insert("hosts", {
-      hostId: "host-1",
-      maxVms: 2,
-      status: "active",
-      lastSeenAt: staleSeenAt,
-      canProvisionHosts: true,
-    });
-    for (const n of [1, 2]) {
-      await ctx.db.insert("devboxes", {
-        devboxId: `devbox-${n}`,
-        gatewayUrl: `http://devbox-${n}.ts.example.com:8787`,
-        status: "busy",
-        taskId: `busy-${n}`,
-        hostId: "host-1",
-        ephemeral: true,
-        lastSeenAt: now,
-      });
-    }
     await ctx.db.insert("hosts", {
       hostId: "ultraclaude-host-2",
       maxVms: 2,
       status: "provisioning",
-      lastSeenAt: orphanRequestedAt,
-      provisionRequestedAt: orphanRequestedAt,
+      lastSeenAt: now,
+      provisionRequestedAt: now,
       provisionedBy: "host-1",
     });
     await ctx.db.insert("tasks", {
@@ -342,97 +393,35 @@ test("a stale-heartbeat provisioner still requests a replacement bootstrap on re
     });
   });
 
-  await t.mutation(api.hosts.failOrphanedProvisions, {
-    provisionerHostId: "host-1",
+  await t.mutation(api.hosts.heartbeat, {
+    hostId: "ultraclaude-host-2",
     secret: SECRET,
   });
   await drainScheduled(t);
 
-  // The reconcile refreshed the provisioner's lastSeenAt (it was the one
-  // calling), so the re-drain picked it as a fresh provisioner and requested a
-  // replacement bootstrap — rather than freeing the lock and stalling.
-  const provisioning = await t.run(async (ctx) =>
-    (await ctx.db.query("hosts").collect()).filter(
-      (h) => h.status === "provisioning",
-    ),
-  );
-  expect(provisioning).toHaveLength(1);
-  expect(provisioning[0]?.provisionRequestedAt ?? 0).toBeGreaterThan(
-    orphanRequestedAt,
-  );
-  const hostCommands = await t.run(async (ctx) =>
-    ctx.db.query("hostCommands").collect(),
-  );
-  expect(
-    hostCommands.some(
-      (c) => c.kind === "provision_host" && c.hostId === "host-1",
-    ),
-  ).toBe(true);
-});
-
-test("failOrphanedProvisions only frees rows this provisioner owns", async () => {
-  const t = newT();
-  await t.run(async (ctx) => {
-    const now = Date.now();
-    await ctx.db.insert("hosts", {
-      hostId: "host-1",
-      maxVms: 2,
-      status: "active",
-      lastSeenAt: now,
-      canProvisionHosts: true,
-    });
-    // A bootstrap owned by a DIFFERENT provisioner: host-1's restart must not
-    // abandon another live provisioner's in-flight bootstrap.
-    await ctx.db.insert("hosts", {
-      hostId: "ultraclaude-host-9",
-      maxVms: 2,
-      status: "provisioning",
-      lastSeenAt: now,
-      provisionRequestedAt: now,
-      provisionedBy: "host-other",
-    });
-  });
-
-  // Nothing of host-1's to free, and the other provisioner's row is untouched.
-  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
-    provisionerHostId: "host-1",
-    secret: SECRET,
-  });
-  expect(result.failed).toEqual([]);
-  const other = await t.run(async (ctx) =>
-    ctx.db
-      .query("hosts")
-      .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-9"))
-      .unique(),
-  );
-  expect(other?.status).toBe("provisioning");
-});
-
-test("failOrphanedProvisions is a no-op on a wrong secret", async () => {
-  const t = newT();
-  const requestedAt = Date.now();
-  await t.run(async (ctx) => {
-    await ctx.db.insert("hosts", {
-      hostId: "ultraclaude-host-2",
-      maxVms: 2,
-      status: "provisioning",
-      lastSeenAt: requestedAt,
-      provisionRequestedAt: requestedAt,
-      provisionedBy: "host-1",
-    });
-  });
-  const result = await t.mutation(api.hosts.failOrphanedProvisions, {
-    provisionerHostId: "host-1",
-    secret: "wrong",
-  });
-  expect(result.failed).toEqual([]);
-  const row = await t.run(async (ctx) =>
+  const host = await t.run(async (ctx) =>
     ctx.db
       .query("hosts")
       .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-2"))
       .unique(),
   );
-  expect(row?.status).toBe("provisioning");
+  expect(host?.status).toBe("active");
+  // The queued task placed onto the freshly online host...
+  expect((await getTask(t, "task-q"))?.devboxId).toBeDefined();
+  // ...with a provision_vm command enqueued to it, and an "online" event.
+  const commands = await allHostCommands(t);
+  expect(
+    commands.some(
+      (c) => c.kind === "provision_vm" && c.hostId === "ultraclaude-host-2",
+    ),
+  ).toBe(true);
+  const events = await t.run(async (ctx) =>
+    ctx.db
+      .query("hostEvents")
+      .withIndex("by_host_id", (q) => q.eq("hostId", "ultraclaude-host-2"))
+      .collect(),
+  );
+  expect(events.some((e) => e.type === "online")).toBe(true);
 });
 
 test("provisionVmFailed is a no-op on a wrong secret or a missing row", async () => {

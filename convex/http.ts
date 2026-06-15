@@ -11,6 +11,48 @@ import { httpAction } from "./_generated/server";
 
 const http = httpRouter();
 
+/**
+ * True when the request carries the shared secret in `x-devbox-secret`. Used by
+ * every non-Slack endpoint (the `/devbox/*` control plane and the `/fleet/*`
+ * provisioner plane) — the same secret host agents pass as a function argument.
+ */
+function devboxSecretOk(request: Request): boolean {
+  const secret = process.env.DEVBOX_SHARED_SECRET;
+  const provided = request.headers.get("x-devbox-secret");
+  return (
+    secret !== undefined &&
+    secret !== "" &&
+    provided !== null &&
+    timingSafeEqual(provided, secret)
+  );
+}
+
+/** The single global fleet lock name (see convex/fleetLock.ts). A future
+ * golden-refresh op (#89) may take other names. */
+const FLEET_LOCK_NAME = "fleet";
+
+function parseLockBody(
+  raw: unknown,
+): { holder: string; ttlMs?: number } | null {
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  const body = raw as { holder?: unknown; ttlMs?: unknown };
+  if (typeof body.holder !== "string" || body.holder === "") {
+    return null;
+  }
+  // Only forward a finite, positive ttl; anything else falls back to the
+  // server default (the acquire/renew mutations clamp again, authoritatively).
+  const ttlOk =
+    typeof body.ttlMs === "number" &&
+    Number.isFinite(body.ttlMs) &&
+    body.ttlMs > 0;
+  return {
+    holder: body.holder,
+    ...(ttlOk ? { ttlMs: body.ttlMs as number } : {}),
+  };
+}
+
 http.route({
   path: "/slack/events",
   method: "POST",
@@ -327,6 +369,143 @@ http.route({
       return new Response("not found", { status: 404 });
     }
     return new Response(blob);
+  }),
+});
+
+// ---- Fleet provisioner plane (GitHub Actions / laptop runs) ----
+// The authoritative cross-origin fleet lock (#87) and fleet observability,
+// exposed over plain HTTP so a Linux GH Actions runner (and a laptop) can grab
+// the lock and stream events with just curl + the shared secret — no Convex
+// client or deploy key. All secret-gated by `x-devbox-secret`.
+
+// Acquire the global fleet lock (or renew it if this holder already owns it).
+// Body: { holder: string, ttlMs?: number }. 200 with { acquired: true, ... } or
+// { acquired: false, heldBy, expiresAt } — callers branch on `acquired`.
+http.route({
+  path: "/fleet/lock/acquire",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let body: { holder: string; ttlMs?: number } | null;
+    try {
+      body = parseLockBody(JSON.parse(await request.text()));
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (body === null) {
+      return new Response("expected { holder: string, ttlMs?: number }", {
+        status: 400,
+      });
+    }
+    const result = await ctx.runMutation(internal.fleetLock.acquire, {
+      name: FLEET_LOCK_NAME,
+      holder: body.holder,
+      ...(body.ttlMs !== undefined ? { ttlMs: body.ttlMs } : {}),
+    });
+    return Response.json(result);
+  }),
+});
+
+// Extend the lease — only if this holder still owns it. Body: { holder, ttlMs? }.
+http.route({
+  path: "/fleet/lock/renew",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let body: { holder: string; ttlMs?: number } | null;
+    try {
+      body = parseLockBody(JSON.parse(await request.text()));
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (body === null) {
+      return new Response("expected { holder: string, ttlMs?: number }", {
+        status: 400,
+      });
+    }
+    const result = await ctx.runMutation(internal.fleetLock.renew, {
+      name: FLEET_LOCK_NAME,
+      holder: body.holder,
+      ...(body.ttlMs !== undefined ? { ttlMs: body.ttlMs } : {}),
+    });
+    return Response.json(result);
+  }),
+});
+
+// Release the lock — a no-op unless this holder owns it. Body: { holder }.
+http.route({
+  path: "/fleet/lock/release",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let body: { holder: string } | null;
+    try {
+      body = parseLockBody(JSON.parse(await request.text()));
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (body === null) {
+      return new Response("expected { holder: string }", { status: 400 });
+    }
+    const result = await ctx.runMutation(internal.fleetLock.release, {
+      name: FLEET_LOCK_NAME,
+      holder: body.holder,
+    });
+    return Response.json(result);
+  }),
+});
+
+// Fleet snapshot (hosts/devboxes/queue/recent events) for the provisioner's
+// smoke test ("is this host active + recently seen?") and debugging.
+http.route({
+  path: "/fleet/status",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const snapshot = await ctx.runQuery(internal.hosts.fleetSnapshot, {});
+    return Response.json(snapshot);
+  }),
+});
+
+// Fleet lifecycle event from the GH Actions provisioner / a laptop run, into
+// hostEvents (get_fleet surfaces them). Body: { hostId, type, summary }. A
+// "provision_failed" event also drops a stale pre-created provisioning row.
+http.route({
+  path: "/fleet/event",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let payload: { hostId?: unknown; type?: unknown; summary?: unknown };
+    try {
+      payload = JSON.parse(await request.text()) as typeof payload;
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (
+      typeof payload.hostId !== "string" ||
+      typeof payload.type !== "string" ||
+      typeof payload.summary !== "string"
+    ) {
+      return new Response("expected { hostId, type, summary }", {
+        status: 400,
+      });
+    }
+    await ctx.runMutation(internal.hosts.recordFleetEvent, {
+      hostId: payload.hostId,
+      type: payload.type,
+      summary: payload.summary,
+    });
+    return new Response(null, { status: 200 });
   }),
 });
 

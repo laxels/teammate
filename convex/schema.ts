@@ -149,8 +149,9 @@ export default defineSchema({
   // Each host runs Tart VMs; Apple's EULA caps maxVms at 2 concurrent macOS
   // VMs per host. "draining" excludes a host from new allocations without
   // touching its running VMs. "provisioning" rows are pre-created by
-  // hosts.requestHostProvision while a provisioner host bootstraps the new
-  // Mac; the new host's first heartbeat flips it to "active".
+  // hosts.requestHostProvision (the #88 capacity monitor / manual ops) to
+  // serialize a scale-up; the GitHub Actions provisioner does the bootstrap,
+  // and the new host's first heartbeat flips the row to "active".
   hosts: defineTable({
     hostId: v.string(),
     maxVms: v.number(),
@@ -160,28 +161,26 @@ export default defineSchema({
       v.literal("provisioning"),
     ),
     lastSeenAt: v.number(),
-    // The host holds fleet credentials (Scaleway API, ghcr, fleet SSH key)
-    // and can bootstrap new Mac hosts. Reported in its heartbeat.
+    // The host holds fleet credentials and is a provisioner of record. Reported
+    // in its heartbeat; pickProvisioner (kept for the #88 monitor) selects it.
+    // The host agent no longer bootstraps hosts itself — GitHub Actions does.
     canProvisionHosts: v.optional(v.boolean()),
-    // For "provisioning" rows: when the bootstrap was requested (staleness
-    // cutoff) and which host is running it (debugging).
+    // For "provisioning" rows: when the scale-up was requested (staleness
+    // cutoff) and the provisioner of record (debugging).
     provisionRequestedAt: v.optional(v.number()),
     provisionedBy: v.optional(v.string()),
   }).index("by_host_id", ["hostId"]),
 
-  // Host-level command queue (VM lifecycle + fleet scaling), mirroring
-  // `commands`: the orchestrator enqueues, host agents subscribe and ack
-  // (outbound-only).
+  // Host-level command queue (VM lifecycle), mirroring `commands`: the
+  // orchestrator enqueues, host agents subscribe and ack (outbound-only).
+  // Host *provisioning* is no longer a host-agent command — GitHub Actions is
+  // the doer (see .github/workflows/provision-host.yml); the host agent only
+  // manages VMs on a host that is already up.
   hostCommands: defineTable({
     commandId: v.string(),
     hostId: v.string(),
-    kind: v.union(
-      v.literal("provision_vm"),
-      v.literal("destroy_vm"),
-      v.literal("provision_host"),
-    ),
-    // JSON payload: HostVmPayload for the vm kinds, HostProvisionPayload for
-    // provision_host.
+    kind: v.union(v.literal("provision_vm"), v.literal("destroy_vm")),
+    // JSON payload: HostVmPayload for both kinds.
     payload: v.string(),
     // A consumer claims a command (pending -> running) before running its side
     // effect and only acks (-> acked) after, so a crash anywhere after the
@@ -201,14 +200,36 @@ export default defineSchema({
     .index("by_command_id", ["commandId"]),
 
   // Fleet-level lifecycle events (host provisioning progress, failures),
-  // posted by host agents. The orchestrator's get_fleet tool surfaces the
-  // recent tail so Ultraclaude can monitor and debug scale-ups.
+  // posted by host agents and the GitHub Actions provisioner (via the
+  // secret-gated /fleet/event endpoint). The orchestrator's get_fleet tool
+  // surfaces the recent tail so Ultraclaude can monitor and debug scale-ups.
   hostEvents: defineTable({
     hostId: v.string(),
     type: v.string(),
     summary: v.string(),
     ts: v.number(),
   }).index("by_host_id", ["hostId"]),
+
+  // Authoritative, cross-origin mutual-exclusion for fleet-provisioning
+  // operations (see src/fleetLock.ts). One row per lock name (today: the
+  // single global "fleet" lock; #89's golden-refresh may take others). Unlike
+  // scripts/singleton-lock.sh — a local .git filesystem lock that only sees
+  // initiators in one checkout — this lives in Convex, so every fleet-mutating
+  // op grabs it regardless of origin (laptop, GitHub Actions runner, the
+  // future #88 monitor). It's a LEASE: the holder renews before expiresAt or
+  // the next contender reclaims it, so a runner that dies mid-op never wedges
+  // the lock (the distributed analogue of singleton-lock's dead-owner steal).
+  fleetLocks: defineTable({
+    name: v.string(),
+    // Free-form id of the current holder, unique per operation, e.g.
+    // "gh:<run_id>" or "<user>@<host>:<pid>". Renew/release target it; a
+    // mismatch means the lease was stolen.
+    holder: v.string(),
+    acquiredAt: v.number(),
+    renewedAt: v.number(),
+    // Lease deadline: at/after this the lock is reclaimable by anyone.
+    expiresAt: v.number(),
+  }).index("by_name", ["name"]),
 
   // Control-plane command queue: the orchestrator enqueues, gateways
   // subscribe and ack (outbound-only — Convex cloud cannot reach tailnet

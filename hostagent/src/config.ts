@@ -23,14 +23,13 @@ export type HostAgentConfig = {
   /** Absolute path to the tart binary. */
   tartBin: string;
   /**
-   * Fleet-provisioner role (FLEET_PROVISIONER=1): this host holds the fleet
-   * .env (Scaleway keys, ghcr PAT, fleet SSH key) and accepts provision_host
-   * commands, bootstrapping new Mac hosts via provisionScriptPath.
+   * Fleet-provisioner role of record (FLEET_PROVISIONER=1): reported in the
+   * heartbeat so the Convex decision machinery (pickProvisioner, kept for the
+   * #88 monitor) can identify a credential-holding host. The host agent no
+   * longer runs bootstraps itself — GitHub Actions is the doer (#87) — so this
+   * is now just advertised metadata, not an executor capability.
    */
   canProvisionHosts: boolean;
-  provisionScriptPath: string;
-  /** Fleet secrets file (outside the payload dir, which is rsynced into VMs). */
-  fleetEnvFile: string;
 };
 
 /**
@@ -77,8 +76,5 @@ export function loadConfig(
     payloadDir,
     tartBin: env.TART_BIN || `${home}/tart.app/Contents/MacOS/tart`,
     canProvisionHosts: env.FLEET_PROVISIONER === "1",
-    provisionScriptPath:
-      env.PROVISION_SCRIPT || `${payloadDir}/scripts/provision-host.sh`,
-    fleetEnvFile: env.FLEET_ENV_FILE || `${home}/fleet.env`,
   };
 }
