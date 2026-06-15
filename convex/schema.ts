@@ -199,6 +199,12 @@ export default defineSchema({
     // in its heartbeat; pickProvisioner (kept for the #88 monitor) selects it.
     // The host agent no longer bootstraps hosts itself — GitHub Actions does.
     canProvisionHosts: v.optional(v.boolean()),
+    // The local tart image new ephemerals are cloned from (the hostagent's
+    // GOLDEN_IMAGE), reported in every heartbeat. Lets the fleet observe which
+    // golden each warm host serves so a golden-refresh (#89) can confirm
+    // convergence instead of a host silently keeping a stale image. Optional:
+    // older heartbeats omit it.
+    goldenImage: v.optional(v.string()),
     // For "provisioning" rows: when the scale-up was requested (staleness
     // cutoff) and the provisioner of record (debugging).
     provisionRequestedAt: v.optional(v.number()),

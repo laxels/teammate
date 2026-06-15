@@ -160,3 +160,89 @@ test("/fleet/event requires the secret and records into hostEvents", async () =>
   );
   expect(events.map((e) => e.type)).toEqual(["provision_started"]);
 });
+
+// #89: the golden-refresh drives draining/rejoin over the secret-gated
+// /fleet/host/status endpoint.
+test("/fleet/host/status drains a host and validates its body", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+    });
+  });
+
+  expect(
+    (
+      await post(
+        t,
+        "/fleet/host/status",
+        { hostId: "host-1", status: "draining" },
+        "nope",
+      )
+    ).status,
+  ).toBe(401);
+  // Missing hostId, and an out-of-range status, are both rejected.
+  expect(
+    (await post(t, "/fleet/host/status", { status: "draining" })).status,
+  ).toBe(400);
+  expect(
+    (
+      await post(t, "/fleet/host/status", {
+        hostId: "host-1",
+        status: "provisioning",
+      })
+    ).status,
+  ).toBe(400);
+
+  const ok = await post(t, "/fleet/host/status", {
+    hostId: "host-1",
+    status: "draining",
+  });
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ found: true });
+  const host = await t.run(async (ctx) =>
+    ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", "host-1"))
+      .unique(),
+  );
+  expect(host?.status).toBe("draining");
+});
+
+test("/fleet/host/evict force-evicts a host's ephemerals", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining",
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-1",
+      gatewayUrl: "http://eph-1.ts:8787",
+      status: "busy",
+      taskId: "task-1",
+      hostId: "host-1",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+  });
+
+  expect(
+    (await post(t, "/fleet/host/evict", { hostId: "host-1" }, "nope")).status,
+  ).toBe(401);
+  expect((await post(t, "/fleet/host/evict", {})).status).toBe(400);
+
+  const ok = await post(t, "/fleet/host/evict", { hostId: "host-1" });
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ evicted: 1, devboxIds: ["eph-1"] });
+  const commands = await t.run(async (ctx) =>
+    ctx.db.query("hostCommands").collect(),
+  );
+  expect(commands.map((c) => c.kind)).toEqual(["destroy_vm"]);
+});

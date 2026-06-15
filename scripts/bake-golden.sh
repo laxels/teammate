@@ -6,7 +6,7 @@
 # the current image (replaces the old per-version bake-golden-v2.sh; see #56).
 #
 #   Usage: scripts/bake-golden.sh [--from <image>] [--to <image>]
-#   Defaults: --from golden-v4  --to golden-v5
+#   Defaults: --from golden-v5  --to golden-v6  (the current pin -> the next)
 #
 # What this bake does, on a clone of --from:
 #   1. ensure bun is installed (idempotent — present on v2+ images)
@@ -63,10 +63,12 @@
 #     ~/.claude.json, so do it as a deliberate manual step, never in this script.
 #
 # After this bake, push the image to ghcr so new hosts can pull it (host-1
-# already has the local copy this produces):
+# already has the local copy this produces), then bump the pin
+# (scripts/golden-constants.sh) and roll it out (scripts/refresh-golden.sh,
+# issue #89):
 #   TART_REGISTRY_USERNAME=laxels TART_REGISTRY_PASSWORD=$GITHUB_PAT \
-#     ~/tart.app/Contents/MacOS/tart push golden-v5 \
-#       ghcr.io/laxels/ultraclaude-golden:v5
+#     ~/tart.app/Contents/MacOS/tart push golden-v6 \
+#       ghcr.io/laxels/ultraclaude-golden:v6
 #
 # Run from anywhere on the local machine; operates on the Tart host over SSH.
 # Refuses to run if the staging or target VM already exist.
@@ -79,8 +81,11 @@ if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
   exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
 fi
 
-SOURCE_IMAGE="golden-v4"
-TARGET="golden-v5"
+# Bake the NEXT golden FROM the current one. The live fleet pin is golden-v5
+# (scripts/golden-constants.sh, rolled out by issue #89), so the next bake goes
+# golden-v5 -> golden-v6; override with --from/--to for a different jump.
+SOURCE_IMAGE="golden-v5"
+TARGET="golden-v6"
 # Canonical Claude model baked into ~/.claude/settings.json. MUST match the
 # gateway/orchestrator runtime model (gateway/src/session.ts, convex/orchestrator.ts).
 MODEL="claude-opus-4-8"

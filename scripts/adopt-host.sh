@@ -39,6 +39,11 @@ ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 # Deployment-identity constants (CONVEX_SITE_URL, CONVEX_URL, TAILNET_SUFFIX):
 # single source of truth shared with the other fleet scripts.
 source "$REPO_ROOT/scripts/deployment-constants.sh"
+# Golden-image pin (GOLDEN_LOCAL): single source of truth (issue #89). Written
+# into hostagent.env below so the hostagent clones the fleet golden — the
+# authoritative runtime value, overriding hostagent/src/config.ts's fallback
+# default. refresh-golden.sh rewrites this same line to roll a new golden.
+source "$REPO_ROOT/scripts/golden-constants.sh"
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -86,6 +91,7 @@ CONVEX_SITE_URL=$CONVEX_SITE_URL
 DEVBOX_SHARED_SECRET=$DEVBOX_SHARED_SECRET
 TAILSCALE_AUTHKEY=$TAILSCALE_EPHEMERAL_AUTHKEY
 TAILNET_SUFFIX=$TAILNET_SUFFIX
+GOLDEN_IMAGE=$GOLDEN_LOCAL
 EOF
 
 # ----------------------------------------------------------- launchd agent

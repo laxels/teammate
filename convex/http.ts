@@ -24,9 +24,37 @@ function devboxSecretOk(request: Request): boolean {
   );
 }
 
-/** The single global fleet lock name (see convex/fleetLock.ts). A future
- * golden-refresh op (#89) may take other names. */
+/** The single global fleet lock name (see convex/fleetLock.ts). The
+ * golden-refresh op (#89) takes this SAME lock: it mutates live fleet state, so
+ * it must serialize against provisioning and against another roll. */
 const FLEET_LOCK_NAME = "fleet";
+
+/** Body parser for the host-control endpoints: { hostId } plus, for the status
+ * endpoint, a status restricted to the two states a golden-refresh toggles. */
+function parseHostId(raw: unknown): { hostId: string } | null {
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  const body = raw as { hostId?: unknown };
+  if (typeof body.hostId !== "string" || body.hostId === "") {
+    return null;
+  }
+  return { hostId: body.hostId };
+}
+
+function parseHostStatus(
+  raw: unknown,
+): { hostId: string; status: "active" | "draining" } | null {
+  const base = parseHostId(raw);
+  if (base === null) {
+    return null;
+  }
+  const status = (raw as { status?: unknown }).status;
+  if (status !== "active" && status !== "draining") {
+    return null;
+  }
+  return { hostId: base.hostId, status };
+}
 
 function parseLockBody(
   raw: unknown,
@@ -494,6 +522,64 @@ http.route({
       summary: payload.summary,
     });
     return new Response(null, { status: 200 });
+  }),
+});
+
+// Drain or rejoin a host for a golden-refresh (#89). "draining" makes pickHost
+// skip the host (no new VMs) without touching its in-flight VMs; "active"
+// rejoins it once it's on the new golden. Body: { hostId, status }. Returns
+// { found } so the caller can tell a real host from a typo'd one.
+http.route({
+  path: "/fleet/host/status",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let body: { hostId: string; status: "active" | "draining" } | null;
+    try {
+      body = parseHostStatus(JSON.parse(await request.text()));
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (body === null) {
+      return new Response(
+        'expected { hostId: string, status: "active" | "draining" }',
+        { status: 400 },
+      );
+    }
+    const result = await ctx.runMutation(internal.hosts.setHostStatus, {
+      hostId: body.hostId,
+      status: body.status,
+    });
+    return Response.json(result);
+  }),
+});
+
+// Force-evict every ephemeral VM on a host (all-at-once golden-refresh, after a
+// bounded drain): each is marked retiring and a destroy_vm is enqueued so the
+// host agent tears it down now. Abandons any in-flight task on them — the caller
+// surfaces the count (returned as { evicted, devboxIds }). Body: { hostId }.
+http.route({
+  path: "/fleet/host/evict",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let body: { hostId: string } | null;
+    try {
+      body = parseHostId(JSON.parse(await request.text()));
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (body === null) {
+      return new Response("expected { hostId: string }", { status: 400 });
+    }
+    const result = await ctx.runMutation(internal.hosts.evictHostEphemerals, {
+      hostId: body.hostId,
+    });
+    return Response.json(result);
   }),
 });
 

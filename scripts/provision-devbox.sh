@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Provision a devbox from the golden-v4 image:
-#   1. clone golden-v4 -> <devbox-id>, boot headless, wait for SSH
+# Provision a devbox from the fleet golden image (scripts/golden-constants.sh):
+#   1. clone the golden image -> <devbox-id>, boot headless, wait for SSH
 #   2. write ~/ultraclaude.env (gateway config + shared secret), join the
 #      tailnet as <devbox-id>, kick the gateway LaunchAgent
 #   3. verify /health over the tailnet, then register the devbox in Convex
@@ -22,13 +22,16 @@ fi
 HOST_SSH="m1@100.121.13.107"
 HOST_ID="ultraclaude-host-1"
 TART='~/tart.app/Contents/MacOS/tart'
-SOURCE_IMAGE="golden-v4"
 VM_USER="admin"
 GATEWAY_PORT=8787
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Deployment-identity constants (CONVEX_SITE_URL, CONVEX_URL, TAILNET_SUFFIX):
 # single source of truth shared with the other fleet scripts.
 source "$REPO_ROOT/scripts/deployment-constants.sh"
+# Golden-image pin (GOLDEN_LOCAL/GOLDEN_REMOTE): single source of truth (issue
+# #89), so a permanent devbox is cloned from the same golden the fleet runs.
+source "$REPO_ROOT/scripts/golden-constants.sh"
+SOURCE_IMAGE="$GOLDEN_LOCAL"
 GATEWAY_URL="http://$DEVBOX_ID.$TAILNET_SUFFIX:$GATEWAY_PORT"
 
 # Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so host-key
@@ -61,7 +64,7 @@ DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
 
 list="$(tart_host list)"
 grep -q "^local *$SOURCE_IMAGE " <<<"$list" || {
-  echo "ERROR: golden image $SOURCE_IMAGE not found on host (pull ghcr.io/laxels/ultraclaude-golden:v4 or rebuild it with scripts/bake-golden.sh)" >&2
+  echo "ERROR: golden image $SOURCE_IMAGE not found on host (pull $GOLDEN_REMOTE or rebuild it with scripts/bake-golden.sh)" >&2
   exit 1
 }
 if grep -q "^local *$DEVBOX_ID " <<<"$list"; then

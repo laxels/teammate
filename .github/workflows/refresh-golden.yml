@@ -1,0 +1,104 @@
+# Roll a new golden image across the standing warm fleet (issue #89). The
+# sibling of provision-host.yml: where that bootstraps NEW hosts, this refreshes
+# EXISTING warm hosts to a new golden — a standing host pins whatever golden it
+# was prepped with, so a bump (e.g. v4 -> v5) needs a deliberate roll or live
+# hosts silently keep serving the stale image.
+#
+# One job runs scripts/refresh-golden.sh, which self-acquires the global Convex
+# "fleet" lock (the SAME lock provisioning takes, so a roll and a provision can
+# never race) and orchestrates the rollout itself: rolling = one host at a time
+# (default, never disrupts in-flight tasks, ~N-1 capacity); all-at-once = every
+# host in parallel with a bounded drain then force-evict (faster, sacrifices
+# capacity). The mode is explicit — all-at-once is never auto-selected.
+#
+# Required secrets (GitHub Environment "fleet" — same set provision-host.yml uses):
+#   SCALEWAY_ACCESS_KEY_ID, SCALEWAY_SECRET_KEY  resolve each host's public IP
+#   GHCR_PAT                                     ghcr pull of the golden image
+#                                                (mapped to GITHUB_PAT — GitHub
+#                                                forbids GITHUB_-prefixed names)
+#   DEVBOX_SHARED_SECRET                         fleet lock + /fleet/* auth
+#   FLEET_SSH_PRIVATE_KEY                        ssh to each host as m1
+
+name: Refresh fleet golden
+
+on:
+  workflow_dispatch:
+    inputs:
+      golden_tag:
+        description: "Golden version to roll to, e.g. 'v5' (blank = the pin in scripts/golden-constants.sh)"
+        required: false
+        type: string
+      mode:
+        description: "Rollout mode"
+        required: true
+        default: rolling
+        type: choice
+        options:
+          - rolling
+          - all-at-once
+      hosts:
+        description: "Hosts to refresh (space/comma-separated; blank = every active host)"
+        required: false
+        type: string
+      drain_timeout_secs:
+        description: "all-at-once: seconds to wait for in-flight tasks to drain before force-evicting (blank = 300)"
+        required: false
+        type: string
+      dry_run:
+        description: "Resolve and print the plan only — mutate nothing, take no lock"
+        required: false
+        default: false
+        type: boolean
+
+# Share provision-host.yml's concurrency group so a roll and a provision (and two
+# rolls) queue natively instead of fighting over the Convex lock on a live
+# runner. cancel-in-progress: false — never abort an in-flight fleet op.
+concurrency:
+  group: fleet-provision
+  cancel-in-progress: false
+
+# The scripts derive the Convex endpoints from CONVEX_DEPLOYMENT_SLUG
+# (scripts/deployment-constants.sh, issue #81). Set CONVEX_DEPLOYMENT_SLUG here
+# to target a different deployment per run.
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    environment: fleet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the fleet SSH key
+        env:
+          FLEET_SSH_PRIVATE_KEY: ${{ secrets.FLEET_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$FLEET_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+      - name: "Roll golden (${{ inputs.mode }})"
+        env:
+          # Fleet creds injected as env vars — refresh-golden.sh's env_secret
+          # reads them directly, so no secret ever lands in a file on disk.
+          SCALEWAY_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          GITHUB_PAT: ${{ secrets.GHCR_PAT }}
+          DEVBOX_SHARED_SECRET: ${{ secrets.DEVBOX_SHARED_SECRET }}
+          # refresh-golden.sh self-locks via scripts/fleet-lock.sh `with`; give it
+          # a run-scoped holder id and a 90-min lease (renewed for the run's
+          # duration) so a slow first golden pull never expires it, and wait out a
+          # concurrent op rather than failing the run.
+          FLEET_LOCK_HOLDER: gh:${{ github.run_id }}
+          FLEET_LOCK_TTL_MS: "5400000"
+          FLEET_LOCK_WAIT_SECS: "1800"
+          GOLDEN_TAG: ${{ inputs.golden_tag }}
+          MODE: ${{ inputs.mode }}
+          HOSTS: ${{ inputs.hosts }}
+          DRAIN_TIMEOUT_SECS: ${{ inputs.drain_timeout_secs }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--mode "$MODE")
+          [[ -n "$GOLDEN_TAG" ]] && args+=(--tag "$GOLDEN_TAG")
+          [[ -n "$HOSTS" ]] && args+=(--hosts "$HOSTS")
+          [[ -n "$DRAIN_TIMEOUT_SECS" ]] && args+=(--drain-timeout "$DRAIN_TIMEOUT_SECS")
+          [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
+          scripts/refresh-golden.sh "${args[@]}"

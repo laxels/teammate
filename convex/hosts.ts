@@ -70,12 +70,21 @@ export const heartbeat = mutation({
     hostId: v.string(),
     secret: v.string(),
     canProvisionHosts: v.optional(v.boolean()),
+    // The local golden image new ephemerals are cloned from. A golden-refresh
+    // (#89) swaps this and restarts the agent; the next heartbeat reports the
+    // new tag, which is how the refresh confirms the host converged.
+    goldenImage: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     if (!secretOk(args.secret)) {
       return;
     }
-    const capability = { canProvisionHosts: args.canProvisionHosts === true };
+    const reported = {
+      canProvisionHosts: args.canProvisionHosts === true,
+      ...(args.goldenImage !== undefined
+        ? { goldenImage: args.goldenImage }
+        : {}),
+    };
     const host = await ctx.db
       .query("hosts")
       .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
@@ -86,7 +95,7 @@ export const heartbeat = mutation({
       const comingOnline = host.status === "provisioning";
       await ctx.db.patch(host._id, {
         lastSeenAt: Date.now(),
-        ...capability,
+        ...reported,
         ...(comingOnline ? { status: "active" as const } : {}),
       });
       if (comingOnline) {
@@ -108,7 +117,7 @@ export const heartbeat = mutation({
       maxVms: DEFAULT_MAX_VMS,
       status: "active",
       lastSeenAt: Date.now(),
-      ...capability,
+      ...reported,
     });
     await ctx.scheduler.runAfter(
       0,
@@ -640,6 +649,9 @@ export async function fleetSnapshotData(ctx: QueryCtx) {
       hostId: host.hostId,
       status: host.status,
       canProvisionHosts: host.canProvisionHosts === true,
+      // The golden the host's new ephemerals clone — lets a golden-refresh (#89)
+      // confirm convergence and surfaces a host stuck on a stale image.
+      goldenImage: host.goldenImage,
       vmsInUse: devboxes.filter((d) => d.hostId === host.hostId).length,
       maxVms: host.maxVms,
       secondsSinceSeen: Math.round((now - host.lastSeenAt) / 1000),
@@ -709,5 +721,103 @@ export const retireDevbox = internalMutation({
       kind: "destroy_vm",
       payload: JSON.stringify(payload),
     });
+  },
+});
+
+/**
+ * Flip a host between "active" and "draining" for a golden-refresh (#89).
+ * "draining" makes pickHost skip the host so no new ephemeral lands on it while
+ * it is being rolled to a new golden — without disturbing its in-flight VMs;
+ * "active" rejoins it (and drains the queue) once it is on the new golden. Both
+ * a fleet event for get_fleet visibility. The only caller is the secret-gated
+ * /fleet/host/status HTTP endpoint. A host mid-bootstrap ("provisioning") is
+ * left alone (the fleet lock keeps a refresh from overlapping a provision, so
+ * this is belt-and-suspenders); an unknown host is a no-op (found: false).
+ */
+export const setHostStatus = internalMutation({
+  args: {
+    hostId: v.string(),
+    status: v.union(v.literal("active"), v.literal("draining")),
+  },
+  handler: async (ctx, args): Promise<{ found: boolean }> => {
+    const host = await ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
+      .unique();
+    if (host === null) {
+      return { found: false };
+    }
+    if (host.status === "provisioning" || host.status === args.status) {
+      return { found: true };
+    }
+    await ctx.db.patch(host._id, { status: args.status });
+    await recordHostEventRow(ctx, {
+      hostId: args.hostId,
+      type: args.status === "draining" ? "draining" : "rejoined",
+      summary:
+        args.status === "draining"
+          ? `Draining ${args.hostId} for a golden-refresh — no new VMs placed; in-flight tasks finish.`
+          : `${args.hostId} rejoined the fleet after a golden-refresh.`,
+    });
+    // Rejoining a host may unblock queued ephemeral tasks.
+    if (args.status === "active") {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.hosts.placeQueuedEphemeralTasks,
+        {},
+      );
+    }
+    return { found: true };
+  },
+});
+
+/**
+ * Force-evict every ephemeral VM on a host: mark each "retiring" and enqueue a
+ * destroy_vm so the host agent tears it down NOW, instead of waiting out the
+ * post-task retire grace. The all-at-once golden-refresh (#89) calls this after
+ * a bounded drain window — it knowingly abandons any still-running task on the
+ * host (the trigger surfaces the count, per the issue). Idempotent: a re-evict
+ * just re-enqueues a destroy_vm, and destroy_vm is itself idempotent (a VM
+ * already gone removes its row anyway). Permanent devboxes (no hostId, not
+ * ephemeral) are never touched.
+ */
+export const evictHostEphemerals = internalMutation({
+  args: { hostId: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ evicted: number; devboxIds: string[] }> => {
+    const devboxes = await ctx.db.query("devboxes").collect();
+    const targets = devboxes.filter(
+      (d) => d.hostId === args.hostId && d.ephemeral === true,
+    );
+    for (const devbox of targets) {
+      if (devbox.status !== "retiring") {
+        await ctx.db.patch(devbox._id, {
+          status: "retiring",
+          taskId: undefined,
+          lastSeenAt: Date.now(),
+        });
+      }
+      const payload: HostVmPayload = { devboxId: devbox.devboxId };
+      await enqueueHostCommand(ctx, {
+        hostId: args.hostId,
+        kind: "destroy_vm",
+        payload: JSON.stringify(payload),
+      });
+    }
+    if (targets.length > 0) {
+      await recordHostEventRow(ctx, {
+        hostId: args.hostId,
+        type: "force_evicted",
+        summary:
+          `Force-evicted ${targets.length} ephemeral VM(s) on ${args.hostId} ` +
+          `for an all-at-once golden-refresh; any in-flight task on them was abandoned.`,
+      });
+    }
+    return {
+      evicted: targets.length,
+      devboxIds: targets.map((d) => d.devboxId).sort(),
+    };
   },
 });

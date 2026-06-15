@@ -72,6 +72,15 @@ export function loadConfig(
     devboxSharedSecret,
     tailscaleAuthkey,
     tailnetSuffix,
+    // Authoritative value is GOLDEN_IMAGE in ~/hostagent.env, written from the
+    // pin (scripts/golden-constants.sh) by adopt-host.sh on provision and by
+    // refresh-golden.sh on a golden roll (#89) — that env LEADS the rollout.
+    // This literal is only the fallback when the env predates that line (an
+    // existing host not yet refreshed). It must therefore LAG the pin: a value
+    // guaranteed present on every host, since deploy-payload ships this code
+    // independently of which goldens a host has pulled. Bumping it to the new
+    // golden before that golden is on every host would make a host with no
+    // GOLDEN_IMAGE clone a missing image. Advance it only after a roll completes.
     goldenImage: env.GOLDEN_IMAGE || "golden-v4",
     payloadDir,
     tartBin: env.TART_BIN || `${home}/tart.app/Contents/MacOS/tart`,

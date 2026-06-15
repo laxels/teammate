@@ -560,3 +560,259 @@ test("host claim no-ops on a wrong secret", async () => {
   ).toBe(false);
   expect(await hostCommandStatus(t, "hostcmd-1")).toBe("pending");
 });
+
+// ----------------------------------------------------------------- golden #89
+
+function getHost(t: Tester, hostId: string) {
+  return t.run(async (ctx) =>
+    ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", hostId))
+      .unique(),
+  );
+}
+
+function hostEventTypes(t: Tester, hostId: string): Promise<string[]> {
+  return t.run(async (ctx) =>
+    (
+      await ctx.db
+        .query("hostEvents")
+        .withIndex("by_host_id", (q) => q.eq("hostId", hostId))
+        .collect()
+    ).map((e) => e.type),
+  );
+}
+
+// #89: a host reports the golden its new ephemerals clone, so a golden-refresh
+// can confirm the host converged (and a stale host is visible). Both the
+// self-registration insert and the update path persist it.
+test("heartbeat persists the reported goldenImage on insert and update", async () => {
+  const t = newT();
+  // Self-registration carries the golden through.
+  await t.mutation(api.hosts.heartbeat, {
+    hostId: "host-1",
+    secret: SECRET,
+    goldenImage: "golden-v4",
+  });
+  await drainScheduled(t);
+  expect((await getHost(t, "host-1"))?.goldenImage).toBe("golden-v4");
+
+  // A later heartbeat with the new golden (the post-swap state) updates it.
+  await t.mutation(api.hosts.heartbeat, {
+    hostId: "host-1",
+    secret: SECRET,
+    goldenImage: "golden-v5",
+  });
+  expect((await getHost(t, "host-1"))?.goldenImage).toBe("golden-v5");
+
+  // A heartbeat that omits it leaves the last-known golden in place (an older
+  // agent shouldn't wipe the field).
+  await t.mutation(api.hosts.heartbeat, { hostId: "host-1", secret: SECRET });
+  expect((await getHost(t, "host-1"))?.goldenImage).toBe("golden-v5");
+});
+
+test("fleetSnapshot surfaces each host's goldenImage", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+      goldenImage: "golden-v5",
+    });
+  });
+  const snap = await t.query(internal.hosts.fleetSnapshot, {});
+  expect(snap.hosts[0]?.goldenImage).toBe("golden-v5");
+});
+
+// #89: draining excludes a host from placement (pickHost skips it) without
+// touching its in-flight VMs; rejoining flips it back and drains the queue.
+test("setHostStatus drains and rejoins a host, recording fleet events", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+    });
+  });
+
+  expect(
+    await t.mutation(internal.hosts.setHostStatus, {
+      hostId: "host-1",
+      status: "draining",
+    }),
+  ).toEqual({ found: true });
+  expect((await getHost(t, "host-1"))?.status).toBe("draining");
+
+  expect(
+    await t.mutation(internal.hosts.setHostStatus, {
+      hostId: "host-1",
+      status: "active",
+    }),
+  ).toEqual({ found: true });
+  expect((await getHost(t, "host-1"))?.status).toBe("active");
+
+  expect(await hostEventTypes(t, "host-1")).toEqual(["draining", "rejoined"]);
+});
+
+test("setHostStatus rejoin drains the queue onto the host", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining", // out of rotation, both slots free
+      lastSeenAt: Date.now(),
+    });
+  });
+  await seedQueuedTask(t, "task-q");
+
+  // While draining, the queued task can't be placed.
+  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
+  expect((await getTask(t, "task-q"))?.devboxId).toBeUndefined();
+
+  // Rejoining flips it active AND kicks the queue drain.
+  await t.mutation(internal.hosts.setHostStatus, {
+    hostId: "host-1",
+    status: "active",
+  });
+  await drainScheduled(t);
+  expect((await getTask(t, "task-q"))?.devboxId).toBeDefined();
+});
+
+test("setHostStatus leaves a provisioning host alone and reports unknown hosts", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-prov",
+      maxVms: 2,
+      status: "provisioning",
+      lastSeenAt: Date.now(),
+      provisionRequestedAt: Date.now(),
+    });
+  });
+
+  // A host mid-bootstrap is never disturbed by a refresh toggle.
+  expect(
+    await t.mutation(internal.hosts.setHostStatus, {
+      hostId: "host-prov",
+      status: "draining",
+    }),
+  ).toEqual({ found: true });
+  expect((await getHost(t, "host-prov"))?.status).toBe("provisioning");
+
+  // An unknown host is a no-op, surfaced as found:false (a typo'd --hosts arg).
+  expect(
+    await t.mutation(internal.hosts.setHostStatus, {
+      hostId: "nope",
+      status: "draining",
+    }),
+  ).toEqual({ found: false });
+});
+
+// #89 all-at-once: force-evict every ephemeral on a host (mark retiring +
+// enqueue destroy_vm), abandoning in-flight tasks. Permanent devboxes and other
+// hosts' VMs are never touched.
+test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals only", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining",
+      lastSeenAt: now,
+    });
+    // Two ephemerals on host-1 (one busy mid-task, one still provisioning).
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-busy",
+      gatewayUrl: "http://eph-busy.ts.example.com:8787",
+      status: "busy",
+      taskId: "task-x",
+      hostId: "host-1",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-prov",
+      gatewayUrl: "http://eph-prov.ts.example.com:8787",
+      status: "provisioning",
+      taskId: "task-y",
+      hostId: "host-1",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+    // An ephemeral on a DIFFERENT host — untouched.
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-other",
+      gatewayUrl: "http://eph-other.ts.example.com:8787",
+      status: "busy",
+      taskId: "task-z",
+      hostId: "host-2",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+    // The permanent devbox (no hostId, not ephemeral) — never evicted.
+    await ctx.db.insert("devboxes", {
+      devboxId: "devbox-1",
+      gatewayUrl: "http://devbox-1.ts.example.com:8787",
+      status: "warm",
+      lastSeenAt: now,
+    });
+  });
+
+  const result = await t.mutation(internal.hosts.evictHostEphemerals, {
+    hostId: "host-1",
+  });
+  expect(result).toEqual({ evicted: 2, devboxIds: ["eph-busy", "eph-prov"] });
+
+  // Both host-1 ephemerals are now retiring with their task association cleared.
+  const byId = async (id: string) =>
+    t.run(async (ctx) =>
+      ctx.db
+        .query("devboxes")
+        .withIndex("by_devbox_id", (q) => q.eq("devboxId", id))
+        .unique(),
+    );
+  for (const id of ["eph-busy", "eph-prov"]) {
+    const d = await byId(id);
+    expect(d?.status).toBe("retiring");
+    expect(d?.taskId).toBeUndefined();
+  }
+  // The other host's VM and the permanent devbox are untouched.
+  expect((await byId("eph-other"))?.status).toBe("busy");
+  expect((await byId("devbox-1"))?.status).toBe("warm");
+
+  // A destroy_vm was enqueued to host-1 for each evicted ephemeral.
+  const commands = await allHostCommands(t);
+  expect(commands.every((c) => c.kind === "destroy_vm")).toBe(true);
+  expect(
+    commands
+      .map((c) => (JSON.parse(c.payload) as { devboxId: string }).devboxId)
+      .sort(),
+  ).toEqual(["eph-busy", "eph-prov"]);
+  expect(commands.every((c) => c.hostId === "host-1")).toBe(true);
+
+  // The force-eviction is surfaced as a fleet event.
+  expect(await hostEventTypes(t, "host-1")).toContain("force_evicted");
+});
+
+test("evictHostEphemerals is a no-op (no event, no command) on a host with none", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining",
+      lastSeenAt: Date.now(),
+    });
+  });
+  expect(
+    await t.mutation(internal.hosts.evictHostEphemerals, { hostId: "host-1" }),
+  ).toEqual({ evicted: 0, devboxIds: [] });
+  expect(await allHostCommands(t)).toEqual([]);
+  expect(await hostEventTypes(t, "host-1")).toEqual([]);
+});

@@ -68,16 +68,20 @@ every initiator is a local checkout:
   on fleet hosts themselves, where the payload has no git checkout.
 
 **Convex fleet lock** — [scripts/fleet-lock.sh](scripts/fleet-lock.sh), an
-authoritative lease in Convex state. Use it for fleet **provisioning**
-(`scripts/provision-host.sh`, `scripts/adopt-host.sh`), which is **multi-origin**
-— a laptop, a GitHub Actions runner ([provision-host.yml](.github/workflows/provision-host.yml)),
-or the future capacity monitor (#88) can all mutate live host state Convex reads
-immediately, so only authoritative Convex state can serialize them. It is one
-**global** lock: one fleet op at a time across all origins; parallelism (the GH
-Actions matrix provisioning several hosts) happens *within* a single held op. As
-a lease it auto-reclaims if a holder dies mid-op (the distributed analogue of
-the local lock's dead-owner steal). New Mac hosts are provisioned by the GitHub
-Actions workflow, not on a task-running host.
+authoritative lease in Convex state. Use it for live-fleet mutation: **provisioning**
+(`scripts/provision-host.sh`, `scripts/adopt-host.sh`) and the **golden-refresh**
+(`scripts/refresh-golden.sh`, [refresh-golden.yml](.github/workflows/refresh-golden.yml),
+#89 — rolls a new `golden:vN` across the standing warm fleet). Both are
+**multi-origin** — a laptop, a GitHub Actions runner
+([provision-host.yml](.github/workflows/provision-host.yml)), or the future
+capacity monitor (#88) can all mutate live host state Convex reads immediately, so
+only authoritative Convex state can serialize them. It is one **global** lock: one
+fleet op at a time across all origins (a roll and a provision can't race);
+parallelism (the GH Actions matrix provisioning several hosts, or all-at-once
+refreshing several) happens *within* a single held op. As a lease it auto-reclaims
+if a holder dies mid-op (the distributed analogue of the local lock's dead-owner
+steal). New Mac hosts are provisioned by the GitHub Actions workflow, not on a
+task-running host.
 
 Merge hygiene across worktrees: never hand-merge `bun.lock` (take both sides'
 package.json, then re-run `bun install`) or `convex/_generated/` (re-run
