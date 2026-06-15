@@ -242,8 +242,13 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
 
   test("close() then next use relaunches on the same profile", async () => {
     await session.close();
+    // This relaunch is a second cold Chrome launch — the beforeAll warm-up
+    // can't amortize it because the test's whole point is to close and relaunch.
+    // Give it the same generous budget the warm-up uses so the #46 flake class
+    // can't resurface here (a cold launch can approach 20s on a contended runner,
+    // more if #launchWithRecovery needs its retry).
     await session.navigate(`${base}/counter`);
     const state = await session.state();
     expect(state.title).toBe("Counter");
-  }, 30_000);
+  }, 60_000);
 });
