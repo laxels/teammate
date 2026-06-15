@@ -96,6 +96,12 @@ jobs:
         host: ${{ fromJson(needs.plan.outputs.hosts) }}
     steps:
       - uses: actions/checkout@v4
+      # adopt-host.sh -> deploy-payload.sh builds the web UI LOCALLY on the
+      # runner (`bun run build`), so the runner needs bun + workspace deps.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
       - name: Install sshpass (first-contact key install fallback)
         run: sudo apt-get update && sudo apt-get install -y sshpass
       - name: Install the fleet SSH key
