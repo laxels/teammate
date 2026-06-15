@@ -46,15 +46,17 @@
 #     teammate needs, quit Chrome, then bake from that VM:
 #         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 #           --user-data-dir="$HOME/.ultraclaude/chrome-profile"
-#   - Local Network grant, FALLBACK only (#93): the gateway's Chrome now launches
-#     with --disable-features=MediaRouter (gateway/src/browser/executor.ts) so it
-#     makes no LAN traffic and the "Allow bun to find devices on local networks?"
-#     prompt should never fire — that flag is the primary fix. ONLY if it still
-#     fires: boot a VM with graphics, run a browser task to surface the prompt,
-#     click Allow once (or System Settings > Privacy & Security > Local Network →
-#     enable bun), then bake from that VM. macOS exposes NO programmatic seed for
-#     this — it is a Network Extension policy (necp.plist, keyed by signing
-#     identifier), not a TCC row, so scripts/seed-devbox-tcc.sh cannot grant it.
+#   - Local Network grant (#93): silence the "Allow bun to find devices on local
+#     networks?" prompt that otherwise hangs on the headless desktop and stalls
+#     browser tasks. Boot a VM with graphics, run a browser task to surface the
+#     prompt, click Allow once (or System Settings > Privacy & Security > Local
+#     Network → enable bun), then bake from that VM. This manual grant is the
+#     ONLY mechanism: macOS exposes no programmatic seed (it is a Network
+#     Extension policy — necp.plist, keyed by signing identifier — not a TCC row,
+#     so scripts/seed-devbox-tcc.sh cannot grant it), and a Chrome launch flag
+#     does not help (playwright-core already disables MediaRouter/DialMediaRoute-
+#     Provider yet the prompt still fires, so Cast/DIAL discovery is not the
+#     trigger). The grant lives on disk, so it persists across `tart clone`.
 #   - OAuth re-mint (#36): a DECISION, not always needed — cloning carries the
 #     working token forward (see PRESERVES above). Re-mint only when the token
 #     must change; it needs an interactive `claude` login that CLOBBERS

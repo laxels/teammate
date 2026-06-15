@@ -23,10 +23,12 @@
 # on local networks?" prompt). On macOS Sequoia that is NOT a TCC service — it
 # is a Network Extension policy (/Library/Preferences/com.apple.networkextension
 # .necp.plist, keyed by code-signing identifier), with no supported way to set
-# it programmatically (no tccutil service, no MDM/profile payload). It is
-# handled instead by suppressing the trigger — Chrome launches with
-# --disable-features=MediaRouter (gateway/src/browser/executor.ts) so it makes
-# no LAN traffic — with a manually-baked grant as the fallback (#93; see
+# it programmatically (no tccutil service, no MDM/profile payload). Nor can a
+# Chrome launch flag suppress the trigger: playwright-core already launches
+# Chrome with --disable-features=...,MediaRouter,DialMediaRouteProvider,... and
+# the prompt fires anyway, so Cast/DIAL discovery is not what trips it. It is
+# handled by a one-time manual grant (click Allow once in a VM with graphics),
+# which persists across `tart clone` like the rows below (#93; see
 # scripts/bake-golden.sh).
 #
 # Grants persist across `tart clone`, so running this once before a bake is
