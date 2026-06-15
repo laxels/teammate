@@ -8,15 +8,24 @@ import {
   type PermissionMode as SdkPermissionMode,
   query as sdkQuery,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { PermissionMode, StartTaskRequest } from "../../shared/protocol";
-import type { EventSender } from "./events";
+import {
+  DETAIL_MAX_CHARS,
+  type PermissionMode,
+  type StartTaskRequest,
+} from "../../shared/protocol";
+import type { EventExtra, EventSender, ScreenshotUploader } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
 import type { ScreenRecorder } from "./recorder";
 import {
+  clip,
   excerpt,
   extractAskUserQuestion,
   extractAssistantText,
+  extractToolResults,
+  extractToolUses,
   mapResultMessage,
+  prettyToolName,
+  stringifyToolInput,
 } from "./summary";
 import { createThrottler, type Throttler } from "./throttle";
 
@@ -48,9 +57,10 @@ export type SessionManagerDeps = {
   now?: () => number;
   progressIntervalMs?: number;
   historyCapacity?: number;
-  /** Persists the task's transcript when it reaches a terminal status, so
-   * the session record outlives the ephemeral VM. Best-effort. */
-  uploadTranscript?: (taskId: string, messages: unknown[]) => Promise<void>;
+  /** Uploads a tool-result screenshot to Convex storage, returning its
+   * storageId (or null on failure) for a tool_result timeline event (#70).
+   * Best-effort; absent in tests that don't exercise screenshots. */
+  uploadScreenshot?: ScreenshotUploader;
   /** Screen-recording lifecycle, started when the task's agent loop starts and
    * finished at its FIRST terminal status (a finished-but-steerable session
    * keeps running, but the task's recording is done). Best-effort. */
@@ -151,9 +161,14 @@ export class SessionManager {
   #progressIntervalMs: number;
   #history: RingBuffer<SDKMessage>;
   #historyCapacity: number = HISTORY_CAPACITY;
-  #uploadTranscript:
-    | ((taskId: string, messages: unknown[]) => Promise<void>)
-    | null = null;
+  #uploadScreenshot: ScreenshotUploader | null = null;
+  /** tool_use id -> pretty tool name, so a tool_result event can name the tool
+   * that produced it. Reset per task; bounded by the task's tool-call count. */
+  #toolUseNames = new Map<string, string>();
+  /** Serializes tool-result emissions (each awaits a screenshot upload) and the
+   * terminal event behind them, so a fast finish neither drops the last
+   * screenshot nor reorders it past `completed`. Reset per task. */
+  #toolResultTail: Promise<void> = Promise.resolve();
   #recorder: Pick<ScreenRecorder, "start" | "finish"> | null = null;
   /** True between a task's recording start and its (once-only) finish. */
   #recordingActive = false;
@@ -193,7 +208,7 @@ export class SessionManager {
     this.#progressIntervalMs = deps.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
     this.#historyCapacity = deps.historyCapacity ?? HISTORY_CAPACITY;
     this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
-    this.#uploadTranscript = deps.uploadTranscript ?? null;
+    this.#uploadScreenshot = deps.uploadScreenshot ?? null;
     this.#recorder = deps.recorder ?? null;
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
     this.#watchdogConfig = {
@@ -231,10 +246,11 @@ export class SessionManager {
     this.#interrupted = false;
     this.#turnInFlight = true;
     this.#terminalEmitted = false;
-    // Per-task transcript: a fresh buffer means history replay (and the
-    // persisted transcript) never carries a previous task's tail.
+    // Per-task buffer: history replay never carries a previous task's tail.
     this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
+    this.#toolUseNames.clear();
+    this.#toolResultTail = Promise.resolve();
 
     const queue = createAsyncQueue<SDKUserMessage>();
     queue.push(userMessage(request.prompt));
@@ -323,7 +339,6 @@ export class SessionManager {
     this.#turnInFlight = false;
     this.#terminalEmitted = true;
     this.#emit("failed", excerpt(`Session watchdog: ${reason}`), taskId);
-    this.#sendTranscript(taskId);
     this.#finishRecording(taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
@@ -447,7 +462,6 @@ export class SessionManager {
           ),
           taskId,
         );
-        this.#sendTranscript(taskId);
       }
     } finally {
       // Only report "stopped" when the interrupt actually cut a turn short;
@@ -455,7 +469,6 @@ export class SessionManager {
       // the task's terminal status.
       if (this.#interrupted && this.#turnInFlight) {
         this.#emit("stopped", "Stopped by interrupt.", taskId);
-        this.#sendTranscript(taskId);
       }
       // The recording finishes on any session wind-down too — covering an
       // interrupt of a finished-but-steerable session whose terminal result
@@ -474,13 +487,6 @@ export class SessionManager {
     }
   }
 
-  /** Persist the current transcript snapshot (latest write wins server-side,
-   * so a steered follow-up turn after completion refreshes the record). */
-  #sendTranscript(taskId: string | null = this.#taskId): void {
-    if (this.#uploadTranscript === null || taskId === null) return;
-    void this.#uploadTranscript(taskId, this.#history.snapshot());
-  }
-
   /** Stop + upload the task's screen recording, exactly once, at its first
    * terminal status. Unlike the transcript (re-sent on every result so a
    * steered follow-up refreshes it), the recording is finalized once: the
@@ -496,30 +502,108 @@ export class SessionManager {
   }
 
   #handleLifecycle(message: SDKMessage): void {
+    if (this.#interrupted) return;
     if (message.type === "assistant") {
-      // Skip subagent chatter; progress summaries come from the main thread.
+      // Skip subagent chatter; the timeline + summaries come from the main
+      // thread (the screen recording is of the main agent's desktop too).
       if (message.parent_tool_use_id !== null) return;
       // AskUserQuestion = the session is blocked on a human answer. Bypasses
       // the progress throttle: this is exactly the event the user must see.
       const question = extractAskUserQuestion(message);
-      if (question !== null && !this.#interrupted) {
+      if (question !== null) {
         this.#emit("needs_input", excerpt(question));
         return;
       }
       const text = extractAssistantText(message);
-      if (text !== null && !this.#interrupted && this.#throttle.tryAcquire()) {
-        this.#emit("progress", excerpt(text));
+      if (text !== null) {
+        // Full narration for the retro timeline (#70): every turn, un-throttled,
+        // info-only. The dashboard renders this as the assistant's words and
+        // hides the throttled `progress` echo below to avoid duplication.
+        this.#emitInfo("assistant_text", excerpt(text), {
+          detail: clip(text, DETAIL_MAX_CHARS),
+        });
+        // The throttled excerpt still drives the Slack thread + "running"
+        // liveness, exactly as before.
+        if (this.#throttle.tryAcquire()) this.#emit("progress", excerpt(text));
+      }
+      // Each tool the model invoked this turn -> a collapsible timeline entry.
+      for (const use of extractToolUses(message)) {
+        const name = prettyToolName(use.name);
+        // Remember the name so the matching tool_result can label itself.
+        this.#toolUseNames.set(use.id, name);
+        // AskUserQuestion is already surfaced as needs_input above.
+        if (use.name === "AskUserQuestion") continue;
+        this.#emitInfo("tool_call", name, {
+          tool: name,
+          detail: clip(stringifyToolInput(use.input), DETAIL_MAX_CHARS),
+        });
       }
       return;
     }
+    if (message.type === "user") {
+      // Tool results (computer-use returns a screenshot after each action).
+      // Subagent results are skipped, like subagent assistant text.
+      if (message.parent_tool_use_id !== null) return;
+      const taskId = this.#taskId;
+      if (taskId === null) return;
+      // Serialize on the tail so the (async, screenshot-uploading) emission
+      // ORDERS before the terminal event and, crucially, carries the taskId
+      // captured NOW — the SDK can yield `result` right after this message and
+      // wind the session down (clearing #taskId) before the upload resolves.
+      this.#toolResultTail = this.#toolResultTail.then(() =>
+        this.#emitToolResults(message, taskId),
+      );
+      return;
+    }
     if (message.type === "result") {
-      if (this.#interrupted) return; // "stopped" is emitted at session end.
       this.#turnInFlight = false;
       this.#terminalEmitted = true;
       const terminal = mapResultMessage(message);
-      this.#emit(terminal.type, terminal.summary);
-      this.#sendTranscript();
+      const taskId = this.#taskId;
+      // Drain in-flight tool-result emissions (screenshot uploads) BEFORE the
+      // terminal status, so a fast-finishing task can't drop its last
+      // screenshot/result and the timeline stays in order. taskId is captured
+      // because the session may have wound down by the time the tail resolves.
+      this.#toolResultTail = this.#toolResultTail.then(() => {
+        if (taskId !== null) {
+          void this.#deps.emitEvent(taskId, terminal.type, terminal.summary);
+        }
+      });
       this.#finishRecording();
+    }
+  }
+
+  /** Emit each tool_result as a timeline event, uploading any screenshot to
+   * Convex storage first so the event can reference it by storageId (#70).
+   * Runs on #toolResultTail (serialized), with the taskId captured by the
+   * caller so a wound-down session never drops the event. */
+  async #emitToolResults(
+    message: SDKUserMessage,
+    taskId: string,
+  ): Promise<void> {
+    for (const result of extractToolResults(message)) {
+      if (this.#interrupted) return;
+      const tool = this.#toolUseNames.get(result.toolUseId);
+      let imageStorageId: string | undefined;
+      const firstImage = result.images[0];
+      if (firstImage !== undefined && this.#uploadScreenshot !== null) {
+        const bytes = Uint8Array.from(Buffer.from(firstImage.data, "base64"));
+        const id = await this.#uploadScreenshot(bytes, firstImage.mimeType);
+        if (id !== null) imageStorageId = id;
+      }
+      const summary =
+        result.text !== ""
+          ? excerpt(result.text)
+          : imageStorageId !== undefined
+            ? "Screenshot"
+            : "Tool result";
+      void this.#deps.emitEvent(taskId, "tool_result", summary, {
+        ...(tool === undefined ? {} : { tool }),
+        ...(result.text === ""
+          ? {}
+          : { detail: clip(result.text, DETAIL_MAX_CHARS) }),
+        ...(imageStorageId === undefined ? {} : { imageStorageId }),
+      });
     }
   }
 
@@ -530,5 +614,16 @@ export class SessionManager {
   ): void {
     if (taskId === null) return;
     void this.#deps.emitEvent(taskId, type, summary);
+  }
+
+  /** Emit an info event (#70) for the current task, with its enrichment. Info
+   * events always belong to the live task, so there is no taskId override. */
+  #emitInfo(
+    type: Parameters<EventSender>[1],
+    summary: string,
+    extra: EventExtra,
+  ): void {
+    if (this.#taskId === null) return;
+    void this.#deps.emitEvent(this.#taskId, type, summary, extra);
   }
 }
