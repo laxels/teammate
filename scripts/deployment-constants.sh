@@ -8,24 +8,34 @@
 #
 # SOURCE this file (don't exec it):
 #   source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deployment-constants.sh"
-# It only assigns variables; it sets no shell options and runs no commands, so
-# it is safe to source under `set -euo pipefail`.
+# It only assigns variables; it sets no shell options and runs no commands, so it
+# is safe to source under `set -euo pipefail`.
 #
-# Every value is overridable from the environment, so a caller can point a run
-# at a different deployment without editing this file — the GitHub Actions
-# provisioner injects CONVEX_SITE_URL, and the #30 prod cutover will set the
-# slug. When no override is present the pinned dev defaults below apply.
+# The two Convex endpoints are the SAME deployment's .convex.site and
+# .convex.cloud hosts, so CONVEX_URL is DERIVED from CONVEX_SITE_URL (a TLD swap)
+# rather than defaulted on its own. That closes the drift #81 exists to kill:
+# overriding only CONVEX_SITE_URL (to repoint a run, or to a mock) can no longer
+# leave CONVEX_URL pointing at the old deployment — which would send the fleet's
+# lock/status/event HTTP calls to one deployment while writing hostagent.env with
+# another. Override precedence (each independently honored, both stay in step):
+#   CONVEX_SITE_URL  > derived from CONVEX_DEPLOYMENT_SLUG  (default below)
+#   CONVEX_URL       > derived from CONVEX_SITE_URL via .convex.site->.convex.cloud
+# To repoint the whole fleet at another deployment, set CONVEX_DEPLOYMENT_SLUG
+# (e.g. the #30 prod cutover) — both URLs follow.
 #
-# NOTE: the YAML manifests that can't source shell — slack-manifest.yaml and
-# .github/workflows/provision-host.yml — still carry their own pinned copies of
-# these URLs. Keep them in step with this file until the #30 prod cutover
-# parameterizes them.
+# NOTE: slack-manifest.yaml hardcodes its request URL and can't source shell, so
+# it keeps its own pinned copy; keep it in step until the #30 cutover. (The
+# GitHub Actions provisioner pins no URL — it runs these scripts, which derive
+# everything from the slug below.)
 
 # The Convex deployment slug. The Convex *project* is "teammate"; this is the
 # concrete *deployment* (currently the dev deployment, dev:zealous-robin-941).
 CONVEX_DEPLOYMENT_SLUG="${CONVEX_DEPLOYMENT_SLUG:-zealous-robin-941}"
-# The deployment's two public URLs, derived from the slug.
 CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://${CONVEX_DEPLOYMENT_SLUG}.convex.site}"
-CONVEX_URL="${CONVEX_URL:-https://${CONVEX_DEPLOYMENT_SLUG}.convex.cloud}"
+# Same deployment as CONVEX_SITE_URL: derive the .convex.cloud host from it so
+# the pair can never silently address different deployments. (A real Convex
+# deployment's two endpoints differ only by this TLD; a non-matching site URL,
+# e.g. a localhost mock, has no .convex.site to swap and simply carries over.)
+CONVEX_URL="${CONVEX_URL:-${CONVEX_SITE_URL/.convex.site/.convex.cloud}}"
 # The tailnet DNS suffix; VMs/hosts get deterministic <name>.<suffix> names.
 TAILNET_SUFFIX="${TAILNET_SUFFIX:-tail4d21c4.ts.net}"

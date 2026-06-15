@@ -36,8 +36,10 @@ concurrency:
   group: fleet-provision
   cancel-in-progress: false
 
-env:
-  CONVEX_SITE_URL: https://zealous-robin-941.convex.site
+# No deployment URL is pinned here: the scripts below derive the Convex
+# endpoints from CONVEX_DEPLOYMENT_SLUG (scripts/deployment-constants.sh, the
+# single source of truth — issue #81). Set CONVEX_DEPLOYMENT_SLUG here to target
+# a different deployment per run.
 
 jobs:
   # Parse the host list into a JSON array for the matrix.

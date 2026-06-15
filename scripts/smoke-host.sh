@@ -10,8 +10,8 @@
 # Usage: scripts/smoke-host.sh <host-ssh> <host-name>
 #        e.g. scripts/smoke-host.sh m1@51.x.x.x ultraclaude-host-2
 #
-# Env: CONVEX_SITE_URL (default prod), DEVBOX_SHARED_SECRET (env or .env),
-#      GOLDEN_LOCAL (default golden-v4).
+# Env: CONVEX_DEPLOYMENT_SLUG (default in scripts/deployment-constants.sh),
+#      DEVBOX_SHARED_SECRET (env or .env), GOLDEN_LOCAL (default golden-v4).
 
 set -euo pipefail
 
