@@ -28,7 +28,11 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   `cleanupPeriodDays`), `switchModelsOnFlag: false`, subscription OAuth token at
   `~/claude-oauth-token.txt`. Browser-tool deps (`playwright-core`, PR #23) are
   baked into node_modules as of v4, so ephemerals no longer install it at
-  provision time. Computer-use prerequisites baked in: `cliclick`
+  provision time. The browser tool launches Chrome with
+  `--disable-features=MediaRouter` so its startup mDNS/Cast discovery never
+  trips the macOS Sequoia Local Network prompt — a Network Extension policy
+  (not TCC) with no programmatic seed, so suppressing the trigger is the fix
+  (#93). Computer-use prerequisites baked in: `cliclick`
   at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
   (SIP is disabled in the guest; grants persist across clones), 1920x1080
   display (1:1 points==pixels), `en-US` locale, never-sleep/no-screen-lock,
@@ -47,8 +51,9 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   port 8787): noVNC needs a secure context (`crypto.subtle`).
 - Devbox VM networking is host-NAT (192.168.64.x); nothing on the host proxies
   VM traffic in production — the gateway binds inside the VM and is reached
-  over the VM's own tailnet address. (macOS Local Network TCC silently blocks
-  non-Apple-signed host processes from reaching VM IPs.)
+  over the VM's own tailnet address. (macOS Local Network privacy — a Network
+  Extension policy, not TCC — silently blocks non-Apple-signed host processes
+  from reaching VM IPs.)
 
 ## Task flow
 

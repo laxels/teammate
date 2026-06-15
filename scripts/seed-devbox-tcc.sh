@@ -19,6 +19,16 @@
 # rows on use and re-prompts/denies synthetic grants, so that path was
 # replaced with raw CGEvent keycodes (see gateway/src/computer/executor.ts).
 #
+# CANNOT be seeded here: Local Network access (the "Allow bun to find devices
+# on local networks?" prompt). On macOS Sequoia that is NOT a TCC service — it
+# is a Network Extension policy (/Library/Preferences/com.apple.networkextension
+# .necp.plist, keyed by code-signing identifier), with no supported way to set
+# it programmatically (no tccutil service, no MDM/profile payload). It is
+# handled instead by suppressing the trigger — Chrome launches with
+# --disable-features=MediaRouter (gateway/src/browser/executor.ts) so it makes
+# no LAN traffic — with a manually-baked grant as the fallback (#93; see
+# scripts/bake-golden.sh).
+#
 # Grants persist across `tart clone`, so running this once before a bake is
 # enough for every clone of the image.
 

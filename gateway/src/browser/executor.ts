@@ -380,6 +380,18 @@ export class BrowserSession {
         "--no-first-run",
         "--no-default-browser-check",
         "--window-size=1440,900",
+        // Disable the Media Router (Cast/DIAL). At startup it fires mDNS/SSDP
+        // multicast onto the LAN, which on macOS Sequoia trips the "Allow bun
+        // to find devices on local networks?" prompt — attributed to the
+        // gateway (the bun process that spawned Chrome) and left hanging on
+        // the headless desktop, stalling the task. We never cast, so killing
+        // discovery removes the only LAN traffic Chrome makes at launch. macOS
+        // has no supported way to pre-grant Local Network access (it's a
+        // Network Extension policy keyed by signing identifier, NOT a TCC
+        // service, so scripts/seed-devbox-tcc.sh can't grant it), which makes
+        // suppressing the trigger the robust fix; a manually-baked grant is
+        // the documented fallback (see scripts/bake-golden.sh). (#93)
+        "--disable-features=MediaRouter",
       ],
     });
     for (const page of context.pages()) {
