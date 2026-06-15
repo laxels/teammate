@@ -800,6 +800,129 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
   expect(await hostEventTypes(t, "host-1")).toContain("force_evicted");
 });
 
+// #89 review: force-evicting a BUSY ephemeral must not strand its task. The
+// task is terminally failed (+ a failed event + notify) and its gateway commands
+// dropped, so it doesn't look `running` forever behind a destroyed VM — mirrors
+// the provisionVmFailed / orphan-reconciliation surfacing.
+test("evictHostEphemerals terminally fails the in-flight task and drops its commands", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining",
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-busy",
+      gatewayUrl: "http://eph-busy.ts.example.com:8787",
+      status: "busy",
+      taskId: "task-x",
+      hostId: "host-1",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("tasks", {
+      taskId: "task-x",
+      title: "In-flight task",
+      prompt: "do the thing",
+      status: "running",
+      placement: "ephemeral",
+      devboxId: "eph-busy",
+      slackChannel: "C1",
+      slackThreadTs: "100.0",
+      createdAt: now,
+      updatedAt: now,
+    });
+    // A gateway command outstanding for the soon-destroyed VM.
+    await ctx.db.insert("commands", {
+      commandId: "cmd-x",
+      devboxId: "eph-busy",
+      kind: "start",
+      payload: "{}",
+      status: "pending",
+      createdAt: now,
+    });
+  });
+
+  await t.mutation(internal.hosts.evictHostEphemerals, { hostId: "host-1" });
+  await drainScheduled(t);
+
+  // The devbox is retiring with its task detached, and a destroy_vm is queued.
+  const devbox = await t.run(async (ctx) =>
+    ctx.db
+      .query("devboxes")
+      .withIndex("by_devbox_id", (q) => q.eq("devboxId", "eph-busy"))
+      .unique(),
+  );
+  expect(devbox?.status).toBe("retiring");
+  expect(devbox?.taskId).toBeUndefined();
+  expect((await allHostCommands(t)).map((c) => c.kind)).toEqual(["destroy_vm"]);
+
+  // The task is terminally failed (not left `running`), with a failed event…
+  const task = await getTask(t, "task-x");
+  expect(task?.status).toBe("failed");
+  expect(typeof task?.finishedAt).toBe("number");
+  const events = await t.run(async (ctx) =>
+    ctx.db
+      .query("taskEvents")
+      .withIndex("by_task_id", (q) => q.eq("taskId", "task-x"))
+      .collect(),
+  );
+  expect(events.map((e) => e.type)).toEqual(["failed"]);
+  // …and the dead VM's gateway command is gone.
+  expect(await commandDevboxes(t)).toEqual([]);
+});
+
+// An already-terminal task on an evicted devbox is never regressed (e.g. it
+// completed in the drain window just before the force-evict).
+test("evictHostEphemerals never regresses an already-terminal task", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "draining",
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("devboxes", {
+      devboxId: "eph-done",
+      gatewayUrl: "http://eph-done.ts.example.com:8787",
+      status: "busy",
+      taskId: "task-done",
+      hostId: "host-1",
+      ephemeral: true,
+      lastSeenAt: now,
+    });
+    await ctx.db.insert("tasks", {
+      taskId: "task-done",
+      title: "Finished task",
+      prompt: "done",
+      status: "completed",
+      placement: "ephemeral",
+      devboxId: "eph-done",
+      slackChannel: "C1",
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: now,
+    });
+  });
+
+  await t.mutation(internal.hosts.evictHostEphemerals, { hostId: "host-1" });
+  await drainScheduled(t);
+
+  expect((await getTask(t, "task-done"))?.status).toBe("completed");
+  const events = await t.run(async (ctx) =>
+    ctx.db
+      .query("taskEvents")
+      .withIndex("by_task_id", (q) => q.eq("taskId", "task-done"))
+      .collect(),
+  );
+  expect(events).toEqual([]); // no spurious "failed" event
+});
+
 test("evictHostEphemerals is a no-op (no event, no command) on a host with none", async () => {
   const t = newT();
   await t.run(async (ctx) => {
