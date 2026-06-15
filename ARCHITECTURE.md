@@ -130,8 +130,12 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 - Devbox sessions get two complementary browser paths: Playwright `browser_*`
   MCP tools (`gateway/src/browser/`) for everything inside a web page, and the
-  pixel computer-use tools for native dialogs, browser UI outside the page,
-  and sites that defeat DOM automation.
+  pixel computer-use tools (`gateway/src/computer/`) for native dialogs, browser
+  UI outside the page, and sites that defeat DOM automation. Both MCP servers'
+  instructions push the agent to fall back to the pixel tools *early* — after a
+  couple of failed `browser_*` attempts on a step rather than grinding on DOM/JS
+  workarounds — and the browser tools append a one-line fallback nudge to their
+  error results once actions fail repeatedly in a row.
 - The gateway owns one Chrome instance for its lifetime, launched lazily by
   `playwright-core` over a stdio pipe (`launchPersistentContext`) — NOT
   attached over CDP: playwright's bundled WebSocket client never completes its
