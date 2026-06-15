@@ -166,18 +166,48 @@ renew_loop() {
   done
 }
 
+# Run "$@" as the leader of a NEW session (its own process group) so the whole
+# descendant tree can be signalled together. Signalling only the wrapper shell
+# is not enough: if the command is blocked in a long ssh / curl / brew /
+# Scaleway call, killing the parent leaves that foreground child alive and still
+# mutating the fleet. macOS ships no setsid(1), so use python3's os.setsid (also
+# what these scripts already depend on). The returned PID == the process-group id.
+SESSION_LAUNCHER='import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])'
+
+# TERM then (after a grace) KILL an ENTIRE process group, and don't return until
+# the group is provably empty (pgrep -g exits non-zero) — so a lease-lost abort
+# cannot leave fleet-mutating descendants running. No-op (immediate) if the
+# group is already gone, e.g. the command finished normally.
+kill_group() { # <leader-pid == pgid>
+  local pid="$1" _
+  pgrep -g "$pid" >/dev/null 2>&1 || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    pgrep -g "$pid" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    pgrep -g "$pid" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "WARNING: process group $pid still has members after SIGKILL" >&2
+  return 1
+}
+
 # Background lease-keeper shared by `with` and `guard`: renew immediately, then
-# every RENEW_SECS, and KILL the given child pid the moment the lease is lost
-# (stolen / expired-and-reclaimed) — continuing to mutate the fleet without the
-# lock would break fleet-wide mutual exclusion. Returns when the lease is lost
-# or the child has exited. Run it backgrounded.
+# every RENEW_SECS, and KILL the child's whole process group the moment the
+# lease is lost (stolen / expired-and-reclaimed) — continuing to mutate the
+# fleet without the lock would break fleet-wide mutual exclusion. Returns when
+# the lease is lost (after the group is down) or the child has exited. Run it
+# backgrounded.
 abort_on_lost_lease() {
   local child="$1" rc
   while true; do
     renew_once && rc=0 || rc=$?
     if (( rc == 2 )); then
-      echo "ERROR: fleet lease lost; aborting the in-flight op." >&2
-      kill "$child" 2>/dev/null || true
+      echo "ERROR: fleet lease lost; killing the in-flight op's process group." >&2
+      kill_group "$child"
       return 0
     fi
     kill -0 "$child" 2>/dev/null || return 0
@@ -225,13 +255,14 @@ case "$cmd" in
     acquire_waiting
     # Re-entrancy: the wrapped command (and anything it calls, e.g.
     # provision-host.sh -> adopt-host.sh) sees the lock is held and runs its
-    # body directly instead of acquiring again.
-    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" "$@" &
+    # body directly instead of acquiring again. Run it as a session leader so a
+    # lost-lease abort can kill its whole descendant tree, not just the wrapper.
+    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" python3 -c "$SESSION_LAUNCHER" "$@" &
     CHILD=$!
     abort_on_lost_lease "$CHILD" &
     RENEWER=$!
-    # Always stop renewing, kill a still-running child, and release on exit.
-    trap 'kill "$RENEWER" "$CHILD" 2>/dev/null || true; release_once' EXIT
+    # Always stop renewing, kill the child's whole process group, and release.
+    trap 'kill "$RENEWER" 2>/dev/null || true; kill_group "$CHILD"; release_once' EXIT
     set +e
     wait "$CHILD"
     code=$?
@@ -249,11 +280,12 @@ case "$cmd" in
       echo "Usage: $0 guard <command> [args...]" >&2
       exit 1
     fi
-    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" "$@" &
+    # Session leader so a lost-lease abort kills the whole descendant tree.
+    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" python3 -c "$SESSION_LAUNCHER" "$@" &
     CHILD=$!
     abort_on_lost_lease "$CHILD" &
     RENEWER=$!
-    trap 'kill "$RENEWER" "$CHILD" 2>/dev/null || true' EXIT
+    trap 'kill "$RENEWER" 2>/dev/null || true; kill_group "$CHILD"' EXIT
     set +e
     wait "$CHILD"
     code=$?
