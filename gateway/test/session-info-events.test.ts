@@ -96,6 +96,41 @@ describe("info-event streaming (#70)", () => {
     expect(uploads[0]?.bytes).toBeGreaterThan(0);
   });
 
+  test("a slow screenshot upload before a fast finish still emits tool_result, before completed", async () => {
+    // The race: the SDK yields `result` right after the tool_result, so the
+    // session winds down while the screenshot is still uploading. The final
+    // screenshot must NOT be dropped, and must order before `completed`.
+    const slowUpload: ScreenshotUploader = async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      return "storage-shot-late";
+    };
+    const { queryFn } = createEchoQueryFn(() => [
+      assistantWithToolUse({
+        text: "final click",
+        toolName: "mcp__computer-use__left_click",
+        toolUseId: "tu-1",
+        input: { coordinate: [9, 9] },
+      }),
+      toolResultMessage({
+        toolUseId: "tu-1",
+        text: "Left-clicked (9, 9).",
+        imageBase64: PNG_B64,
+      }),
+      resultSuccess("done"),
+    ]);
+    const { session, events } = makeSession(queryFn, slowUpload);
+
+    session.start({ taskId: "task-1", prompt: "go" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    const types = events.map((e) => e.type);
+    const resultIdx = types.indexOf("tool_result");
+    const completedIdx = types.indexOf("completed");
+    expect(resultIdx).toBeGreaterThanOrEqual(0); // not dropped
+    expect(completedIdx).toBeGreaterThan(resultIdx); // ordered before completed
+    expect(events[resultIdx]?.imageStorageId).toBe("storage-shot-late");
+  });
+
   test("a tool_result with no uploader still records text, without an image", async () => {
     const { queryFn } = createEchoQueryFn(() => [
       assistantWithToolUse({

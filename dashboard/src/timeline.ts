@@ -57,12 +57,14 @@ export function buildTimeline(
       // below carries the same narration losslessly. Hidden to avoid dupes.
       case "progress":
         continue;
+      // The new fields are coerced with ?? null so an older backend's events
+      // (which lack detail/tool/imageUrl) never render as literal "undefined".
       case "assistant_text":
         rows.push({
           kind: "assistant",
           ts: e.ts,
           summary: e.summary,
-          detail: e.detail,
+          detail: e.detail ?? null,
         });
         break;
       case "tool_call":
@@ -71,17 +73,17 @@ export function buildTimeline(
           ts: e.ts,
           tool: e.tool ?? "tool",
           summary: e.summary,
-          detail: e.detail,
+          detail: e.detail ?? null,
         });
         break;
       case "tool_result":
         rows.push({
           kind: "tool_result",
           ts: e.ts,
-          tool: e.tool,
+          tool: e.tool ?? null,
           summary: e.summary,
-          detail: e.detail,
-          imageUrl: e.imageUrl,
+          detail: e.detail ?? null,
+          imageUrl: e.imageUrl ?? null,
         });
         break;
       default:

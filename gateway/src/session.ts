@@ -165,6 +165,10 @@ export class SessionManager {
   /** tool_use id -> pretty tool name, so a tool_result event can name the tool
    * that produced it. Reset per task; bounded by the task's tool-call count. */
   #toolUseNames = new Map<string, string>();
+  /** Serializes tool-result emissions (each awaits a screenshot upload) and the
+   * terminal event behind them, so a fast finish neither drops the last
+   * screenshot nor reorders it past `completed`. Reset per task. */
+  #toolResultTail: Promise<void> = Promise.resolve();
   #recorder: Pick<ScreenRecorder, "start" | "finish"> | null = null;
   /** True between a task's recording start and its (once-only) finish. */
   #recordingActive = false;
@@ -246,6 +250,7 @@ export class SessionManager {
     this.#history = createRingBuffer<SDKMessage>(this.#historyCapacity);
     this.#throttle = createThrottler(this.#progressIntervalMs, this.#deps.now);
     this.#toolUseNames.clear();
+    this.#toolResultTail = Promise.resolve();
 
     const queue = createAsyncQueue<SDKUserMessage>();
     queue.push(userMessage(request.prompt));
@@ -539,24 +544,43 @@ export class SessionManager {
       // Tool results (computer-use returns a screenshot after each action).
       // Subagent results are skipped, like subagent assistant text.
       if (message.parent_tool_use_id !== null) return;
-      void this.#emitToolResults(message);
+      const taskId = this.#taskId;
+      if (taskId === null) return;
+      // Serialize on the tail so the (async, screenshot-uploading) emission
+      // ORDERS before the terminal event and, crucially, carries the taskId
+      // captured NOW — the SDK can yield `result` right after this message and
+      // wind the session down (clearing #taskId) before the upload resolves.
+      this.#toolResultTail = this.#toolResultTail.then(() =>
+        this.#emitToolResults(message, taskId),
+      );
       return;
     }
     if (message.type === "result") {
       this.#turnInFlight = false;
       this.#terminalEmitted = true;
       const terminal = mapResultMessage(message);
-      this.#emit(terminal.type, terminal.summary);
+      const taskId = this.#taskId;
+      // Drain in-flight tool-result emissions (screenshot uploads) BEFORE the
+      // terminal status, so a fast-finishing task can't drop its last
+      // screenshot/result and the timeline stays in order. taskId is captured
+      // because the session may have wound down by the time the tail resolves.
+      this.#toolResultTail = this.#toolResultTail.then(() => {
+        if (taskId !== null) {
+          void this.#deps.emitEvent(taskId, terminal.type, terminal.summary);
+        }
+      });
       this.#finishRecording();
     }
   }
 
   /** Emit each tool_result as a timeline event, uploading any screenshot to
    * Convex storage first so the event can reference it by storageId (#70).
-   * Async + fire-and-forget: the run loop keeps draining while a screenshot
-   * uploads. A few-hundred-ms skew on the event's ts is immaterial to the
-   * second-granular comment alignment. */
-  async #emitToolResults(message: SDKUserMessage): Promise<void> {
+   * Runs on #toolResultTail (serialized), with the taskId captured by the
+   * caller so a wound-down session never drops the event. */
+  async #emitToolResults(
+    message: SDKUserMessage,
+    taskId: string,
+  ): Promise<void> {
     for (const result of extractToolResults(message)) {
       if (this.#interrupted) return;
       const tool = this.#toolUseNames.get(result.toolUseId);
@@ -573,7 +597,7 @@ export class SessionManager {
           : imageStorageId !== undefined
             ? "Screenshot"
             : "Tool result";
-      this.#emitInfo("tool_result", summary, {
+      void this.#deps.emitEvent(taskId, "tool_result", summary, {
         ...(tool === undefined ? {} : { tool }),
         ...(result.text === ""
           ? {}

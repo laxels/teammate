@@ -106,17 +106,25 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
   });
   const recordingStartedAt = detail.recording?.startedAt ?? null;
 
+  // The dashboard bundle deploys separately from the Convex backend
+  // (scripts/deploy-dashboard.sh ships only static files), so during a
+  // staggered rollout this page can briefly run against an older taskDetail
+  // that predates the #70 fields. Default them so the page degrades to "no
+  // comments / status-only timeline" instead of crashing on `undefined.map`.
+  const comments = detail.comments ?? [];
+  const events = detail.events ?? [];
+
   // Prompt anchors the timeline at the recording's start (so it lines up with
   // video 0), falling back to when the task first ran, then creation.
   const promptTs = recordingStartedAt ?? task.startedAt ?? task.createdAt;
-  const rows = buildTimeline(detail.events, task.prompt, promptTs);
+  const rows = buildTimeline(events, task.prompt, promptTs);
 
-  const playerComments: PlayerComment[] = detail.comments.map((c) => ({
+  const playerComments: PlayerComment[] = comments.map((c) => ({
     id: c.id,
     videoTimeSec: c.videoTimeSec,
     text: c.text,
   }));
-  const railComments: RailComment[] = detail.comments.map((c) => ({
+  const railComments: RailComment[] = comments.map((c) => ({
     id: c.id,
     videoTimeSec: c.videoTimeSec,
     text: c.text,

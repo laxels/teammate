@@ -72,6 +72,39 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("tolerates older-backend events missing the new fields (no 'undefined' leaks)", () => {
+    // Simulate a staggered rollout: events from a Convex backend that predates
+    // #70 carry only { type, summary, ts }.
+    const old = [
+      { type: "tool_call", summary: "left_click", ts: 3 },
+      { type: "tool_result", summary: "clicked", ts: 4 },
+      { type: "assistant_text", summary: "thinking", ts: 5 },
+    ] as unknown as RawEvent[];
+    const rows = buildTimeline(old, "p", 1);
+    // No tool name on old events -> the generic "tool" fallback; new fields null.
+    expect(rows[1]).toEqual({
+      kind: "tool_call",
+      ts: 3,
+      tool: "tool",
+      summary: "left_click",
+      detail: null,
+    });
+    expect(rows[2]).toEqual({
+      kind: "tool_result",
+      ts: 4,
+      tool: null,
+      summary: "clicked",
+      detail: null,
+      imageUrl: null,
+    });
+    expect(rows[3]).toEqual({
+      kind: "assistant",
+      ts: 5,
+      summary: "thinking",
+      detail: null,
+    });
+  });
+
   test("keeps status events and ignores unknown types", () => {
     const rows = buildTimeline(
       [
