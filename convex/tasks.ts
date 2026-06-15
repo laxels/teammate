@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { TaskEffort } from "../shared/protocol";
 import {
   internalMutation,
   internalQuery,
@@ -7,7 +8,11 @@ import {
 } from "./_generated/server";
 import { devboxSecretOk } from "./commands";
 import type { StoredFile } from "./files";
-import { taskFileValidator, taskStatusValidator } from "./schema";
+import {
+  effortValidator,
+  taskFileValidator,
+  taskStatusValidator,
+} from "./schema";
 
 const MAX_LISTED_TASKS = 50;
 const MAX_TASK_EVENTS = 10;
@@ -97,6 +102,9 @@ export type NewTaskArgs = {
   slackThreadTs?: string;
   slackUser?: string;
   slackPermalink?: string;
+  /** Reasoning effort for the task agent's session (#91). Absent => the
+   * gateway's "xhigh" default; set only on an explicit user request. */
+  effort?: TaskEffort;
   /** Slack attachments staged in Convex storage (see schema.taskFileValidator).
    * Resolved to URLs and handed to the devbox at start. */
   files?: StoredFile[];
@@ -124,6 +132,7 @@ export async function insertTaskRow(
     ...(args.slackPermalink === undefined
       ? {}
       : { slackPermalink: args.slackPermalink }),
+    ...(args.effort === undefined ? {} : { effort: args.effort }),
     ...(args.files === undefined || args.files.length === 0
       ? {}
       : { files: args.files }),
@@ -145,6 +154,7 @@ export const create = internalMutation({
     slackThreadTs: v.optional(v.string()),
     slackUser: v.optional(v.string()),
     slackPermalink: v.optional(v.string()),
+    effort: v.optional(effortValidator),
     files: v.optional(v.array(taskFileValidator)),
   },
   handler: async (ctx, args) => {

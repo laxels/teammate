@@ -77,7 +77,9 @@ export const STALL_WATCHDOG_MS = 10 * 60_000;
 export const WATCHDOG_INTERVAL_MS = 10_000;
 
 const MODEL = "claude-opus-4-8";
-const EFFORT = "xhigh";
+// Default reasoning effort. xhigh maximizes accuracy (model policy); a task can
+// override it per-request when the user explicitly asks for another level (#91).
+const DEFAULT_EFFORT = "xhigh";
 
 type AsyncQueue<T> = {
   push(item: T): void;
@@ -240,7 +242,7 @@ export class SessionManager {
 
     const options: Options = {
       model: MODEL,
-      effort: EFFORT,
+      effort: request.effort ?? DEFAULT_EFFORT,
       permissionMode: "bypassPermissions",
       // AskUserQuestion is the one tool bypassPermissions can't auto-allow
       // (requiresUserInteraction): without this callback the CLI fails the

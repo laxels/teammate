@@ -405,6 +405,9 @@ export const retryTask = mutation({
       ...(source.slackPermalink === undefined
         ? {}
         : { slackPermalink: source.slackPermalink }),
+      // Re-run faithfully at the same effort the original was started with (#91);
+      // absent => the gateway's xhigh default, same as the source.
+      ...(source.effort === undefined ? {} : { effort: source.effort }),
       // Carry the original shared attachments by storageId. Safe to re-use even
       // if a blob was pruned since: the gateway's /devbox/file fetch 404s and
       // it tells the session the file couldn't be downloaded (no silent drop).

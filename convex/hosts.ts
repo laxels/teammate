@@ -3,6 +3,7 @@ import {
   type HostVmPayload,
   isTerminalTaskStatus,
   type StartTaskRequest,
+  type TaskEffort,
 } from "../shared/protocol";
 import {
   ephemeralGatewayUrl,
@@ -442,6 +443,7 @@ async function dispatchTaskToSlot(
     _id: Id<"tasks">;
     taskId: string;
     prompt: string;
+    effort?: TaskEffort;
     files?: StoredFile[];
   },
   slot: { devboxId: string; hostId: string },
@@ -457,6 +459,8 @@ async function dispatchTaskToSlot(
   const request: StartTaskRequest = {
     taskId: task.taskId,
     prompt: task.prompt,
+    // Persisted on the task row at creation (#91); absent => gateway xhigh.
+    ...(task.effort !== undefined ? { effort: task.effort } : {}),
     ...(files.length > 0 ? { files } : {}),
   };
   await enqueueCommandRow(ctx, {
