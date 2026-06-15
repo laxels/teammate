@@ -24,11 +24,11 @@ HOST_ID="ultraclaude-host-1"
 TART='~/tart.app/Contents/MacOS/tart'
 SOURCE_IMAGE="golden-v4"
 VM_USER="admin"
-TAILNET_SUFFIX="tail4d21c4.ts.net"
 GATEWAY_PORT=8787
-CONVEX_SITE_URL="https://zealous-robin-941.convex.site"
-CONVEX_URL="https://zealous-robin-941.convex.cloud"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Deployment-identity constants (CONVEX_SITE_URL, CONVEX_URL, TAILNET_SUFFIX):
+# single source of truth shared with the other fleet scripts.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 GATEWAY_URL="http://$DEVBOX_ID.$TAILNET_SUFFIX:$GATEWAY_PORT"
 
 # Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so host-key
