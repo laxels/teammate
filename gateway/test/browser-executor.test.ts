@@ -51,7 +51,7 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
   let base: string;
   let profileDir: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     profileDir = mkdtempSync(join(tmpdir(), "browser-session-test-"));
     server = Bun.serve({
       port: 0,
@@ -79,7 +79,14 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
       profileDir,
       actionTimeoutMs: 3_000,
     });
-  });
+    // Pay the one-time cold Chrome launch here, in fixture setup, rather than
+    // inside the first test's timed budget. The launch is an order of magnitude
+    // slower than any warmed-up operation, and on contended CI runners it can
+    // approach a 20s per-test timeout — flaking whichever test happens to run
+    // first while every later test stays fast (#46). The generous hook timeout
+    // absorbs a slow launch without masking a genuinely slow operation.
+    await session.navigate("about:blank");
+  }, 60_000);
 
   afterAll(async () => {
     await session.close();
