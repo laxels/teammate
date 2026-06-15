@@ -28,8 +28,10 @@ beforeEach(() => {
   process.env.DASHBOARD_SECRET = SECRET;
   process.env.DEVBOX_SHARED_SECRET = "s3cret";
   process.env.TAILNET_SUFFIX = "ts.example.com";
-  // Let the drained notify.taskNote take its no-token early return instead of
-  // hitting a real Slack API (bun auto-loads .env.local with a live token).
+  // Delete SLACK_BOT_TOKEN in-process (so the guard holds regardless of cwd)
+  // so the drained notify.taskNote takes its no-token early return instead of
+  // hitting a real Slack API. bun loads the repo's `.env` (real token) into the
+  // test process, and a token can also be exported into the shell.
   savedSlackToken = process.env.SLACK_BOT_TOKEN;
   delete process.env.SLACK_BOT_TOKEN;
 });
