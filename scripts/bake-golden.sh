@@ -6,7 +6,7 @@
 # the current image (replaces the old per-version bake-golden-v2.sh; see #56).
 #
 #   Usage: scripts/bake-golden.sh [--from <image>] [--to <image>]
-#   Defaults: --from golden-v3  --to golden-v4
+#   Defaults: --from golden-v4  --to golden-v5
 #
 # What this bake does, on a clone of --from:
 #   1. ensure bun is installed (idempotent — present on v2+ images)
@@ -34,21 +34,39 @@
 #   - TCC grants, cliclick, Chrome (default browser, extension removed), the
 #                                 display/locale/DND/no-sleep environment.
 #
-# DEFERRED manual follow-ups (NOT scripted — they need credentials / a human at
-# the remote desktop, so they ride a later rebake when you have time for them):
-#   - Automation-profile site logins (#37): boot the baked image, launch Chrome
-#     against the gateway's persistent profile, log into the sites the teammate
-#     needs, quit, then re-run this bake to capture them:
+# MANUAL desktop steps (NOT scripted — they need credentials or a click in the
+# VM's GUI, so a human runs them once over VNC, then a bake from that VM
+# captures the result). Like ~/claude-oauth-token.txt above, all of these live
+# on disk and so persist across `tart clone` — capture them ONCE and they ride
+# forward into every later golden until they expire; you do NOT redo them each
+# bake:
+#   - Automation-profile site logins (#37): boot a VM with graphics, launch
+#     Chrome against the gateway's persistent profile (NOT the default-profile
+#     Chrome — this one starts logged out of everything), log into the sites the
+#     teammate needs, quit Chrome, then bake from that VM:
 #         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 #           --user-data-dir="$HOME/.ultraclaude/chrome-profile"
-#     (separate from the default-profile Chrome; starts logged out of all sites)
-#   - OAuth re-mint (#36), per the note above.
+#   - Local Network grant (#93): silence the "Allow bun to find devices on local
+#     networks?" prompt that otherwise hangs on the headless desktop and stalls
+#     browser tasks. Boot a VM with graphics, run a browser task to surface the
+#     prompt, click Allow once (or System Settings > Privacy & Security > Local
+#     Network → enable bun), then bake from that VM. This manual grant is the
+#     ONLY mechanism: macOS exposes no programmatic seed (it is a Network
+#     Extension policy — necp.plist, keyed by signing identifier — not a TCC row,
+#     so scripts/seed-devbox-tcc.sh cannot grant it), and a Chrome launch flag
+#     does not help (playwright-core already disables MediaRouter/DialMediaRoute-
+#     Provider yet the prompt still fires, so Cast/DIAL discovery is not the
+#     trigger). The grant lives on disk, so it persists across `tart clone`.
+#   - OAuth re-mint (#36): a DECISION, not always needed — cloning carries the
+#     working token forward (see PRESERVES above). Re-mint only when the token
+#     must change; it needs an interactive `claude` login that CLOBBERS
+#     ~/.claude.json, so do it as a deliberate manual step, never in this script.
 #
 # After this bake, push the image to ghcr so new hosts can pull it (host-1
 # already has the local copy this produces):
 #   TART_REGISTRY_USERNAME=laxels TART_REGISTRY_PASSWORD=$GITHUB_PAT \
-#     ~/tart.app/Contents/MacOS/tart push golden-v4 \
-#       ghcr.io/laxels/ultraclaude-golden:v4
+#     ~/tart.app/Contents/MacOS/tart push golden-v5 \
+#       ghcr.io/laxels/ultraclaude-golden:v5
 #
 # Run from anywhere on the local machine; operates on the Tart host over SSH.
 # Refuses to run if the staging or target VM already exist.
@@ -61,8 +79,8 @@ if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
   exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
 fi
 
-SOURCE_IMAGE="golden-v3"
-TARGET="golden-v4"
+SOURCE_IMAGE="golden-v4"
+TARGET="golden-v5"
 # Canonical Claude model baked into ~/.claude/settings.json. MUST match the
 # gateway/orchestrator runtime model (gateway/src/session.ts, convex/orchestrator.ts).
 MODEL="claude-opus-4-8"

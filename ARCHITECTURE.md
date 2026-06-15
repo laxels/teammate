@@ -32,7 +32,13 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   `cleanupPeriodDays`), `switchModelsOnFlag: false`, subscription OAuth token at
   `~/claude-oauth-token.txt`. Browser-tool deps (`playwright-core`, PR #23) are
   baked into node_modules as of v4, so ephemerals no longer install it at
-  provision time. Computer-use prerequisites baked in: `cliclick`
+  provision time. (PLANNED for the next rebake, NOT yet in v4: the macOS Sequoia
+  Local Network grant for `bun` — the "Allow … to find devices on local
+  networks?" prompt that otherwise hangs browser tasks — is a Network Extension
+  policy (not TCC) with no programmatic seed, so it can't ride
+  `seed-devbox-tcc.sh`; it needs a one-time manual Allow click during a bake and
+  then persists across clones. Lands with golden-v5, #93.) Computer-use
+  prerequisites baked in: `cliclick`
   at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
   (SIP is disabled in the guest; grants persist across clones), 1920x1080
   display (1:1 points==pixels), `en-US` locale, never-sleep/no-screen-lock,
@@ -51,8 +57,9 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   port 8787): noVNC needs a secure context (`crypto.subtle`).
 - Devbox VM networking is host-NAT (192.168.64.x); nothing on the host proxies
   VM traffic in production — the gateway binds inside the VM and is reached
-  over the VM's own tailnet address. (macOS Local Network TCC silently blocks
-  non-Apple-signed host processes from reaching VM IPs.)
+  over the VM's own tailnet address. (macOS Local Network privacy — a Network
+  Extension policy, not TCC — silently blocks non-Apple-signed host processes
+  from reaching VM IPs.)
 
 ## Fleet scaling
 
