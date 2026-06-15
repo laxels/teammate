@@ -108,6 +108,14 @@ async function call(
   return (await findTool(tools, name).handler(args as never, {})) as ToolResult;
 }
 
+/** Concatenate every text block of a result (the fallback hint is a separate
+ * trailing block, so single-block assertions would miss it). */
+function allText(result: ToolResult): string {
+  return result.content.map((c) => String(c.text ?? "")).join("\n");
+}
+
+const FALLBACK_MARKER = "pixel computer-use";
+
 describe("browser MCP tools", () => {
   test("exposes the expected tool surface", () => {
     const { control } = createFakeControl();
@@ -315,5 +323,78 @@ describe("browser MCP tools", () => {
     });
     expect(result.isError).toBe(true);
     expect(log).not.toContain('click(["e2",{}])');
+  });
+
+  test("a single action failure does not yet nudge toward computer use", async () => {
+    const { control } = createFakeControl({
+      click: async () => {
+        throw new Error("not actionable");
+      },
+    });
+    const tools = createBrowserTools(control);
+    const first = await call(tools, "browser_click", { ref: "e2" });
+    expect(first.isError).toBe(true);
+    expect(allText(first)).toContain("not actionable");
+    expect(allText(first)).not.toContain(FALLBACK_MARKER);
+  });
+
+  test("repeated action failures append a computer-use fallback hint", async () => {
+    const { control } = createFakeControl({
+      click: async () => {
+        throw new Error("not actionable");
+      },
+    });
+    const tools = createBrowserTools(control);
+    await call(tools, "browser_click", { ref: "e2" });
+    const second = await call(tools, "browser_click", { ref: "e2" });
+    expect(second.isError).toBe(true);
+    expect(allText(second)).toContain(FALLBACK_MARKER);
+  });
+
+  test("a successful action resets the fallback-hint counter", async () => {
+    let shouldFail = true;
+    const { control } = createFakeControl({
+      click: async () => {
+        if (shouldFail) throw new Error("not actionable");
+      },
+    });
+    const tools = createBrowserTools(control);
+    await call(tools, "browser_click", { ref: "e2" }); // failure #1
+    shouldFail = false;
+    const ok = await call(tools, "browser_click", { ref: "e2" }); // success -> reset
+    expect(ok.isError).toBeUndefined();
+    shouldFail = true;
+    const next = await call(tools, "browser_click", { ref: "e2" }); // failure #1 again
+    expect(next.isError).toBe(true);
+    expect(allText(next)).not.toContain(FALLBACK_MARKER);
+  });
+
+  test("read-only calls do not reset the fallback-hint counter", async () => {
+    const { control } = createFakeControl({
+      click: async () => {
+        throw new Error("not actionable");
+      },
+    });
+    const tools = createBrowserTools(control);
+    await call(tools, "browser_click", { ref: "e2" }); // failure #1
+    await call(tools, "browser_snapshot", {}); // re-orient, must not reset
+    const second = await call(tools, "browser_click", { ref: "e2" }); // failure #2
+    expect(allText(second)).toContain(FALLBACK_MARKER);
+  });
+
+  test("repeated browser_batch failures also drive the fallback hint", async () => {
+    const { control } = createFakeControl({
+      type: async () => {
+        throw new Error("element detached");
+      },
+    });
+    const tools = createBrowserTools(control);
+    const actions = [{ action: "browser_type", ref: "e3", text: "hi" }];
+    const first = await call(tools, "browser_batch", { actions });
+    expect(first.isError).toBe(true);
+    expect(allText(first)).not.toContain(FALLBACK_MARKER);
+    const second = await call(tools, "browser_batch", { actions });
+    expect(second.isError).toBe(true);
+    expect(allText(second)).toContain(FALLBACK_MARKER);
   });
 });
