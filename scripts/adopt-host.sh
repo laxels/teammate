@@ -36,9 +36,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Fleet hosts run these scripts from the payload dir with secrets in a
 # separate file (never shipped into VMs): ULTRACLAUDE_ENV overrides.
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
-TAILNET_SUFFIX="tail4d21c4.ts.net"
-CONVEX_SITE_URL="https://zealous-robin-941.convex.site"
-CONVEX_URL="https://zealous-robin-941.convex.cloud"
+# Deployment-identity constants (CONVEX_SITE_URL, CONVEX_URL, TAILNET_SUFFIX):
+# single source of truth shared with the other fleet scripts.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 
 log() { printf '\n==> %s\n' "$*"; }
 

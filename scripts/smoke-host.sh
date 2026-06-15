@@ -24,7 +24,9 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
-CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://zealous-robin-941.convex.site}"
+# Deployment-identity constants (CONVEX_SITE_URL): single source of truth shared
+# with the other fleet scripts; stays env-overridable.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 GOLDEN_LOCAL="${GOLDEN_LOCAL:-golden-v4}"
 # A host is "fresh" if seen within this window; > HEARTBEAT_FRESHNESS_MS (120s).
 FRESH_CUTOFF_SECS="${FLEET_SMOKE_FRESH_SECS:-180}"
