@@ -51,7 +51,7 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
   let base: string;
   let profileDir: string;
 
-  beforeAll(async () => {
+  beforeAll(() => {
     profileDir = mkdtempSync(join(tmpdir(), "browser-session-test-"));
     server = Bun.serve({
       port: 0,
@@ -79,13 +79,7 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
       profileDir,
       actionTimeoutMs: 3_000,
     });
-    // Warm up the lazy Chrome launch here, off any single test's clock. The
-    // first launchPersistentContext on a cold CI runner can exceed a test's
-    // 20s budget, which intermittently timed out whichever test launched
-    // first. Paying it once in setup, with generous headroom, lets every test
-    // start on an already-live browser.
-    await session.navigate(`${base}/counter`);
-  }, 60_000);
+  });
 
   afterAll(async () => {
     await session.close();
