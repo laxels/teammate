@@ -56,6 +56,66 @@ export function askUserQuestionMessage(question: string): SDKAssistantMessage {
   return base;
 }
 
+/** Assistant message with optional leading text plus one tool_use block (#70). */
+export function assistantWithToolUse(opts: {
+  text?: string;
+  toolName: string;
+  toolUseId: string;
+  input: unknown;
+}): SDKAssistantMessage {
+  const base = assistantMessage(opts.text ?? "");
+  base.message.content = [
+    ...(opts.text !== undefined && opts.text !== ""
+      ? ([{ type: "text", text: opts.text, citations: null }] as const)
+      : []),
+    {
+      type: "tool_use",
+      id: opts.toolUseId,
+      name: opts.toolName,
+      input: opts.input,
+    },
+  ];
+  return base;
+}
+
+/** User message carrying a single tool_result block, with optional text and a
+ * base64 image (the shape computer-use screenshots arrive in) (#70). */
+export function toolResultMessage(opts: {
+  toolUseId: string;
+  text?: string;
+  imageBase64?: string;
+  parentToolUseId?: string | null;
+}): SDKUserMessage {
+  const inner: Array<
+    | { type: "text"; text: string }
+    | {
+        type: "image";
+        source: { type: "base64"; media_type: "image/png"; data: string };
+      }
+  > = [];
+  if (opts.text !== undefined) inner.push({ type: "text", text: opts.text });
+  if (opts.imageBase64 !== undefined) {
+    inner.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: opts.imageBase64,
+      },
+    });
+  }
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: opts.toolUseId, content: inner },
+      ],
+    },
+    parent_tool_use_id: opts.parentToolUseId ?? null,
+  };
+}
+
 export function resultSuccess(text: string, isError = false): SDKResultMessage {
   return {
     type: "result",
@@ -109,6 +169,9 @@ export type RecordedEvent = {
   taskId: string;
   type: DevboxEventType;
   summary: string;
+  detail?: string;
+  tool?: string;
+  imageStorageId?: string;
 };
 
 export function createEventRecorder(): {
@@ -118,8 +181,8 @@ export function createEventRecorder(): {
   const events: RecordedEvent[] = [];
   return {
     events,
-    emitEvent: async (taskId, type, summary) => {
-      events.push({ taskId, type, summary });
+    emitEvent: async (taskId, type, summary, extra) => {
+      events.push({ taskId, type, summary, ...extra });
     },
   };
 }

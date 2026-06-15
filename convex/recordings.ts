@@ -1,6 +1,28 @@
 import { v } from "convex/values";
-import { internalMutation } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 import { recordingStatusValidator } from "./schema";
+
+/**
+ * Resolves a task's stored recording to a short-lived signed storage URL, or
+ * null when the task/recording is missing, not yet "available", or its blob was
+ * pruned. The fleet host's frame-grab endpoint (#70) calls this — via the
+ * secret-gated /devbox/recording-url route — so it can ffmpeg-seek the recording
+ * WITHOUT the browser ever supplying a URL or seeing a raw storageId.
+ */
+export const signedUrl = internalQuery({
+  args: { taskId: v.string() },
+  handler: async (ctx, args) => {
+    const task = await ctx.db
+      .query("tasks")
+      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+      .unique();
+    const storageId = task?.recording?.storageId;
+    if (task?.recording?.status !== "available" || storageId === undefined) {
+      return null;
+    }
+    return await ctx.storage.getUrl(storageId);
+  },
+});
 
 /**
  * Records a devbox screen-recording lifecycle transition on the task row (see
@@ -20,6 +42,8 @@ export const setStatus = internalMutation({
     status: recordingStatusValidator,
     storageId: v.optional(v.id("_storage")),
     bytes: v.optional(v.number()),
+    // Recorder wall-clock start (ms), sent with the first "recording" post (#70).
+    startedAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const task = await ctx.db
@@ -34,12 +58,17 @@ export const setStatus = internalMutation({
     if (task.recording?.status === "available") {
       return { applied: false };
     }
+    // startedAt is set once (with the first "recording" post) and preserved
+    // across every later transition — the "uploading"/"available" posts don't
+    // resend it, so carry forward whatever was already stored.
+    const startedAt = args.startedAt ?? task.recording?.startedAt;
     await ctx.db.patch(task._id, {
       recording: {
         status: args.status,
         ...(args.storageId === undefined ? {} : { storageId: args.storageId }),
         ...(args.bytes === undefined ? {} : { bytes: args.bytes }),
         ...(args.status === "available" ? { uploadedAt: Date.now() } : {}),
+        ...(startedAt === undefined ? {} : { startedAt }),
       },
     });
     return { applied: true };

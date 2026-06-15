@@ -11,6 +11,10 @@ export type RecordingInfo = {
   url: string | null;
   bytes: number | null;
   uploadedAt: number | null;
+  // Recorder wall-clock start (#70); null on pre-feature recordings. Optional
+  // here because playerState doesn't read it — it just rides the same query
+  // slice the page passes in.
+  startedAt?: number | null;
 } | null;
 
 export type PlayerState =

@@ -231,8 +231,12 @@ describe("SessionManager", () => {
     expect(await session.stop()).toBe(true);
     await until(() => !session.status().running);
 
+    // A single assistant turn now yields both a full, un-throttled
+    // assistant_text (retro timeline, #70) and the throttled progress excerpt
+    // (Slack), in that order, before the interrupt's stopped.
     expect(events.map((e) => e.type)).toEqual([
       "started",
+      "assistant_text",
       "progress",
       "stopped",
     ]);

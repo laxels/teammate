@@ -1,6 +1,7 @@
 import type {
   SDKAssistantMessage,
   SDKResultMessage,
+  SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { DevboxEventType } from "../../shared/protocol";
 
@@ -17,6 +18,15 @@ export function excerpt(
   const collapsed = text.replace(/\s+/g, " ").trim();
   if (collapsed.length <= maxChars) return collapsed;
   return `${collapsed.slice(0, maxChars - 1)}…`;
+}
+
+/**
+ * Truncate to `maxChars` WITHOUT collapsing whitespace — for the expandable
+ * `detail` body of a timeline event (#70), where line breaks and indentation in
+ * an assistant turn or tool I/O are worth preserving.
+ */
+export function clip(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
 }
 
 /** Concatenated text blocks of an assistant message, or null if it has none. */
@@ -75,4 +85,84 @@ export function extractAskUserQuestion(
     }
   }
   return null;
+}
+
+// ---- Tool call / result extraction for the retro timeline (#70) ----
+
+export type ToolUse = { id: string; name: string; input: unknown };
+
+/** Every tool the model invoked in this assistant turn (in order). */
+export function extractToolUses(message: SDKAssistantMessage): ToolUse[] {
+  const uses: ToolUse[] = [];
+  for (const block of message.message.content) {
+    if (block.type === "tool_use") {
+      uses.push({ id: block.id, name: block.name, input: block.input });
+    }
+  }
+  return uses;
+}
+
+export type ToolResultImage = { data: string; mimeType: string };
+export type ToolResultInfo = {
+  toolUseId: string;
+  text: string;
+  images: ToolResultImage[];
+  isError: boolean;
+};
+
+/**
+ * Every tool_result block in a user message, split into its text and its
+ * base64 images (computer-use returns a screenshot after each action). A user
+ * message that is a plain steer/prompt (string content, or no tool_result
+ * blocks) yields nothing, so the gateway's own pushed messages never produce
+ * spurious events.
+ */
+export function extractToolResults(message: SDKUserMessage): ToolResultInfo[] {
+  const content = message.message.content;
+  if (!Array.isArray(content)) return [];
+  const results: ToolResultInfo[] = [];
+  for (const block of content) {
+    if (block.type !== "tool_result") continue;
+    const texts: string[] = [];
+    const images: ToolResultImage[] = [];
+    const inner = block.content;
+    if (typeof inner === "string") {
+      if (inner.length > 0) texts.push(inner);
+    } else if (Array.isArray(inner)) {
+      for (const part of inner) {
+        if (part.type === "text") {
+          texts.push(part.text);
+        } else if (part.type === "image" && part.source.type === "base64") {
+          images.push({
+            data: part.source.data,
+            mimeType: part.source.media_type,
+          });
+        }
+      }
+    }
+    results.push({
+      toolUseId: block.tool_use_id,
+      text: texts.join("\n"),
+      images,
+      isError: block.is_error === true,
+    });
+  }
+  return results;
+}
+
+/** Strip the in-process MCP namespace ("mcp__computer-use__left_click" ->
+ * "left_click") so the timeline shows the bare action name. */
+export function prettyToolName(name: string): string {
+  const parts = name.split("__");
+  return parts.length > 1 ? (parts.at(-1) as string) : name;
+}
+
+/** Best-effort one-line JSON of a tool's input for the collapsed `detail`. */
+export function stringifyToolInput(input: unknown): string {
+  if (input === undefined || input === null) return "";
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
 }

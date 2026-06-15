@@ -179,6 +179,7 @@ export function parseModifierList(text: string): string[] | null {
 
 /** JXA: point size of the primary display (the one `screencapture` grabs). */
 export const SCREEN_POINT_SIZE_SCRIPT =
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: JXA source — the `${...}` is a template literal evaluated by the osascript/JXA runtime, not a JS substitution. Converting to a JS template string would break it.
   'ObjC.import("AppKit"); const size = $.NSScreen.screens.js[0].frame.size; `${size.width},${size.height}`;';
 
 /** CGEventFlags modifier masks (CGEventTypes.h). */
