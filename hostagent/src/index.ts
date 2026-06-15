@@ -37,6 +37,7 @@ startHostConsumer({
   hostId: config.hostId,
   secret: config.devboxSharedSecret,
   canProvisionHosts: config.canProvisionHosts,
+  goldenImage: config.goldenImage,
   execute: async (command) => {
     const payload = JSON.parse(command.payload) as HostVmPayload;
     if (typeof payload?.devboxId !== "string") {

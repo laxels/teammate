@@ -22,7 +22,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   name and running Tart VMs (max 2 concurrent macOS VMs per host, per Apple
   EULA). The orchestrator spreads ephemeral devbox VMs across the pool —
   least-loaded host wins (`src/hostPool.ts` `pickHost`). See "Fleet scaling".
-- Golden image: `golden-v4` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v4`) —
+- Golden image: `golden-v5` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v5`; the live tag is pinned once in `scripts/golden-constants.sh`) —
   macOS Sequoia with Chrome (logged in, default browser, Claude-in-Chrome
   extension removed), Claude desktop (logged in), Claude Code run at
   `claude-opus-4-8`/`xhigh` (set by the gateway via the Agent SDK `model`
@@ -32,22 +32,23 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   `cleanupPeriodDays`), `switchModelsOnFlag: false`, subscription OAuth token at
   `~/claude-oauth-token.txt`. Browser-tool deps (`playwright-core`, PR #23) are
   baked into node_modules as of v4, so ephemerals no longer install it at
-  provision time. (PLANNED for the next rebake, NOT yet in v4: the macOS Sequoia
-  Local Network grant for `bun` — the "Allow … to find devices on local
-  networks?" prompt that otherwise hangs browser tasks — is a Network Extension
-  policy (not TCC) with no programmatic seed, so it can't ride
-  `seed-devbox-tcc.sh`; it needs a one-time manual Allow click during a bake and
-  then persists across clones. Lands with golden-v5, #93.) Computer-use
+  provision time. (Baked into golden-v5 (#93): the macOS Sequoia Local Network
+  grant for `bun` — the "Allow … to find devices on local networks?" prompt that
+  otherwise hangs browser tasks — a Network Extension policy (not TCC) with no
+  programmatic seed, so it can't ride `seed-devbox-tcc.sh`; it's a one-time
+  manual Allow click during a bake that then persists across clones — plus the
+  automation-profile site logins.) Computer-use
   prerequisites baked in: `cliclick`
   at /usr/local/bin, TCC grants seeded via `scripts/seed-devbox-tcc.sh`
   (SIP is disabled in the guest; grants persist across clones), 1920x1080
   display (1:1 points==pixels), `en-US` locale, never-sleep/no-screen-lock,
   notifications under an always-on DND schedule, automatic macOS updates off,
   keyboard autocorrect/smart-quotes off.
-- Provisioning clones `golden-v4` and overlays the repo's current gateway/web
-  code on top (the image carries the slow-to-build environment + baked
-  node_modules; code goes stale with every merge). The image is rebuilt with
-  `scripts/bake-golden.sh` (version-parameterized: `--from`/`--to`).
+- Provisioning clones the pinned golden (`scripts/golden-constants.sh`) and
+  overlays the repo's current gateway/web code on top (the image carries the
+  slow-to-build environment + baked node_modules; code goes stale with every
+  merge). The image is rebuilt with `scripts/bake-golden.sh` (version-
+  parameterized: `--from`/`--to`).
 - Each devbox VM joins the tailnet with its own identity at provision time:
   tailscaled's on-disk state (`/Library/Tailscale`, machine key included) is
   wiped — at bake time AND again per-clone before `tailscale up` — because a
@@ -85,6 +86,23 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   (`placeQueuedEphemeralTasks`). Proactive capacity growth is the planned #88
   monitor, which calls `requestHostProvision` and fires the GitHub Actions
   provisioner via `repository_dispatch`.
+- A standing warm host PINS whatever golden it was prepped with (its hostagent
+  clones a fixed local image — `GOLDEN_IMAGE` in `~/hostagent.env` — for every
+  new ephemeral), so bumping the golden no longer comes for free: a live host
+  keeps serving the stale image until it is deliberately refreshed.
+  `scripts/refresh-golden.sh` (`.github/workflows/refresh-golden.yml`, #89) is
+  that op — the sibling of provisioning. Per host it DRAINS the host (Convex
+  status `draining` → `pickHost` skips it, in-flight VMs untouched), pulls +
+  clones the new golden, rewrites `GOLDEN_IMAGE` and restarts the hostagent, then
+  rejoins it once its heartbeat reports the new tag. Two modes: **rolling**
+  (default, one host at a time, ~N-1 capacity, never disrupts a task) and
+  **all-at-once** (every host in parallel — a bounded drain then force-evict,
+  trading capacity for speed; explicit opt-in). It takes the SAME global `fleet`
+  lock as provisioning (the two can't race) and pairs with the golden pin: bump
+  `GOLDEN_VERSION` in `scripts/golden-constants.sh` and run it, and new hosts
+  (`provision-host.sh`) and existing hosts converge on one tag. Hosts report
+  their golden in the heartbeat (`hosts.goldenImage`, surfaced by `/fleet/status`
+  + `get_fleet`) so convergence is observable.
 
 ## Task flow
 

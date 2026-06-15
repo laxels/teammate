@@ -70,12 +70,21 @@ export const heartbeat = mutation({
     hostId: v.string(),
     secret: v.string(),
     canProvisionHosts: v.optional(v.boolean()),
+    // The local golden image new ephemerals are cloned from. A golden-refresh
+    // (#89) swaps this and restarts the agent; the next heartbeat reports the
+    // new tag, which is how the refresh confirms the host converged.
+    goldenImage: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     if (!secretOk(args.secret)) {
       return;
     }
-    const capability = { canProvisionHosts: args.canProvisionHosts === true };
+    const reported = {
+      canProvisionHosts: args.canProvisionHosts === true,
+      ...(args.goldenImage !== undefined
+        ? { goldenImage: args.goldenImage }
+        : {}),
+    };
     const host = await ctx.db
       .query("hosts")
       .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
@@ -86,7 +95,7 @@ export const heartbeat = mutation({
       const comingOnline = host.status === "provisioning";
       await ctx.db.patch(host._id, {
         lastSeenAt: Date.now(),
-        ...capability,
+        ...reported,
         ...(comingOnline ? { status: "active" as const } : {}),
       });
       if (comingOnline) {
@@ -108,7 +117,7 @@ export const heartbeat = mutation({
       maxVms: DEFAULT_MAX_VMS,
       status: "active",
       lastSeenAt: Date.now(),
-      ...capability,
+      ...reported,
     });
     await ctx.scheduler.runAfter(
       0,
@@ -216,6 +225,50 @@ export const removeDevbox = mutation({
 });
 
 /**
+ * Terminally fail a task whose ephemeral VM is being torn down out from under it
+ * — a failed provision, or an operator force-evict (#89). Marks it `failed` with
+ * a finishedAt, records a `failed` taskEvent, and fires notify so the Slack
+ * card/thread + reactions reflect the abnormal end exactly as a gateway terminal
+ * event would, instead of leaving the task `running` forever behind a dead VM
+ * (steering/stopping would then hit a missing devbox). No-op when the task is
+ * absent or already terminal (never regress a user-stopped/completed task). Caps
+ * the summary to MAX_EVENT_SUMMARY so a multi-KB detail can't overflow the
+ * taskEvents document and roll the mutation back.
+ */
+async function terminallyFailTask(
+  ctx: MutationCtx,
+  args: { taskId: string; devboxId: string; summary: string },
+): Promise<void> {
+  const task = await ctx.db
+    .query("tasks")
+    .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
+    .unique();
+  if (task === null || isTerminalTaskStatus(task.status)) {
+    return;
+  }
+  const now = Date.now();
+  const summary = args.summary.slice(0, MAX_EVENT_SUMMARY);
+  await ctx.db.patch(task._id, {
+    status: "failed",
+    updatedAt: now,
+    finishedAt: now,
+  });
+  await ctx.db.insert("taskEvents", {
+    taskId: args.taskId,
+    devboxId: args.devboxId,
+    type: "failed",
+    summary,
+    ts: now,
+  });
+  await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
+    devboxId: args.devboxId,
+    taskId: args.taskId,
+    type: "failed",
+    summary,
+  });
+}
+
+/**
  * Called by the host agent when provision_vm fails after the partial VM is
  * torn down: deletes the leaked devbox row (freeing the host VM slot — every
  * row counts against capacity regardless of status) and fails the associated
@@ -249,44 +302,15 @@ export const provisionVmFailed = mutation({
       internal.hosts.placeQueuedEphemeralTasks,
       {},
     );
-    if (taskId === undefined) {
-      return;
+    if (taskId !== undefined) {
+      // Surface the failure on the task (terminal + a failed event + notify)
+      // instead of stranding it `running` behind a torn-down VM.
+      await terminallyFailTask(ctx, {
+        taskId,
+        devboxId: args.devboxId,
+        summary: args.summary,
+      });
     }
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
-      .unique();
-    // Never regress a task that already reached a terminal status (e.g. a user
-    // stopped it before the provision failed).
-    if (task === null || isTerminalTaskStatus(task.status)) {
-      return;
-    }
-    const now = Date.now();
-    // Cap the summary before it lands in a Convex document / Slack payload: a
-    // failing provision step can spew a multi-KB stderr tail, and an oversized
-    // taskEvents insert would roll back this whole mutation — leaving the slot
-    // leaked. Same 500-char bound recordHostEventRow uses.
-    const summary = args.summary.slice(0, MAX_EVENT_SUMMARY);
-    await ctx.db.patch(task._id, {
-      status: "failed",
-      updatedAt: now,
-      finishedAt: now,
-    });
-    await ctx.db.insert("taskEvents", {
-      taskId,
-      devboxId: args.devboxId,
-      type: "failed",
-      summary,
-      ts: now,
-    });
-    // Surface the failure the same way a gateway-posted terminal event would:
-    // create/refresh the status card to "failed", post a threaded ping, react.
-    await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
-      devboxId: args.devboxId,
-      taskId,
-      type: "failed",
-      summary,
-    });
   },
 });
 
@@ -640,6 +664,9 @@ export async function fleetSnapshotData(ctx: QueryCtx) {
       hostId: host.hostId,
       status: host.status,
       canProvisionHosts: host.canProvisionHosts === true,
+      // The golden the host's new ephemerals clone — lets a golden-refresh (#89)
+      // confirm convergence and surfaces a host stuck on a stale image.
+      goldenImage: host.goldenImage,
       vmsInUse: devboxes.filter((d) => d.hostId === host.hostId).length,
       maxVms: host.maxVms,
       secondsSinceSeen: Math.round((now - host.lastSeenAt) / 1000),
@@ -709,5 +736,119 @@ export const retireDevbox = internalMutation({
       kind: "destroy_vm",
       payload: JSON.stringify(payload),
     });
+  },
+});
+
+/**
+ * Flip a host between "active" and "draining" for a golden-refresh (#89).
+ * "draining" makes pickHost skip the host so no new ephemeral lands on it while
+ * it is being rolled to a new golden — without disturbing its in-flight VMs;
+ * "active" rejoins it (and drains the queue) once it is on the new golden. Both
+ * a fleet event for get_fleet visibility. The only caller is the secret-gated
+ * /fleet/host/status HTTP endpoint. A host mid-bootstrap ("provisioning") is
+ * left alone (the fleet lock keeps a refresh from overlapping a provision, so
+ * this is belt-and-suspenders); an unknown host is a no-op (found: false).
+ */
+export const setHostStatus = internalMutation({
+  args: {
+    hostId: v.string(),
+    status: v.union(v.literal("active"), v.literal("draining")),
+  },
+  handler: async (ctx, args): Promise<{ found: boolean }> => {
+    const host = await ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
+      .unique();
+    if (host === null) {
+      return { found: false };
+    }
+    if (host.status === "provisioning" || host.status === args.status) {
+      return { found: true };
+    }
+    await ctx.db.patch(host._id, { status: args.status });
+    await recordHostEventRow(ctx, {
+      hostId: args.hostId,
+      type: args.status === "draining" ? "draining" : "rejoined",
+      summary:
+        args.status === "draining"
+          ? `Draining ${args.hostId} for a golden-refresh — no new VMs placed; in-flight tasks finish.`
+          : `${args.hostId} rejoined the fleet after a golden-refresh.`,
+    });
+    // Rejoining a host may unblock queued ephemeral tasks.
+    if (args.status === "active") {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.hosts.placeQueuedEphemeralTasks,
+        {},
+      );
+    }
+    return { found: true };
+  },
+});
+
+/**
+ * Force-evict every ephemeral VM on a host: mark each "retiring" and enqueue a
+ * destroy_vm so the host agent tears it down NOW, instead of waiting out the
+ * post-task retire grace. The all-at-once golden-refresh (#89) calls this after
+ * a bounded drain window — it knowingly abandons any still-running task on the
+ * host. The abandonment is surfaced on the task itself: a non-terminal task is
+ * terminally failed + notified (so it doesn't look `running` forever behind a
+ * destroyed VM, with steering/stopping later hitting a missing devbox), the same
+ * way provisionVmFailed handles a torn-down provision. Idempotent: a re-evict
+ * just re-enqueues a destroy_vm (itself idempotent — a VM already gone removes
+ * its row anyway) and re-fails an already-terminal task to a no-op. Permanent
+ * devboxes (no hostId, not ephemeral) are never touched.
+ */
+export const evictHostEphemerals = internalMutation({
+  args: { hostId: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ evicted: number; devboxIds: string[] }> => {
+    const devboxes = await ctx.db.query("devboxes").collect();
+    const targets = devboxes.filter(
+      (d) => d.hostId === args.hostId && d.ephemeral === true,
+    );
+    for (const devbox of targets) {
+      // Capture the task before clearing it; a busy/provisioning ephemeral still
+      // carries its (non-terminal) task, an already-retiring one does not.
+      const taskId = devbox.taskId;
+      if (devbox.status !== "retiring") {
+        await ctx.db.patch(devbox._id, {
+          status: "retiring",
+          taskId: undefined,
+          lastSeenAt: Date.now(),
+        });
+      }
+      const payload: HostVmPayload = { devboxId: devbox.devboxId };
+      await enqueueHostCommand(ctx, {
+        hostId: args.hostId,
+        kind: "destroy_vm",
+        payload: JSON.stringify(payload),
+      });
+      if (taskId !== undefined) {
+        // Drop the dead VM's gateway commands and terminally fail its task so
+        // the operator-forced abandonment surfaces in Slack/the dashboard.
+        await deleteCommandsForDevbox(ctx, devbox.devboxId);
+        await terminallyFailTask(ctx, {
+          taskId,
+          devboxId: devbox.devboxId,
+          summary: `Task abandoned: ${args.hostId} was force-evicted by an all-at-once golden-refresh; its VM is being destroyed.`,
+        });
+      }
+    }
+    if (targets.length > 0) {
+      await recordHostEventRow(ctx, {
+        hostId: args.hostId,
+        type: "force_evicted",
+        summary:
+          `Force-evicted ${targets.length} ephemeral VM(s) on ${args.hostId} ` +
+          `for an all-at-once golden-refresh; any in-flight task on them was abandoned.`,
+      });
+    }
+    return {
+      evicted: targets.length,
+      devboxIds: targets.map((d) => d.devboxId).sort(),
+    };
   },
 });

@@ -61,6 +61,9 @@ export type HostConsumerOptions = {
   execute: HostCommandExecutor;
   /** Advertised in every heartbeat (fleet-provisioner role). */
   canProvisionHosts?: boolean;
+  /** Local golden image new ephemerals clone — reported in every heartbeat so
+   * a golden-refresh (#89) can confirm the host converged on the new tag. */
+  goldenImage?: string;
   heartbeatIntervalMs?: number;
   /** Backoff between claim retries; injectable so tests don't wait. */
   claimRetryDelaysMs?: number[];
@@ -178,6 +181,9 @@ export function startHostConsumer(options: HostConsumerOptions): () => void {
       .mutation(heartbeatRef, {
         hostId: options.hostId,
         canProvisionHosts: options.canProvisionHosts === true,
+        ...(options.goldenImage !== undefined
+          ? { goldenImage: options.goldenImage }
+          : {}),
         ...auth,
       })
       .then(

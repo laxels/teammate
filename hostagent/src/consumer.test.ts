@@ -312,6 +312,38 @@ test("a transient claim failure is retried in-band, then the command executes", 
   stop();
 });
 
+// #89: the host reports the golden its new ephemerals clone, so a golden-refresh
+// can confirm the host picked up the new tag after the agent restart.
+test("heartbeat reports the configured goldenImage", async () => {
+  const { client, mutations } = fakeClient();
+  const stop = startHostConsumer({
+    client,
+    hostId: "host-1",
+    secret: "s",
+    goldenImage: "golden-v5",
+    execute: async () => {},
+  });
+  await tick();
+  const hb = mutations.find((m) => m.name === "hosts:heartbeat");
+  expect(hb?.args.goldenImage).toBe("golden-v5");
+  stop();
+});
+
+test("heartbeat omits goldenImage when none is configured", async () => {
+  const { client, mutations } = fakeClient();
+  const stop = startHostConsumer({
+    client,
+    hostId: "host-1",
+    secret: "s",
+    execute: async () => {},
+  });
+  await tick();
+  const hb = mutations.find((m) => m.name === "hosts:heartbeat");
+  expect(hb).toBeDefined();
+  expect("goldenImage" in (hb?.args ?? {})).toBe(false);
+  stop();
+});
+
 test("a claim that never succeeds gives up without executing (no wedge, no run)", async () => {
   const { client, calls, push } = flakyClaimClient(99); // always rejects
   const executed: string[] = [];
