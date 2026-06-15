@@ -88,14 +88,24 @@ export function ffmpegFrameArgs(
   ];
 }
 
+/** Outcome of streaming the recording to a local temp file. On success the
+ * caller owns `path` and must remove it; on failure the downloader has already
+ * cleaned up any partial file. `reason` distinguishes a too-large/empty blob
+ * (mapped to specific statuses) from a generic fetch/timeout failure. */
+export type RecordingDownload =
+  | { ok: true; path: string; bytes: number }
+  | { ok: false; reason: "fetch-failed" | "too-large" | "empty" };
+
 export type FrameGrabDeps = {
   fetchFn: (url: string, init?: RequestInit) => Promise<Response>;
   /** Runs ffmpeg with the given args, resolving the PNG bytes from stdout.
    * Throws on a non-zero exit, a timeout, or a missing binary. */
   runFfmpeg: (args: string[], timeoutMs: number) => Promise<Uint8Array>;
-  /** Persists the downloaded recording to a local temp path ffmpeg can seek,
-   * returning that path. grabFrame always removes it once extraction is done. */
-  writeTempFile: (bytes: Uint8Array) => Promise<string>;
+  /** Streams the recording at `url` to a local temp .mov ffmpeg can seek,
+   * BOUNDED by an abort timeout and a max size so a slow/stalled signed URL
+   * can't hold an /api/frame slot open indefinitely (#102 review). Returns the
+   * temp path (caller removes it) or a typed failure. */
+  downloadRecording: (url: string) => Promise<RecordingDownload>;
   /** Best-effort delete of a temp path; must not throw. */
   removeFile: (path: string) => Promise<void>;
 };
@@ -148,39 +158,31 @@ export async function grabFrame(
     return { ok: false, status: 502, reason: "recording-url unreachable" };
   }
 
-  // 2. Download the recording to a local temp file. Seeking the .mov over HTTP
-  // is unreliable for the non-faststart files screencapture produces (#102, see
-  // the file header) — a local file always works.
-  let recordingBytes: Uint8Array;
-  try {
-    const res = await deps.fetchFn(recordingUrl);
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: 502,
-        reason: `recording fetch ${res.status}`,
-      };
+  // 2. Stream the recording to a local temp file (bounded by a timeout + max
+  // size). Seeking the .mov over HTTP is unreliable for the non-faststart files
+  // screencapture produces (#102, see the file header) — a local file works.
+  const dl = await deps.downloadRecording(recordingUrl);
+  if (!dl.ok) {
+    if (dl.reason === "empty") {
+      return { ok: false, status: 404, reason: "recording not available" };
     }
-    recordingBytes = new Uint8Array(await res.arrayBuffer());
-  } catch {
+    if (dl.reason === "too-large") {
+      return { ok: false, status: 502, reason: "recording too large" };
+    }
     return { ok: false, status: 502, reason: "recording fetch failed" };
-  }
-  if (recordingBytes.byteLength === 0) {
-    return { ok: false, status: 404, reason: "recording not available" };
   }
 
   // 3. Extract one frame from the local file, always cleaning the temp file up.
   let png: Uint8Array;
-  const tempPath = await deps.writeTempFile(recordingBytes);
   try {
     png = await deps.runFfmpeg(
-      ffmpegFrameArgs(tempPath, req.videoTimeSec),
+      ffmpegFrameArgs(dl.path, req.videoTimeSec),
       FFMPEG_TIMEOUT_MS,
     );
   } catch {
     return { ok: false, status: 500, reason: "frame extraction failed" };
   } finally {
-    await deps.removeFile(tempPath);
+    await deps.removeFile(dl.path);
   }
   if (png.byteLength === 0) {
     return { ok: false, status: 500, reason: "empty frame" };

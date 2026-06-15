@@ -16,6 +16,7 @@ import {
   type FrameGrabConfig,
   grabFrame,
   parseFrameGrabRequest,
+  type RecordingDownload,
   timingSafeEqual,
 } from "./frame-grab";
 
@@ -76,7 +77,7 @@ async function frameGrabConfig(): Promise<FrameGrabConfig | null> {
  * concurrently: ffmpeg can be chatty (the mov demuxer emits a warning per odd
  * read), and an undrained stderr pipe fills its ~64 KB OS buffer and deadlocks
  * the process until the timeout SIGKILLs it. */
-async function runFfmpeg(
+export async function runFfmpeg(
   args: string[],
   timeoutMs: number,
 ): Promise<Uint8Array> {
@@ -101,17 +102,73 @@ async function runFfmpeg(
   }
 }
 
-/** Write recording bytes to a unique temp .mov ffmpeg can seek locally (#102).
- * A fresh ArrayBuffer slice keeps Bun.write happy regardless of the
- * Uint8Array's underlying buffer offset. */
-async function writeTempFile(bytes: Uint8Array): Promise<string> {
-  const path = join(tmpdir(), `ultraclaude-frame-${crypto.randomUUID()}.mov`);
-  await Bun.write(path, bytes.slice().buffer as ArrayBuffer);
-  return path;
+export async function removeFile(path: string): Promise<void> {
+  await unlink(path).catch(() => undefined);
 }
 
-async function removeFile(path: string): Promise<void> {
-  await unlink(path).catch(() => undefined);
+/** Hard cap on a single recording download. A signed storage URL that stalls
+ * mid-stream must not pin an /api/frame slot open forever (only
+ * MAX_CONCURRENT_FRAMES exist; pinning them all wedges the endpoint at 429).
+ * Generous vs. a real screen recording — this only bounds the pathological. */
+export const RECORDING_DOWNLOAD_TIMEOUT_MS = 60_000;
+/** Disk/abuse sanity ceiling for a downloaded recording (1 GiB). A genuine
+ * task recording is far smaller; this just stops a wrong/hostile URL from
+ * filling the host disk. */
+export const MAX_RECORDING_BYTES = 1_073_741_824;
+
+/** Stream the recording at `url` to a unique temp .mov ffmpeg can seek locally
+ * (#102), bounded by `timeoutMs` (whole-download abort) and `maxBytes`. Streams
+ * straight to disk rather than buffering the body in JS memory. Any non-ok
+ * outcome cleans up its own partial file; success hands the path to the caller,
+ * which removes it after extraction. */
+export async function downloadRecording(
+  url: string,
+  opts: { timeoutMs: number; maxBytes: number } = {
+    timeoutMs: RECORDING_DOWNLOAD_TIMEOUT_MS,
+    maxBytes: MAX_RECORDING_BYTES,
+  },
+): Promise<RecordingDownload> {
+  const path = join(tmpdir(), `ultraclaude-frame-${crypto.randomUUID()}.mov`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  const writer = Bun.file(path).writer();
+  let total = 0;
+  let ok = false;
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok || res.body === null) {
+      return { ok: false, reason: "fetch-failed" };
+    }
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > opts.maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, reason: "too-large" };
+      }
+      writer.write(value);
+    }
+    if (total === 0) {
+      return { ok: false, reason: "empty" };
+    }
+    ok = true;
+    return { ok: true, path, bytes: total };
+  } catch {
+    // Timeout abort, network error, or a stream read error.
+    return { ok: false, reason: "fetch-failed" };
+  } finally {
+    clearTimeout(timer);
+    // Flush+close the sink (completes the file on success) before any cleanup.
+    // FileSink.end() may return a number or a Promise; await tolerates both.
+    try {
+      await writer.end();
+    } catch {
+      // Already closed / errored — nothing more to flush.
+    }
+    if (!ok) await removeFile(path);
+  }
 }
 
 // One ffmpeg per request; bound concurrency so a burst (e.g. a comment-heavy
@@ -155,7 +212,7 @@ async function handleFrameGrab(request: Request): Promise<Response> {
     const result = await grabFrame(config, req, {
       fetchFn: fetch,
       runFfmpeg,
-      writeTempFile,
+      downloadRecording,
       removeFile,
     });
     return result.ok
@@ -166,45 +223,50 @@ async function handleFrameGrab(request: Request): Promise<Response> {
   }
 }
 
-Bun.serve({
-  hostname: "127.0.0.1",
-  port,
-  async fetch(request) {
-    const url = new URL(request.url);
+// Started only when run as the entrypoint (the launchd plist does:
+// `bun run dashboard-server.ts`), so a test can import the helpers above
+// without binding a port.
+if (import.meta.main) {
+  Bun.serve({
+    hostname: "127.0.0.1",
+    port,
+    async fetch(request) {
+      const url = new URL(request.url);
 
-    // Frame-grab API (#70) — same origin as the page, so no CORS.
-    if (request.method === "POST" && url.pathname === "/api/frame") {
-      return handleFrameGrab(request);
-    }
-
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(url.pathname);
-    } catch {
-      return new Response("bad request", { status: 400 });
-    }
-    // Resolve inside the dist dir only.
-    const relative = normalize(decoded).replace(/^(\.\.(\/|$))+/, "");
-    const candidate = join(dir, relative);
-    if (candidate.startsWith(dir) && relative !== "/" && relative !== "") {
-      const file = Bun.file(candidate);
-      if (await file.exists()) {
-        return new Response(file, {
-          headers: { "content-type": contentType(candidate) },
-        });
+      // Frame-grab API (#70) — same origin as the page, so no CORS.
+      if (request.method === "POST" && url.pathname === "/api/frame") {
+        return handleFrameGrab(request);
       }
-      // A missing path WITH an extension is a real 404 (e.g. a stale hashed
-      // asset after a redeploy) — serving index.html as JS breaks the page.
-      if (/\.[a-z0-9]+$/i.test(relative)) {
-        return new Response("not found", { status: 404 });
-      }
-    }
-    // Extensionless misses are SPA routes.
-    const index = Bun.file(join(dir, "index.html"));
-    return new Response(index, {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    });
-  },
-});
 
-console.log(`[dashboard] serving ${dir} on http://127.0.0.1:${port}`);
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(url.pathname);
+      } catch {
+        return new Response("bad request", { status: 400 });
+      }
+      // Resolve inside the dist dir only.
+      const relative = normalize(decoded).replace(/^(\.\.(\/|$))+/, "");
+      const candidate = join(dir, relative);
+      if (candidate.startsWith(dir) && relative !== "/" && relative !== "") {
+        const file = Bun.file(candidate);
+        if (await file.exists()) {
+          return new Response(file, {
+            headers: { "content-type": contentType(candidate) },
+          });
+        }
+        // A missing path WITH an extension is a real 404 (e.g. a stale hashed
+        // asset after a redeploy) — serving index.html as JS breaks the page.
+        if (/\.[a-z0-9]+$/i.test(relative)) {
+          return new Response("not found", { status: 404 });
+        }
+      }
+      // Extensionless misses are SPA routes.
+      const index = Bun.file(join(dir, "index.html"));
+      return new Response(index, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    },
+  });
+
+  console.log(`[dashboard] serving ${dir} on http://127.0.0.1:${port}`);
+}

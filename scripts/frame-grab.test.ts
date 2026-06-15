@@ -5,6 +5,7 @@ import {
   ffmpegFrameArgs,
   grabFrame,
   parseFrameGrabRequest,
+  type RecordingDownload,
   timingSafeEqual,
 } from "./frame-grab";
 
@@ -58,12 +59,12 @@ describe("ffmpegFrameArgs", () => {
   });
 });
 
-/** A scripted fetch over the Convex hops the pipeline makes: resolve the
- * recording URL, download the .mov, get an upload URL, upload the PNG. */
+/** A scripted fetch over the Convex hops the pipeline makes via fetchFn:
+ * resolve the recording URL, get an upload URL, upload the PNG. (The recording
+ * download itself goes through the separate `downloadRecording` dep.) */
 function makeFetch(
   handlers: Partial<{
     recordingUrl: () => Response;
-    recordingBlob: () => Response;
     uploadUrl: () => Response;
     upload: () => Response;
   }>,
@@ -75,13 +76,6 @@ function makeFetch(
       return (
         handlers.recordingUrl ??
         (() => Response.json({ url: "https://blob/rec.mov" }))
-      )();
-    }
-    if (url === "https://blob/rec.mov") {
-      // The recording download is a plain GET of the signed URL.
-      return (
-        handlers.recordingBlob ??
-        (() => new Response(new Uint8Array([9, 9, 9])))
       )();
     }
     if (url.includes("/devbox/recording/upload-url")) {
@@ -100,15 +94,17 @@ function makeFetch(
   };
 }
 
-/** Records temp-file lifecycle so tests can assert it's always cleaned up. */
-function makeTempDeps() {
-  const log = { written: [] as Uint8Array[], removed: [] as string[] };
-  let n = 0;
+/** Stubs the download + cleanup deps and records their calls so tests can
+ * assert which URL was downloaded and that the temp file is always removed. */
+function makeDownloadDeps(
+  outcome: RecordingDownload = { ok: true, path: "/tmp/frame-0.mov", bytes: 3 },
+) {
+  const log = { downloaded: [] as string[], removed: [] as string[] };
   return {
     log,
-    writeTempFile: async (bytes: Uint8Array) => {
-      log.written.push(bytes);
-      return `/tmp/frame-${n++}.mov`;
+    downloadRecording: async (url: string) => {
+      log.downloaded.push(url);
+      return outcome;
     },
     removeFile: async (path: string) => {
       log.removed.push(path);
@@ -122,7 +118,7 @@ describe("grabFrame pipeline", () => {
   test("resolve -> download -> ffmpeg -> upload -> storageId (happy path)", async () => {
     const log = { urls: [] as string[] };
     const fetchFn = makeFetch({}, log);
-    const temp = makeTempDeps();
+    const dl = makeDownloadDeps();
     const ffmpegInput: string[] = [];
     const runFfmpeg = async (args: string[]) => {
       ffmpegInput.push(args[args.indexOf("-i") + 1] ?? "");
@@ -131,112 +127,123 @@ describe("grabFrame pipeline", () => {
     const result = await grabFrame(CONFIG, req, {
       fetchFn,
       runFfmpeg,
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toEqual({ ok: true, storageId: "stor-1" });
     // The recording-url hop is keyed by taskId, secret-gated.
     expect(log.urls[0]).toContain("/devbox/recording-url?taskId=task-1");
-    // The downloaded bytes were staged to a temp file, and ffmpeg seeked THAT
-    // file (not the URL), then the temp file was removed.
-    expect(temp.log.written).toEqual([new Uint8Array([9, 9, 9])]);
+    // The resolved signed URL was downloaded, ffmpeg seeked the LOCAL temp file
+    // (not the URL), then the temp file was removed.
+    expect(dl.log.downloaded).toEqual(["https://blob/rec.mov"]);
     expect(ffmpegInput).toEqual(["/tmp/frame-0.mov"]);
-    expect(temp.log.removed).toEqual(["/tmp/frame-0.mov"]);
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 
   test("404 when the recording isn't available (null url)", async () => {
-    const temp = makeTempDeps();
+    const dl = makeDownloadDeps();
     const fetchFn = makeFetch({
       recordingUrl: () => Response.json({ url: null }),
     });
     const result = await grabFrame(CONFIG, req, {
       fetchFn,
       runFfmpeg: async () => new Uint8Array([1]),
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 404 });
-    // Never got far enough to stage a temp file.
-    expect(temp.log.written).toEqual([]);
+    // Never got far enough to download.
+    expect(dl.log.downloaded).toEqual([]);
   });
 
   test("502 when the recording download fails", async () => {
-    const temp = makeTempDeps();
-    const fetchFn = makeFetch({
-      recordingBlob: () => new Response("gone", { status: 404 }),
-    });
+    const dl = makeDownloadDeps({ ok: false, reason: "fetch-failed" });
     const result = await grabFrame(CONFIG, req, {
-      fetchFn,
+      fetchFn: makeFetch({}),
       runFfmpeg: async () => new Uint8Array([1]),
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
-    expect(result).toMatchObject({ ok: false, status: 502 });
-    expect(temp.log.written).toEqual([]);
+    expect(result).toMatchObject({
+      ok: false,
+      status: 502,
+      reason: "recording fetch failed",
+    });
+    // The downloader owns cleanup of its own partial file — nothing to remove.
+    expect(dl.log.removed).toEqual([]);
+  });
+
+  test("502 when the recording is too large", async () => {
+    const dl = makeDownloadDeps({ ok: false, reason: "too-large" });
+    const result = await grabFrame(CONFIG, req, {
+      fetchFn: makeFetch({}),
+      runFfmpeg: async () => new Uint8Array([1]),
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 502,
+      reason: "recording too large",
+    });
   });
 
   test("404 when the downloaded recording is empty", async () => {
-    const temp = makeTempDeps();
-    const fetchFn = makeFetch({
-      recordingBlob: () => new Response(new Uint8Array([])),
-    });
+    const dl = makeDownloadDeps({ ok: false, reason: "empty" });
     const result = await grabFrame(CONFIG, req, {
-      fetchFn,
+      fetchFn: makeFetch({}),
       runFfmpeg: async () => new Uint8Array([1]),
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 404 });
-    expect(temp.log.written).toEqual([]);
   });
 
   test("500 when ffmpeg throws — and the temp file is still removed", async () => {
-    const temp = makeTempDeps();
-    const fetchFn = makeFetch({});
+    const dl = makeDownloadDeps();
     const runFfmpeg = async () => {
       throw new Error("ffmpeg boom");
     };
     const result = await grabFrame(CONFIG, req, {
-      fetchFn,
+      fetchFn: makeFetch({}),
       runFfmpeg,
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 500 });
     // The grab failed, but we must not leak the downloaded .mov.
-    expect(temp.log.removed).toEqual(["/tmp/frame-0.mov"]);
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 
   test("500 on an empty frame — and the temp file is still removed", async () => {
-    const temp = makeTempDeps();
-    const fetchFn = makeFetch({});
+    const dl = makeDownloadDeps();
     const result = await grabFrame(CONFIG, req, {
-      fetchFn,
+      fetchFn: makeFetch({}),
       runFfmpeg: async () => new Uint8Array([]),
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({
       ok: false,
       status: 500,
       reason: "empty frame",
     });
-    expect(temp.log.removed).toEqual(["/tmp/frame-0.mov"]);
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 
   test("502 when the PNG upload fails", async () => {
-    const temp = makeTempDeps();
+    const dl = makeDownloadDeps();
     const fetchFn = makeFetch({
       upload: () => new Response("nope", { status: 500 }),
     });
     const result = await grabFrame(CONFIG, req, {
       fetchFn,
       runFfmpeg: async () => new Uint8Array([1]),
-      writeTempFile: temp.writeTempFile,
-      removeFile: temp.removeFile,
+      downloadRecording: dl.downloadRecording,
+      removeFile: dl.removeFile,
     });
     expect(result).toMatchObject({ ok: false, status: 502 });
     // ffmpeg ran, so the temp file must have been cleaned up.
-    expect(temp.log.removed).toEqual(["/tmp/frame-0.mov"]);
+    expect(dl.log.removed).toEqual(["/tmp/frame-0.mov"]);
   });
 });
