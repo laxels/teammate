@@ -8,16 +8,20 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 
 | Component | Dir | Runs on | Role |
 |---|---|---|---|
-| Orchestrator | `convex/` | Convex (deployment `teammate`) | Slack events in/out, task + devbox state, Opus 4.8 tool loop, staleness cron |
+| Orchestrator | `convex/` | Convex (project `teammate`, deployment `zealous-robin-941`) | Slack events in/out, task + devbox state, Opus 4.8 tool loop, staleness cron |
 | Devbox gateway | `gateway/` | Inside each devbox VM (Bun) | Runs Claude Code via the Agent SDK with in-process computer-use MCP tools (`gateway/src/computer/`: screenshots, mouse, keyboard over `screencapture`/`cliclick`/`osascript`) and Playwright browser MCP tools (`gateway/src/browser/`: aria snapshots + ref-targeted actions in a gateway-owned headed Chrome — see "Browser automation" below), exposes steering WebSocket + VNC bridge, posts lifecycle events to Convex, serves the monitoring page |
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
-| Shared contracts | `shared/` | imported by all three | Wire types (`shared/protocol.ts`) |
+| Host agent | `hostagent/` | Each fleet Mac host (LaunchAgent `com.ultraclaude.hostagent`, Bun) | Heartbeats the host to Convex every 60s (self-registers its row + liveness) and consumes `provision_vm`/`destroy_vm` host commands to clone/boot/rsync-code-into/destroy ephemeral Tart VMs (`hostagent/src/vm.ts`). Advertises the fleet-provisioner role (`FLEET_PROVISIONER=1`) in its heartbeat, but no longer bootstraps new hosts itself — GitHub Actions does (#87) |
+| Shared contracts | `shared/` | imported by `convex`, `gateway`, `hostagent`, `src`, `web` | Wire types (`shared/protocol.ts`) |
 
 ## Infrastructure
 
-- Host: Scaleway Mac mini M2-L (`ultraclaude-host-1`, tailnet 100.121.13.107),
-  running Tart VMs (max 2 concurrent macOS VMs per Apple EULA).
+- Hosts: a fleet of Scaleway Apple-silicon (M2-L) Macs in `fr-par-1`
+  (`ultraclaude-host-1`, `-2`, …), each joined to the tailnet under its host
+  name and running Tart VMs (max 2 concurrent macOS VMs per host, per Apple
+  EULA). The orchestrator spreads ephemeral devbox VMs across the pool —
+  least-loaded host wins (`src/hostPool.ts` `pickHost`). See "Fleet scaling".
 - Golden image: `golden-v4` (local tart VM + private `ghcr.io/laxels/ultraclaude-golden:v4`) —
   macOS Sequoia with Chrome (logged in, default browser, Claude-in-Chrome
   extension removed), Claude desktop (logged in), Claude Code run at
@@ -49,6 +53,31 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   VM traffic in production — the gateway binds inside the VM and is reached
   over the VM's own tailnet address. (macOS Local Network TCC silently blocks
   non-Apple-signed host processes from reaching VM IPs.)
+
+## Fleet scaling
+
+- The fleet grows by provisioning whole new Mac hosts (not more VMs per host —
+  the Apple EULA caps that at 2). As of #87/#90 provisioning is decoupled from
+  the task hot path and runs in GitHub Actions
+  (`.github/workflows/provision-host.yml`): an ephemeral Linux runner creates
+  the Scaleway Mac over the API and bootstraps it over ssh
+  (`scripts/provision-host.sh` → `adopt-host.sh` → `smoke-host.sh`). A new host
+  counts as ready only once it heartbeats `active` AND passes a
+  clone/boot/destroy smoke test.
+- Every fleet-mutating op takes ONE global, Convex-backed lease lock
+  (`scripts/fleet-lock.sh`, `convex/fleetLock.ts`), so only one fleet op runs at
+  a time across all origins (a laptop, a GH Actions run, the future monitor); a
+  single run can still provision several hosts in parallel under the one lock it
+  holds.
+- Convex keeps the scaling decision + serialization machinery
+  (`convex/hosts.ts` `requestHostProvision`, `src/hostPool.ts`): it pre-creates
+  a `provisioning` host row, allows one bootstrap in flight, and a new host's
+  first heartbeat flips that row to `active` and drains any queued tasks.
+- On-demand autoscale on task spillover is currently gated off (#87): a task
+  with no free VM slot stays `queued` and drains when a slot frees
+  (`placeQueuedEphemeralTasks`). Proactive capacity growth is the planned #88
+  monitor, which calls `requestHostProvision` and fires the GitHub Actions
+  provisioner via `repository_dispatch`.
 
 ## Task flow
 
