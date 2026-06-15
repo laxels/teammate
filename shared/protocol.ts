@@ -31,6 +31,29 @@ export type SteerServerMessage =
 // Binary RFB bridge to the VM's own Screen Sharing server (127.0.0.1:5900),
 // consumed by noVNC/react-vnc. No JSON framing — raw bytes both ways.
 
+/**
+ * Reasoning-effort levels a task agent's Claude Code session may run at —
+ * mirrors the Agent SDK's `EffortLevel`. Single source of truth for the type,
+ * the tool-schema enum (orchestrator), and the wire validators (gateway parse,
+ * Convex schema). The default everywhere is `xhigh` (model policy: accuracy
+ * first, see ARCHITECTURE.md); the orchestrator overrides it ONLY when the
+ * requester explicitly and unambiguously asks for a specific level (issue #91),
+ * and its own model stays pinned to `xhigh` regardless. */
+export const TASK_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+export type TaskEffort = (typeof TASK_EFFORTS)[number];
+
+/** Narrows arbitrary input to a valid effort level, returning undefined for
+ * absent/unknown values so a stray arg degrades to the `xhigh` default rather
+ * than rejecting the task. Used at both trust boundaries (orchestrator tool
+ * input, gateway start-request parse). */
+export function parseTaskEffort(value: unknown): TaskEffort | undefined {
+  return typeof value === "string" &&
+    (TASK_EFFORTS as readonly string[]).includes(value)
+    ? (value as TaskEffort)
+    : undefined;
+}
+
 // ---- Control plane: orchestrator -> gateway ----
 // Convex cloud cannot reach tailnet addresses, so the orchestrator never
 // dials a gateway. It enqueues rows in the Convex `commands` table
@@ -52,6 +75,10 @@ export type StartTaskRequest = {
   taskId: string;
   prompt: string;
   cwd?: string;
+  /** Reasoning effort for the task agent's session. Omitted on the wire unless
+   * the requester explicitly asked for a non-default level; the gateway falls
+   * back to its `xhigh` default when absent. */
+  effort?: TaskEffort;
   /** Files the requester shared in Slack, already downloaded by the
    * orchestrator into Convex storage. The gateway fetches each by `storageId`
    * from the authenticated GET /devbox/file endpoint (bot token never reaches

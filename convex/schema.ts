@@ -1,6 +1,10 @@
 import { defineSchema, defineTable } from "convex/server";
 import { type Infer, v } from "convex/values";
-import type { RecordingStatus, TaskStatus } from "../shared/protocol";
+import type {
+  RecordingStatus,
+  TaskEffort,
+  TaskStatus,
+} from "../shared/protocol";
 
 export const taskStatusValidator = v.union(
   v.literal("queued"),
@@ -20,6 +24,25 @@ type _TaskStatusMatchesProtocol = [
   : never;
 const _taskStatusMatchesProtocol: _TaskStatusMatchesProtocol = true;
 void _taskStatusMatchesProtocol;
+
+// Reasoning effort for a task agent's session (#91). Mirrors the Agent SDK's
+// EffortLevel and shared/protocol.ts TaskEffort.
+export const effortValidator = v.union(
+  v.literal("low"),
+  v.literal("medium"),
+  v.literal("high"),
+  v.literal("xhigh"),
+  v.literal("max"),
+);
+
+type _TaskEffortMatchesProtocol = [
+  Infer<typeof effortValidator>,
+  TaskEffort,
+] extends [TaskEffort, Infer<typeof effortValidator>]
+  ? true
+  : never;
+const _taskEffortMatchesProtocol: _TaskEffortMatchesProtocol = true;
+void _taskEffortMatchesProtocol;
 
 /** A file the requester shared in Slack, staged in Convex storage for the
  * task's devbox to fetch (see shared/protocol.ts DeliverableFile). The bytes
@@ -115,6 +138,11 @@ export default defineSchema({
     // permanent path); the devbox fetches the bytes from the secret-gated
     // /devbox/file endpoint, never a public storage URL.
     files: v.optional(v.array(taskFileValidator)),
+    // Reasoning effort for the task agent's session, threaded into the start
+    // command at placement (hosts.dispatchTaskToSlot / orchestrator permanent
+    // path). Absent => the gateway's "xhigh" default; only the orchestrator
+    // sets it, and only on an explicit user request (#91).
+    effort: v.optional(effortValidator),
     // Devbox screen recording lifecycle + stored .mov (see recordings.ts and
     // gateway/src/recorder.ts). Absent on tasks that predate the feature.
     recording: v.optional(taskRecordingValidator),

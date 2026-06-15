@@ -209,7 +209,11 @@ function allHostCommands(t: Tester) {
   return t.run(async (ctx) => ctx.db.query("hostCommands").collect());
 }
 
-async function seedQueuedTask(t: Tester, taskId: string): Promise<void> {
+async function seedQueuedTask(
+  t: Tester,
+  taskId: string,
+  effort?: "low" | "medium" | "high" | "xhigh" | "max",
+): Promise<void> {
   await t.run(async (ctx) => {
     const now = Date.now();
     await ctx.db.insert("tasks", {
@@ -219,10 +223,21 @@ async function seedQueuedTask(t: Tester, taskId: string): Promise<void> {
       status: "queued",
       placement: "ephemeral",
       slackChannel: "C1",
+      ...(effort === undefined ? {} : { effort }),
       createdAt: now,
       updatedAt: now,
     });
   });
+}
+
+/** The gateway `start` commands enqueued for devboxes (the outbound control
+ * plane the freshly booted gateway drains), with their payloads parsed. */
+function startCommands(t: Tester) {
+  return t.run(async (ctx) =>
+    (await ctx.db.query("commands").collect())
+      .filter((c) => c.kind === "start")
+      .map((c) => JSON.parse(c.payload) as Record<string, unknown>),
+  );
 }
 
 // #87: on-demand autoscale on task spillover is gated off. An unplaceable task
@@ -278,6 +293,33 @@ test("placeQueuedEphemeralTasks drains a queued task into a free slot", async ()
   expect((await getTask(t, "task-new"))?.devboxId).toBeDefined();
   const commands = await allHostCommands(t);
   expect(commands.map((c) => c.kind)).toEqual(["provision_vm"]);
+});
+
+// #91: a task's persisted effort rides the start command built at placement
+// (dispatchTaskToSlot reads task.effort), since the start command is enqueued
+// long after start_task returns. Absent effort leaves the field off the wire so
+// the gateway applies its xhigh default.
+test("placement threads a task's effort into the gateway start command (#91)", async () => {
+  const t = newT();
+  await t.run(async (ctx) => {
+    await ctx.db.insert("hosts", {
+      hostId: "host-1",
+      maxVms: 2,
+      status: "active",
+      lastSeenAt: Date.now(),
+    });
+  });
+  await seedQueuedTask(t, "task-low", "low");
+  await seedQueuedTask(t, "task-default");
+
+  await t.mutation(internal.hosts.placeQueuedEphemeralTasks, {});
+
+  const starts = await startCommands(t);
+  const low = starts.find((p) => p.taskId === "task-low");
+  const dflt = starts.find((p) => p.taskId === "task-default");
+  expect(low?.effort).toBe("low");
+  expect(dflt).toBeDefined();
+  expect("effort" in (dflt ?? {})).toBe(false);
 });
 
 // #87 keeps the Convex decision/serialization machinery for the #88 monitor.
