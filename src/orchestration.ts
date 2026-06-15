@@ -219,11 +219,18 @@ const DEVBOX_EVENT_TYPES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
   "stopped",
+  // Info events (#70) — recorded on the timeline, never drive task status.
+  "assistant_text",
+  "tool_call",
+  "tool_result",
 ] satisfies DevboxEventType[]);
 
 /**
  * Validates an already-JSON-parsed request body against the DevboxEvent wire
  * contract (shared/protocol.ts). Returns null when the body doesn't conform.
+ * The optional info-event fields (detail/tool/imageStorageId) are carried
+ * through only when present and well-typed; a malformed one is dropped, never a
+ * rejection (the core event still records).
  */
 export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
   if (typeof payload !== "object" || payload === null) {
@@ -246,6 +253,11 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
     type: body.type as DevboxEventType,
     summary: body.summary,
     ts: body.ts,
+    ...(typeof body.detail === "string" ? { detail: body.detail } : {}),
+    ...(typeof body.tool === "string" ? { tool: body.tool } : {}),
+    ...(typeof body.imageStorageId === "string"
+      ? { imageStorageId: body.imageStorageId }
+      : {}),
   };
 }
 
@@ -685,5 +697,9 @@ export function buildDevboxEventMessage(args: {
       return `:x: *${title}* failed: ${summary}\nCheck the session for details${monitorUrl === null ? "" : ` (${monitorUrl})`} or ask me to start a fresh attempt.`;
     case "stopped":
       return `:octagonal_sign: *${title}* was stopped. ${summary}`;
+    default:
+      // Info events (#70) never reach Slack (notify only fires on applied
+      // status events), but keep this total over the widened DevboxEventType.
+      return `*${title}*: ${summary}`;
   }
 }

@@ -1,14 +1,17 @@
-import {
-  type DevboxEvent,
-  type DevboxEventType,
-  MAX_TRANSCRIPT_BYTES,
-  type TranscriptUpload,
-} from "../../shared/protocol";
+import type { DevboxEvent, DevboxEventType } from "../../shared/protocol";
+
+/** Info-event enrichment carried alongside a timeline event (#70). */
+export type EventExtra = {
+  detail?: string;
+  tool?: string;
+  imageStorageId?: string;
+};
 
 export type EventSender = (
   taskId: string,
   type: DevboxEventType,
   summary: string,
+  extra?: EventExtra,
 ) => Promise<void>;
 
 export type EventSenderConfig = {
@@ -36,13 +39,18 @@ export function createEventSender(
   // the completed event it precedes) must not race each other on the wire,
   // or the receiver may apply them out of order.
   let queue: Promise<void> = Promise.resolve();
-  return (taskId, type, summary) => {
+  return (taskId, type, summary, extra) => {
     const event: DevboxEvent = {
       devboxId: config.devboxId,
       taskId,
       type,
       summary,
       ts: now(),
+      ...(extra?.detail === undefined ? {} : { detail: extra.detail }),
+      ...(extra?.tool === undefined ? {} : { tool: extra.tool }),
+      ...(extra?.imageStorageId === undefined
+        ? {}
+        : { imageStorageId: extra.imageStorageId }),
     };
     queue = queue.then(async () => {
       try {
@@ -71,79 +79,63 @@ export function createEventSender(
   };
 }
 
-export type TranscriptSender = (
-  taskId: string,
-  messages: unknown[],
-) => Promise<void>;
-
-const utf8 = new TextEncoder();
-
 /**
- * Drops oldest messages until the payload fits the byte cap. Measures UTF-8
- * BYTES (TextEncoder), not string length — JSON.stringify leaves non-ASCII
- * unescaped, so CJK/emoji-heavy transcripts are up to 3x their UTF-16 unit
- * count on the wire (and in Convex's ~1 MiB document limit). If even the
- * newest message alone is oversized, a small marker survives so the
- * dashboard never renders an unexplained blank.
+ * Uploads a tool-result screenshot (#70) to Convex file storage and returns its
+ * storageId (null on any failure — the timeline then shows a text-only tool
+ * result). Same generateUploadUrl flow the recorder uses: fetch a one-shot
+ * upload URL, POST the bytes, read back the storageId.
  */
-export function fitTranscript(
-  upload: TranscriptUpload,
-  maxBytes: number = MAX_TRANSCRIPT_BYTES,
-): TranscriptUpload {
-  let messages = upload.messages;
-  while (
-    messages.length > 0 &&
-    utf8.encode(JSON.stringify({ ...upload, messages })).byteLength > maxBytes
-  ) {
-    messages = messages.slice(Math.max(1, Math.floor(messages.length / 10)));
-  }
-  if (messages.length === 0 && upload.messages.length > 0) {
-    messages = [
-      {
-        type: "meta",
-        note: `transcript too large to persist (${upload.messages.length} messages dropped)`,
-      },
-    ];
-  }
-  return { ...upload, messages };
-}
+export type ScreenshotUploader = (
+  bytes: Uint8Array,
+  contentType: string,
+) => Promise<string | null>;
 
-/**
- * POSTs the task's transcript to {CONVEX_SITE_URL}/devbox/transcript once a
- * task ends, so the session record outlives the VM. Best-effort: failures are
- * logged and swallowed.
- */
-export function createTranscriptSender(
+export function createScreenshotUploader(
   config: EventSenderConfig,
   fetchFn: FetchLike = fetch,
-): TranscriptSender {
-  const endpoint = new URL(
-    "/devbox/transcript",
+): ScreenshotUploader {
+  const uploadUrlEndpoint = new URL(
+    "/devbox/recording/upload-url",
     config.convexSiteUrl,
   ).toString();
-  return async (taskId, messages) => {
-    const upload = fitTranscript({
-      devboxId: config.devboxId,
-      taskId,
-      messages,
-    });
+  const authHeader = { "x-devbox-secret": config.devboxSharedSecret };
+  return async (bytes, contentType) => {
+    let url: string;
     try {
-      const response = await fetchFn(endpoint, {
+      const response = await fetchFn(uploadUrlEndpoint, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-devbox-secret": config.devboxSharedSecret,
-        },
-        body: JSON.stringify(upload),
+        headers: authHeader,
       });
       if (!response.ok) {
-        const body = await response.text().catch(() => "");
         console.error(
-          `[gateway] transcript POST failed (${response.status}): ${body}`,
+          `[gateway] screenshot: upload-url POST failed (${response.status})`,
         );
+        return null;
       }
+      ({ url } = (await response.json()) as { url: string });
     } catch (error) {
-      console.error("[gateway] transcript POST error:", error);
+      console.error("[gateway] screenshot: upload-url error:", error);
+      return null;
+    }
+    try {
+      const response = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": contentType },
+        body: bytes.slice().buffer as ArrayBuffer,
+      });
+      if (!response.ok) {
+        console.error(
+          `[gateway] screenshot: upload POST failed (${response.status})`,
+        );
+        return null;
+      }
+      const { storageId } = (await response.json()) as { storageId: string };
+      return typeof storageId === "string" && storageId !== ""
+        ? storageId
+        : null;
+    } catch (error) {
+      console.error("[gateway] screenshot: upload error:", error);
+      return null;
     }
   };
 }

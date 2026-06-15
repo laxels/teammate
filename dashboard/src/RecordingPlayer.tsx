@@ -2,6 +2,7 @@ import {
   Controls,
   FullscreenButton,
   MediaPlayer,
+  type MediaPlayerInstance,
   MediaProvider,
   MuteButton,
   PlayButton,
@@ -13,69 +14,119 @@ import {
   VolumeSlider,
 } from "@vidstack/react";
 import "@vidstack/react/player/styles/base.css";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, type RefObject, useState } from "react";
+import { previewAlign } from "./commentLayout";
 import type { PlayerState } from "./recording";
 
 /** Discrete playback rates for the speed control (issue #66). The </> keyboard
  * shortcuts step Vidstack's own rate ladder; this menu snaps to these. */
 const PLAYBACK_RATES = [0.25, 0.5, 1, 2, 4, 8, 16] as const;
 
-/**
- * The task-details recording section. Renders the themed Vidstack player when a
- * recording is available, or a distinct placeholder for each other state
- * (recording in progress / uploading / unavailable).
- */
-export function RecordingPlayer({
-  state,
-  src,
-  title,
-}: {
+/** The slice of a comment the player needs (seek-bar markers + capture) (#70). */
+export type PlayerComment = { id: string; videoTimeSec: number; text: string };
+
+export type RecordingPlayerProps = {
   state: PlayerState;
   src: string | null;
   title: string;
-}) {
-  if (state === "available" && src !== null) {
-    return <ThemedPlayer src={src} title={title} />;
+  comments: PlayerComment[];
+  /** Grab the frame + persist a comment at the given video second. Resolves
+   * once the comment exists so the capture box can close. */
+  onCreateComment: (videoTimeSec: number, text: string) => Promise<void>;
+  /** Focus a comment in the rail (e.g. after clicking its seek-bar marker). */
+  onFocusComment: (id: string) => void;
+  /** The live player instance, so the rail can seek the video on comment click. */
+  playerRef: RefObject<MediaPlayerInstance | null>;
+};
+
+/** m:ss timecode for a number of seconds. */
+export function formatTimecode(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+/**
+ * The task-details recording section. Renders the themed Vidstack player (with
+ * Loom-style timestamped commenting, #70) when a recording is available, or a
+ * distinct placeholder for each other state.
+ */
+export function RecordingPlayer(props: RecordingPlayerProps) {
+  if (props.state === "available" && props.src !== null) {
+    return <ThemedPlayer {...props} src={props.src} />;
   }
   // playerState only returns "available" when a URL exists, so this fallback is
   // belt-and-suspenders for an available-but-urlless edge.
   return (
     <RecordingPlaceholder
-      state={state === "available" ? "unavailable" : state}
+      state={props.state === "available" ? "unavailable" : props.state}
     />
   );
 }
 
-function ThemedPlayer({ src, title }: { src: string; title: string }) {
+function ThemedPlayer({
+  src,
+  title,
+  comments,
+  onCreateComment,
+  onFocusComment,
+  playerRef,
+}: RecordingPlayerProps & { src: string }) {
+  // The video second a comment is being written at, or null when not capturing.
+  const [captureAt, setCaptureAt] = useState<number | null>(null);
+
   return (
     <MediaPlayer
       className="rec-player"
+      ref={playerRef}
       title={title}
       // Force the video provider; the Convex storage URL has no extension to
       // sniff. The browser plays the H.264/.mov bytes regardless of this hint.
       src={{ src, type: "video/mp4" }}
       playsInline
       aspectRatio="16/9"
-      // The operator navigated here specifically to watch the recording, so
-      // attach the source immediately (metadata preload) rather than waiting
-      // for the player to scroll into view — duration + scrubbing are ready.
       load="eager"
       // Global shortcuts (no focus needed); Vidstack suppresses them while a
-      // text input / textarea / contenteditable is focused — issue decision #5.
+      // text input / textarea / contenteditable is focused — issue decision #5,
+      // which is also exactly what makes the comment textareas safe to type in.
       keyTarget="document"
     >
       <MediaProvider />
-      <PlayerControls />
+      {captureAt !== null && (
+        <CommentCaptureOverlay
+          videoTimeSec={captureAt}
+          onCancel={() => setCaptureAt(null)}
+          onSubmit={async (text) => {
+            await onCreateComment(captureAt, text);
+            setCaptureAt(null);
+          }}
+        />
+      )}
+      <PlayerControls
+        comments={comments}
+        onArm={(t) => setCaptureAt(t)}
+        onFocusComment={onFocusComment}
+      />
     </MediaPlayer>
   );
 }
 
-function PlayerControls() {
+function PlayerControls({
+  comments,
+  onArm,
+  onFocusComment,
+}: {
+  comments: PlayerComment[];
+  onArm: (videoTimeSec: number) => void;
+  onFocusComment: (id: string) => void;
+}) {
   return (
     <Controls.Root className="rec-controls">
       {/* Click/gesture area above the bar keeps the video tappable. */}
       <div className="rec-controls-fill" />
       <Controls.Group className="rec-seek-row">
+        <CommentMarkers comments={comments} onFocusComment={onFocusComment} />
         <TimeSlider.Root className="rec-slider">
           <TimeSlider.Track className="rec-slider-track">
             <TimeSlider.TrackFill className="rec-slider-fill" />
@@ -99,6 +150,7 @@ function PlayerControls() {
           <Time className="rec-time-dur" type="duration" />
         </span>
         <span className="rec-spacer" />
+        <CommentButton onArm={onArm} />
         <SpeedControl />
         <VolumeControl />
         <FullscreenButton className="rec-btn">
@@ -106,6 +158,156 @@ function PlayerControls() {
         </FullscreenButton>
       </Controls.Group>
     </Controls.Root>
+  );
+}
+
+/** The "add a comment here" button: pauses, then arms the capture box at the
+ * current timestamp. */
+function CommentButton({ onArm }: { onArm: (videoTimeSec: number) => void }) {
+  const time = useMediaState("currentTime");
+  const remote = useMediaRemote();
+  return (
+    <button
+      type="button"
+      className="rec-btn rec-comment-btn"
+      title="Comment at this timestamp"
+      onClick={() => {
+        remote.pause();
+        onArm(time);
+      }}
+    >
+      <CommentGlyph />
+    </button>
+  );
+}
+
+/** Speech-bubble markers over the seek bar, one per comment. Hover shows a
+ * preview that shifts to stay inside the player; click seeks + focuses. */
+function CommentMarkers({
+  comments,
+  onFocusComment,
+}: {
+  comments: PlayerComment[];
+  onFocusComment: (id: string) => void;
+}) {
+  const duration = useMediaState("duration");
+  const remote = useMediaRemote();
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  return (
+    <div className="rec-markers" aria-hidden={false}>
+      {comments.map((c) => {
+        const leftPct = Math.min(
+          100,
+          Math.max(0, (c.videoTimeSec / duration) * 100),
+        );
+        const align = previewAlign(leftPct);
+        return (
+          <button
+            type="button"
+            key={c.id}
+            className="rec-marker"
+            style={{ left: `${leftPct}%` }}
+            title={`Comment at ${formatTimecode(c.videoTimeSec)}`}
+            onClick={() => {
+              remote.seek(c.videoTimeSec);
+              onFocusComment(c.id);
+            }}
+          >
+            <SpeechBubbleGlyph />
+            <span className={`rec-marker-preview rec-marker-preview-${align}`}>
+              {c.text}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CommentCaptureOverlay({
+  videoTimeSec,
+  onSubmit,
+  onCancel,
+}: {
+  videoTimeSec: number;
+  onSubmit: (text: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    if (saving) return;
+    const trimmed = text.trim();
+    if (trimmed === "") {
+      onCancel();
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSubmit(trimmed);
+    } catch {
+      // The mutation/frame-grab swallow their own errors; re-enable on the rare
+      // throw so the operator can retry rather than being stuck on "saving…".
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rec-capture">
+      {/* Real button backdrop: click (or keyboard-activate) to cancel, without
+          an interactive-div a11y violation. The card sits above it. */}
+      <button
+        type="button"
+        className="rec-capture-scrim"
+        aria-label="Cancel comment"
+        disabled={saving}
+        onClick={() => {
+          if (!saving) onCancel();
+        }}
+      />
+      <div className="rec-capture-card">
+        <div className="rec-capture-label">
+          Comment at {formatTimecode(videoTimeSec)}
+        </div>
+        <textarea
+          // biome-ignore lint/a11y/noAutofocus: the box exists to be typed in
+          autoFocus
+          className="rec-capture-text"
+          value={text}
+          disabled={saving}
+          placeholder="Add a comment…  (Enter to save · Shift+Enter for a newline · Esc to cancel)"
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void submit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              if (!saving) onCancel();
+            }
+          }}
+        />
+        <div className="rec-capture-actions">
+          <button
+            type="button"
+            className="act"
+            onClick={onCancel}
+            disabled={saving}
+          >
+            cancel
+          </button>
+          <button
+            type="button"
+            className="act act-primary"
+            onClick={() => void submit()}
+            disabled={saving}
+          >
+            {saving ? "saving…" : "comment"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -123,10 +325,32 @@ function PlayPauseGlyph() {
   );
 }
 
+function CommentGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M4 5h16v11H9l-4 4v-4H4z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SpeechBubbleGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="rec-marker-glyph">
+      <path
+        d="M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-6l-4 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 function SeekGlyph({ dir }: { dir: "back" | "fwd" }) {
-  // A circular arrow that opens at the top with the seek amount centred inside
-  // the ring. Only the arrow is mirrored for forward; the "10" stays upright and
-  // legible (the old glyph crammed the text over the stroke — issue #72).
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <g
@@ -143,7 +367,6 @@ function SeekGlyph({ dir }: { dir: "back" | "fwd" }) {
           strokeWidth="1.7"
           strokeLinecap="round"
         />
-        {/* Arrowhead at the ring's top-left terminus. */}
         <path d="M7.9 3.4 6.4 8 11.2 7.7Z" fill="currentColor" />
       </g>
       <text

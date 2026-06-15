@@ -55,6 +55,8 @@ export type RecorderDeps = {
   recordingsDir?: string;
   /** Override the SIGINT-finalize wait (tests). Default FINALIZE_TIMEOUT_MS. */
   finalizeTimeoutMs?: number;
+  /** Clock for the recording's wall-clock start stamp (tests). Default Date.now. */
+  now?: () => number;
 };
 
 /** How long finish() waits for screencapture to exit after SIGINT before
@@ -83,6 +85,10 @@ function defaultSpawn(outputPath: string): RecorderProcess {
 type ActiveRecording = {
   taskId: string;
   path: string;
+  /** Wall-clock start (ms), captured the instant start() is called — BEFORE the
+   * async mkdir/spawn — so video time 0 maps to this exact timestamp. Rides the
+   * first "recording" post; the page uses it for comment <-> event alignment. */
+  startedAt: number;
   /** Resolves to the spawned capture process, or null if spawning failed.
    * finish()/abort() await this so a same-tick claim can't slip past a still-
    * spawning recording and orphan the process (start() is async: mkdir + spawn
@@ -106,6 +112,7 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
   const recordingsDir =
     deps.recordingsDir ?? join(homedir(), ".ultraclaude", "recordings");
   const finalizeTimeoutMs = deps.finalizeTimeoutMs ?? FINALIZE_TIMEOUT_MS;
+  const now = deps.now ?? Date.now;
 
   let active: ActiveRecording | null = null;
 
@@ -122,7 +129,7 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
   const postStatus = async (
     taskId: string,
     status: RecordingStatus,
-    extra: { storageId?: string; bytes?: number } = {},
+    extra: { storageId?: string; bytes?: number; startedAt?: number } = {},
   ): Promise<void> => {
     try {
       const response = await fetchFn(recordingEndpoint, {
@@ -160,6 +167,9 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
       abort();
     }
     const path = recordingPath(taskId);
+    // Capture the start instant NOW, synchronously, before any async work — this
+    // is video time 0 and must reflect when capture truly began (#70).
+    const startedAt = now();
     let resolveProc!: (proc: RecorderProcess | null) => void;
     const procPromise = new Promise<RecorderProcess | null>((resolve) => {
       resolveProc = resolve;
@@ -171,6 +181,7 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
     const recording: ActiveRecording = {
       taskId,
       path,
+      startedAt,
       proc: procPromise,
       claimed: false,
     };
@@ -182,7 +193,8 @@ export function createScreenRecorder(deps: RecorderDeps): ScreenRecorder {
         resolveProc(proc);
         // If finish()/abort() already claimed it, they own the transitions —
         // don't post a late "recording".
-        if (!recording.claimed) await postStatus(taskId, "recording");
+        if (!recording.claimed)
+          await postStatus(taskId, "recording", { startedAt });
       } catch (error) {
         console.error("[gateway] recorder: failed to start capture:", error);
         resolveProc(null);

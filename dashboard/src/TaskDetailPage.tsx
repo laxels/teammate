@@ -1,11 +1,26 @@
+import type { MediaPlayerInstance } from "@vidstack/react";
 import { useMutation, useQuery } from "convex/react";
-import { useState } from "react";
+import {
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { CommentRail, type RailComment } from "./CommentRail";
+import {
+  commentEventTime,
+  desiredCenterForTime,
+  type EventAnchor,
+} from "./commentLayout";
+import { grabFrame } from "./comments";
 import { useDashboardSecret } from "./config";
-import { RecordingPlayer } from "./RecordingPlayer";
+import { type PlayerComment, RecordingPlayer } from "./RecordingPlayer";
 import { playerState } from "./recording";
 import { spaLink } from "./router";
-import { extractTranscriptLines } from "./transcriptView";
+import { buildTimeline, type TimelineRow } from "./timeline";
 import {
   ArmedButton,
   calendar,
@@ -65,9 +80,15 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
   const secret = useDashboardSecret();
   const retry = useMutation(api.dashboard.retryTask);
   const stop = useMutation(api.dashboard.stopTask);
+  const createComment = useMutation(api.dashboard.createComment);
+  const editComment = useMutation(api.dashboard.editComment);
+  const deleteComment = useMutation(api.dashboard.deleteComment);
   const now = useNowTicker();
   const [note, setNote] = useState<string | null>(null);
   const postNote = (_taskId: string, text: string) => setNote(text);
+
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const playerRef = useRef<MediaPlayerInstance | null>(null);
 
   const task = detail.task;
   const terminal = TERMINAL.has(task.status);
@@ -83,6 +104,53 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
     finishedAt: task.finishedAt ?? null,
     now,
   });
+  const recordingStartedAt = detail.recording?.startedAt ?? null;
+
+  // Prompt anchors the timeline at the recording's start (so it lines up with
+  // video 0), falling back to when the task first ran, then creation.
+  const promptTs = recordingStartedAt ?? task.startedAt ?? task.createdAt;
+  const rows = buildTimeline(detail.events, task.prompt, promptTs);
+
+  const playerComments: PlayerComment[] = detail.comments.map((c) => ({
+    id: c.id,
+    videoTimeSec: c.videoTimeSec,
+    text: c.text,
+  }));
+  const railComments: RailComment[] = detail.comments.map((c) => ({
+    id: c.id,
+    videoTimeSec: c.videoTimeSec,
+    text: c.text,
+    imageUrl: c.imageUrl,
+    updatedAt: c.updatedAt,
+  }));
+
+  const onCreateComment = async (videoTimeSec: number, text: string) => {
+    // Best-effort frame grab first; the comment is created regardless.
+    const imageStorageId = await grabFrame(secret, task.taskId, videoTimeSec);
+    const res = await createComment({
+      secret,
+      taskId: task.taskId,
+      videoTimeSec,
+      text,
+      ...(imageStorageId === null
+        ? {}
+        : { imageStorageId: imageStorageId as Id<"_storage"> }),
+    });
+    if (res.ok) setFocusedId(res.commentId);
+    else postNote(task.taskId, `✗ ${res.reason}`);
+  };
+
+  const onEdit = async (id: string, text: string) => {
+    await editComment({ secret, commentId: id as Id<"comments">, text });
+  };
+  const onDelete = async (id: string) => {
+    await deleteComment({ secret, commentId: id as Id<"comments"> });
+    if (focusedId === id) setFocusedId(null);
+  };
+  const onSeek = (videoTimeSec: number) => {
+    if (playerRef.current !== null)
+      playerRef.current.currentTime = videoTimeSec;
+  };
 
   return (
     <article className="task-detail">
@@ -167,6 +235,10 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
           state={recState}
           src={detail.recording?.url ?? null}
           title={task.title}
+          comments={playerComments}
+          onCreateComment={onCreateComment}
+          onFocusComment={setFocusedId}
+          playerRef={playerRef}
         />
         {recState === "available" && detail.recording !== null && (
           <div className="rec-meta">
@@ -179,71 +251,245 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
         )}
       </section>
 
-      <div className="task-detail-grid">
-        <section className="detail-prompt">
-          <h3 className="detail-section-label">prompt</h3>
-          <pre>{task.prompt}</pre>
-        </section>
-        <section className="detail-events">
-          <h3 className="detail-section-label">events</h3>
-          {detail.events.length === 0 && (
-            <div className="dim">none recorded</div>
-          )}
-          {detail.events.map((event) => (
-            <div className="event" key={`${event.ts}-${event.type}`}>
-              <span className="event-ts">{calendar(event.ts)}</span>
-              <span className={`status status-ev-${event.type}`}>
-                {event.type.replace("_", " ")}
-              </span>
-              <span className="event-summary">{event.summary}</span>
-            </div>
-          ))}
-        </section>
-      </div>
-
-      {detail.hasTranscript && (
-        <section className="detail-transcript">
-          <h3 className="detail-section-label">session transcript</h3>
-          <TranscriptPanel taskId={task.taskId} />
-        </section>
-      )}
+      <section className="detail-timeline-section">
+        <h3 className="detail-section-label">events &amp; comments</h3>
+        <TimelineGrid
+          rows={rows}
+          comments={railComments}
+          recordingStartedAt={recordingStartedAt}
+          focusedId={focusedId}
+          onFocus={setFocusedId}
+          onSeek={onSeek}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </section>
     </article>
   );
 }
 
-function TranscriptPanel({ taskId }: { taskId: string }) {
-  const secret = useDashboardSecret();
-  const [open, setOpen] = useState(false);
-  // The payload can approach 1 MB — fetch only on explicit request.
-  const transcript = useQuery(
-    api.dashboard.transcript,
-    open ? { secret, taskId } : "skip",
+/** Measures the rendered event rows' vertical extents (in the events column's
+ * coordinate space) so the rail can align comments to them and the red focus
+ * bar can sit between events. Re-measures on layout/content/resize changes. */
+function useAnchors(
+  ref: RefObject<HTMLElement | null>,
+  rowsKey: string,
+): EventAnchor[] {
+  const [anchors, setAnchors] = useState<EventAnchor[]>([]);
+  // rowsKey isn't read inside the effect; it's a deliberate re-measure trigger
+  // when the rendered row set changes (count / last timestamp).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowsKey deliberately re-runs the measure
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el === null) return;
+    const measure = () => {
+      const nodes = el.querySelectorAll<HTMLElement>("[data-anchor-ts]");
+      const next: EventAnchor[] = [];
+      for (const node of nodes) {
+        const ts = Number(node.dataset.anchorTs);
+        next.push({
+          ts,
+          top: node.offsetTop,
+          bottom: node.offsetTop + node.offsetHeight,
+        });
+      }
+      setAnchors((prev) =>
+        prev.length === next.length &&
+        prev.every(
+          (a, i) =>
+            a.ts === next[i]?.ts &&
+            a.top === next[i]?.top &&
+            a.bottom === next[i]?.bottom,
+        )
+          ? prev
+          : next,
+      );
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    for (const node of el.querySelectorAll<HTMLElement>("[data-anchor-ts]")) {
+      ro.observe(node);
+    }
+    return () => ro.disconnect();
+  }, [ref, rowsKey]);
+  return anchors;
+}
+
+function TimelineGrid({
+  rows,
+  comments,
+  recordingStartedAt,
+  focusedId,
+  onFocus,
+  onSeek,
+  onEdit,
+  onDelete,
+}: {
+  rows: TimelineRow[];
+  comments: RailComment[];
+  recordingStartedAt: number | null;
+  focusedId: string | null;
+  onFocus: (id: string | null) => void;
+  onSeek: (videoTimeSec: number) => void;
+  onEdit: (id: string, text: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const eventsRef = useRef<HTMLDivElement | null>(null);
+  const rowsKey = `${rows.length}:${rows.at(-1)?.ts ?? 0}`;
+  const anchors = useAnchors(eventsRef, rowsKey);
+
+  // The red bar sits at the focused comment's timestamp, between events.
+  const focused = comments.find((c) => c.id === focusedId) ?? null;
+  const focusedTime =
+    focused === null
+      ? null
+      : commentEventTime(recordingStartedAt, focused.videoTimeSec);
+  const redBarTop =
+    focusedTime === null ? null : desiredCenterForTime(focusedTime, anchors);
+
+  // Scroll a freshly-focused comment into view (also right after posting one).
+  useEffect(() => {
+    if (focusedId === null) return;
+    const el = document.querySelector<HTMLElement>(
+      `[data-comment-id="${CSS.escape(focusedId)}"]`,
+    );
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusedId]);
+
+  return (
+    <div className="timeline-grid">
+      <div className="timeline-events" ref={eventsRef}>
+        {rows.map((row, i) => (
+          <TimelineEventRow
+            // The timeline is append-only and (ts, kind) can repeat within a
+            // burst, so the index disambiguates an otherwise-stable key.
+            // biome-ignore lint/suspicious/noArrayIndexKey: stable append-only timeline; index only disambiguates same-ts rows
+            key={`${row.ts}-${row.kind}-${i}`}
+            row={row}
+          />
+        ))}
+        {redBarTop !== null && (
+          <div
+            className="timeline-redbar"
+            style={{ top: redBarTop }}
+            aria-hidden="true"
+          />
+        )}
+      </div>
+      <div className="timeline-rail-col">
+        <CommentRail
+          comments={comments}
+          anchors={anchors}
+          recordingStartedAt={recordingStartedAt}
+          focusedId={focusedId}
+          onFocus={onFocus}
+          onSeek={onSeek}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </div>
+    </div>
   );
-  if (!open) {
+}
+
+const STATUS_GLYPH: Record<string, string> = {
+  started: "rocket",
+  needs_input: "needs",
+  completed: "ok",
+  failed: "fail",
+  stopped: "stop",
+};
+
+function TimelineEventRow({ row }: { row: TimelineRow }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (row.kind === "prompt") {
     return (
-      <button type="button" className="act" onClick={() => setOpen(true)}>
-        show transcript
-      </button>
+      <div className="tl-row tl-row-prompt" data-anchor-ts={row.ts}>
+        <span className="tl-label tl-label-prompt">Prompt</span>
+        <pre className="tl-prompt-text">{row.text}</pre>
+      </div>
     );
   }
-  if (transcript === undefined) {
-    return <div className="dim">loading transcript…</div>;
+
+  if (row.kind === "status") {
+    return (
+      <div
+        className={`tl-row tl-row-status status-ev-${row.status}`}
+        data-anchor-ts={row.ts}
+      >
+        <span
+          className={`tl-status-dot tl-status-${STATUS_GLYPH[row.status] ?? "ok"}`}
+        />
+        <span className="tl-status-label">{row.status.replace("_", " ")}</span>
+        <span className="tl-status-summary">{row.summary}</span>
+      </div>
+    );
   }
-  if (transcript === null) {
-    return <div className="dim">no transcript stored</div>;
-  }
-  return (
-    <div className="transcript">
-      {extractTranscriptLines(transcript.json).map((line, i) => (
-        <div
-          className={`transcript-line transcript-${line.role}`}
-          // biome-ignore lint/suspicious/noArrayIndexKey: static render of an immutable list
-          key={i}
-        >
-          <span className="transcript-role">{line.role}</span>
-          <span className="transcript-text">{line.text}</span>
+
+  if (row.kind === "assistant") {
+    const hasMore = row.detail !== null && row.detail !== row.summary;
+    return (
+      <div className="tl-row tl-row-assistant" data-anchor-ts={row.ts}>
+        <span className="tl-label tl-label-assistant">assistant</span>
+        <div className="tl-assistant-body">
+          <div className="tl-assistant-text">
+            {expanded && row.detail !== null ? row.detail : row.summary}
+          </div>
+          {hasMore && (
+            <button
+              type="button"
+              className="tl-expand"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "show less" : "show more"}
+            </button>
+          )}
         </div>
-      ))}
+      </div>
+    );
+  }
+
+  // tool_call / tool_result — collapsed by default, expand to detail (+ image).
+  const isResult = row.kind === "tool_result";
+  const image = isResult ? row.imageUrl : null;
+  const expandable = row.detail !== null || image !== null;
+  return (
+    <div
+      className={`tl-row tl-row-tool ${isResult ? "tl-row-tool-result" : "tl-row-tool-call"}`}
+      data-anchor-ts={row.ts}
+    >
+      <button
+        type="button"
+        className="tl-tool-head"
+        onClick={() => expandable && setExpanded((v) => !v)}
+        aria-expanded={expandable ? expanded : undefined}
+        disabled={!expandable}
+      >
+        <span
+          className={`tl-tool-caret${expanded ? " tl-tool-caret-open" : ""}`}
+        >
+          {expandable ? "▸" : "·"}
+        </span>
+        <span className="tl-tool-kind">{isResult ? "result" : "call"}</span>
+        {row.tool !== null && <code className="tl-tool-name">{row.tool}</code>}
+        <span className="tl-tool-summary">{row.summary}</span>
+      </button>
+      {expanded && expandable && (
+        <div className="tl-tool-detail">
+          {row.detail !== null && (
+            <pre className="tl-tool-pre">{row.detail}</pre>
+          )}
+          {image !== null && (
+            <img
+              className="tl-tool-shot"
+              src={image}
+              alt="tool result screenshot"
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
