@@ -2,14 +2,13 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { convexTest } from "convex-test";
 import type { TaskEffort } from "../shared/protocol";
 import { api, internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 
 // Bun has no import.meta.glob; hand-build the module map convex-test needs.
 // provisionVmFailed schedules placeQueuedEphemeralTasks (hosts) and
 // notify.devboxEvent at 0ms — both must be resolvable, or the scheduler logs
 // "Could not find module" while the suite still passes. notify.devboxEvent
-// no-ops without SLACK_BOT_TOKEN (unset here), so it drains cleanly.
+// no-ops without SLACK_BOT_TOKEN (deleted in beforeEach), so it drains cleanly.
 const modules = {
   "./_generated/api.js": () => import("./_generated/api.js"),
   "./_generated/server.js": () => import("./_generated/server.js"),
@@ -41,9 +40,11 @@ beforeEach(() => {
   // a gateway URL once a slot is free.
   process.env.DEVBOX_SHARED_SECRET = SECRET;
   process.env.TAILNET_SUFFIX = "ts.example.com";
-  // bun auto-loads .env.local, which carries a real SLACK_BOT_TOKEN. Unset it
-  // so the drained notify.devboxEvent takes its no-token early return instead
-  // of firing a real Slack API call from the test.
+  // bun loads the repo's `.env` (which carries a real SLACK_BOT_TOKEN) into the
+  // test process, and a token can also be exported into the shell. Delete it
+  // here — in-process, so the guard holds regardless of cwd — so the drained
+  // notify.devboxEvent takes its no-token early return instead of firing a real
+  // Slack API call.
   savedSlackToken = process.env.SLACK_BOT_TOKEN;
   delete process.env.SLACK_BOT_TOKEN;
 });
@@ -183,7 +184,8 @@ test("provisionVmFailed never regresses a task that already reached terminal", a
       .query("tasks")
       .withIndex("by_task_id", (q) => q.eq("taskId", "task-1"))
       .unique();
-    await ctx.db.patch(task!._id as Id<"tasks">, { status: "stopped" });
+    if (!task) throw new Error("seedFullHost should have created task-1");
+    await ctx.db.patch(task._id, { status: "stopped" });
   });
 
   await t.mutation(api.hosts.provisionVmFailed, {

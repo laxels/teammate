@@ -1,4 +1,5 @@
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { internalMutation } from "./_generated/server";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -19,8 +20,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *   host-agent subscriptions within seconds; acked rows are never read
  *   again. A week-old pending command targets a devbox or host that is
  *   long gone — delivering it would be wrong, not just useless.
- * - taskEvents: read per-task by the dashboard detail view (last 50), the
- *   orchestrator's get_task tool (last 10), and the staleness cron (latest
+ * - taskEvents: read per-task by the dashboard detail view (the retro
+ *   timeline — up to MAX_DETAIL_EVENTS), the orchestrator's get_task tool
+ *   (last 10), and the staleness cron (latest
  *   event per *active* task, falling back to task.updatedAt when none
  *   remain — a running task with no event in 30 days was already maximally
  *   stale, so nudging behavior is unchanged).
@@ -66,6 +68,14 @@ export const pruneExpired = internalMutation({
         )
         .take(PRUNE_BATCH_SIZE);
       for (const row of rows) {
+        // Some pruned rows own a storage blob (taskEvents tool-result
+        // screenshots, #70): delete it first so the 30-day sweep doesn't leak
+        // storage. .catch so a missing blob can't roll back the whole batch.
+        const blobId = (row as { imageStorageId?: Id<"_storage"> })
+          .imageStorageId;
+        if (blobId !== undefined) {
+          await ctx.storage.delete(blobId).catch(() => undefined);
+        }
         await ctx.db.delete(row._id);
       }
       if (rows.length > 0) {

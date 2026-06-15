@@ -5,12 +5,17 @@
 import { v } from "convex/values";
 
 export const devboxEventTypeValidator = v.union(
+  // Status events (drive task status + Slack).
   v.literal("started"),
   v.literal("progress"),
   v.literal("needs_input"),
   v.literal("completed"),
   v.literal("failed"),
   v.literal("stopped"),
+  // Info events (#70 retro timeline only; never drive task status).
+  v.literal("assistant_text"),
+  v.literal("tool_call"),
+  v.literal("tool_result"),
 );
 
 /** A devbox/host heartbeat older than this is treated as gone. */

@@ -33,7 +33,9 @@
 # `release` job frees it at the end.
 #
 # Env:
-#   CONVEX_SITE_URL        deployment .convex.site URL (default: prod)
+#   CONVEX_DEPLOYMENT_SLUG Convex deployment slug; the Convex URLs derive from it
+#                          (or set CONVEX_SITE_URL directly — the lock API uses
+#                          it). See scripts/deployment-constants.sh.
 #   DEVBOX_SHARED_SECRET   shared secret (or read from $ULTRACLAUDE_ENV / .env)
 #   FLEET_LOCK_HOLDER      holder id (default: <user>@<host>:<pid>)
 #   FLEET_LOCK_TTL_MS      lease length (default 900000 = 15 min)
@@ -47,7 +49,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 
-CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://zealous-robin-941.convex.site}"
+# Deployment-identity constants (CONVEX_SITE_URL): single source of truth shared
+# with the other fleet scripts; stays env-overridable.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 LOCK_NAME="${FLEET_LOCK_NAME:-fleet}"
 TTL_MS="${FLEET_LOCK_TTL_MS:-900000}"
 WAIT_SECS="${FLEET_LOCK_WAIT_SECS:-0}"

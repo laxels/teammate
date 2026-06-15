@@ -156,20 +156,10 @@ export const EPHEMERAL_RETIRE_GRACE_MS = 5 * 60_000;
 // Auth: `x-devbox-secret` header must equal the DEVBOX_SHARED_SECRET env var
 // on both sides.
 
-// ---- Gateway -> orchestrator: POST {CONVEX_SITE_URL}/devbox/transcript ----
-// Sent once per task when it reaches a terminal status: the session's SDK
-// message transcript, so history outlives the ephemeral VM. Oldest messages
-// are dropped until the serialized payload fits MAX_TRANSCRIPT_BYTES
-// (Convex documents cap at ~1 MB).
-
-export type TranscriptUpload = {
-  devboxId: string;
-  taskId: string;
-  // Raw SDKMessages, JSON-serializable, oldest first.
-  messages: unknown[];
-};
-
-export const MAX_TRANSCRIPT_BYTES = 900_000;
+// The persisted session transcript (its own `transcripts` table + a
+// /devbox/transcript upload endpoint) was removed in #70: the task-details
+// retro timeline now streams full assistant text, tool calls, and tool results
+// as info events (see DevboxInfoEventType), which supersede it.
 
 // ---- File handling caps (Slack <-> devbox, see src/slackApi.ts) ----
 // Inbound: the largest Slack attachment the orchestrator downloads + stages
@@ -238,10 +228,16 @@ export const RECORDING_CONTENT_TYPE = "video/quicktime";
 //
 // ---- Devbox -> orchestrator: POST {CONVEX_SITE_URL}/devbox/recording ----
 // Auth: `x-devbox-secret`. JSON body { taskId, devboxId, status, storageId?,
-// bytes? } records a recording lifecycle transition on the task row. storageId
-// is required for (and only for) status "available".
+// bytes?, startedAt? } records a recording lifecycle transition on the task
+// row. storageId is required for (and only for) status "available". startedAt
+// is the recorder's wall-clock start time (ms), sent with the first "recording"
+// post and preserved across later transitions; the task-details page needs it
+// to map video-relative seconds to the absolute event timestamps on the
+// timeline (#70 — comment ↔ event alignment).
 
-export type DevboxEventType =
+// Status events drive the task's lifecycle status (DEVBOX_EVENT_TO_TASK_STATUS)
+// and are mirrored to the task's Slack thread.
+export type DevboxStatusEventType =
   | "started"
   | "progress"
   // Emitted when the session blocks on AskUserQuestion (gateway session.ts);
@@ -251,15 +247,45 @@ export type DevboxEventType =
   | "failed"
   | "stopped";
 
+// Info events enrich the task-details retro timeline (#70): the full assistant
+// narration, each tool call, and each tool result (including computer-use
+// screenshots). They are appended to taskEvents but NEVER drive task status
+// (statusForEvent returns undefined) and are NOT posted to Slack — see
+// convex/devboxes.ts recordEvent. Volume is high (computer-use emits a
+// screenshot roughly every step); that is expected and acceptable.
+export type DevboxInfoEventType =
+  | "assistant_text"
+  | "tool_call"
+  | "tool_result";
+
+export type DevboxEventType = DevboxStatusEventType | DevboxInfoEventType;
+
 export type DevboxEvent = {
   devboxId: string;
   taskId: string;
   type: DevboxEventType;
-  // One- or two-sentence human-readable summary, suitable for posting to
-  // Slack as a status update.
+  // One- or two-sentence human-readable summary: for status events the
+  // Slack-suitable status line; for info events a short preview of `detail`.
   summary: string;
   ts: number;
+  // ---- Info-event enrichment (set only on info events) ----
+  // The full, un-excerpted body the expandable retro view renders: the complete
+  // assistant text turn, the tool input JSON, or the tool result text. Capped at
+  // DETAIL_MAX_CHARS so a single event row stays well under Convex's ~1 MB doc
+  // limit even under the high info-event volume.
+  detail?: string;
+  // Tool name for tool_call / tool_result events (e.g. "left_click").
+  tool?: string;
+  // Convex storageId of a screenshot attached to a tool_result (computer-use
+  // returns a fresh screenshot after every action). Resolved to a URL by
+  // taskDetail; never inline base64 (row-size limits).
+  imageStorageId?: string;
 };
+
+/** Max characters of an info event's `detail` body persisted on the wire/row.
+ * Generous enough for full assistant turns and tool I/O, small enough that even
+ * a burst of info events can't approach Convex's per-document size cap. */
+export const DETAIL_MAX_CHARS = 16_000;
 
 export type TaskStatus =
   | "queued"
@@ -269,15 +295,30 @@ export type TaskStatus =
   | "failed"
   | "stopped";
 
-export const DEVBOX_EVENT_TO_TASK_STATUS: Record<DevboxEventType, TaskStatus> =
-  {
-    started: "running",
-    progress: "running",
-    needs_input: "needs_input",
-    completed: "completed",
-    failed: "failed",
-    stopped: "stopped",
-  };
+export const DEVBOX_EVENT_TO_TASK_STATUS: Record<
+  DevboxStatusEventType,
+  TaskStatus
+> = {
+  started: "running",
+  progress: "running",
+  needs_input: "needs_input",
+  completed: "completed",
+  failed: "failed",
+  stopped: "stopped",
+};
+
+/**
+ * The task status an event drives, or undefined for info events (#70). Info
+ * events (assistant_text/tool_call/tool_result) are recorded on the timeline
+ * but must never change task status — a tool_result arriving after a task
+ * completed must not regress it. Callers branch on undefined to skip the status
+ * transition entirely (convex/devboxes.ts recordEvent).
+ */
+export function statusForEvent(type: DevboxEventType): TaskStatus | undefined {
+  return (
+    DEVBOX_EVENT_TO_TASK_STATUS as Record<string, TaskStatus | undefined>
+  )[type];
+}
 
 const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",

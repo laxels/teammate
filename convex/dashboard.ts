@@ -18,7 +18,7 @@ import {
 } from "../src/orchestration";
 import { timingSafeEqual } from "../src/slack";
 import { internal } from "./_generated/api";
-import type { Doc } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { type MutationCtx, mutation, query } from "./_generated/server";
 import { enqueueCommandRow } from "./commands";
 import { fleetSnapshotData, placeEphemeralTaskRow } from "./hosts";
@@ -58,7 +58,11 @@ function publicTask(task: Doc<"tasks">) {
   };
 }
 
-const MAX_DETAIL_EVENTS = 50;
+// The task-details retro timeline (#70) folds in tool calls/results, so a
+// busy computer-use task emits far more than the old ~6 status events. Take a
+// generous chronological slice; screenshots ride as storageId references
+// (resolved to URLs below), never inline bytes, so the payload stays bounded.
+const MAX_DETAIL_EVENTS = 2000;
 
 /** Every non-terminal task (queued/running/needs_input), newest first — the
  * dashboard's live board. Unpaginated: bounded by fleet capacity in practice. */
@@ -143,11 +147,28 @@ export const taskDetail = query({
     if (task === null) {
       return null;
     }
-    const events = await ctx.db
+    // Chronological (insertion-ordered) so the timeline reads start -> end and
+    // aligns with the recording. Info events (#70) carry detail/tool plus an
+    // optional screenshot, resolved to a URL here so the dashboard never sees a
+    // raw storageId.
+    const eventRows = await ctx.db
       .query("taskEvents")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .order("desc")
+      .order("asc")
       .take(MAX_DETAIL_EVENTS);
+    const events = await Promise.all(
+      eventRows.map(async (e) => ({
+        type: e.type,
+        summary: e.summary,
+        ts: e.ts,
+        detail: e.detail ?? null,
+        tool: e.tool ?? null,
+        imageUrl:
+          e.imageStorageId === undefined
+            ? null
+            : await ctx.storage.getUrl(e.imageStorageId),
+      })),
+    );
     const devbox =
       task.devboxId === undefined
         ? null
@@ -157,10 +178,27 @@ export const taskDetail = query({
               q.eq("devboxId", task.devboxId as string),
             )
             .unique();
-    const transcriptRow = await ctx.db
-      .query("transcripts")
+    // Retro comments (#70), oldest first, each with its grabbed frame resolved
+    // to a URL. Scoped by taskId, so a retry's comments never bleed in.
+    const commentRows = await ctx.db
+      .query("comments")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+      .collect();
+    const comments = await Promise.all(
+      commentRows
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map(async (c) => ({
+          id: c._id,
+          videoTimeSec: c.videoTimeSec,
+          text: c.text,
+          imageUrl:
+            c.imageStorageId === undefined
+              ? null
+              : await ctx.storage.getUrl(c.imageStorageId),
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        })),
+    );
     // Resolve the recording's storageId to a playable URL here (the dashboard
     // never sees a raw storageId). getUrl is null for a missing/pruned blob, so
     // an "available" recording whose blob vanished safely degrades to a
@@ -177,37 +215,20 @@ export const taskDetail = query({
                 : await ctx.storage.getUrl(task.recording.storageId),
             bytes: task.recording.bytes ?? null,
             uploadedAt: task.recording.uploadedAt ?? null,
+            // Wall-clock recorder start; lets the page map a comment's
+            // video-relative seconds onto the absolute event timeline.
+            startedAt: task.recording.startedAt ?? null,
           };
     return {
       task: { ...publicTask(task), prompt: task.prompt },
-      hasTranscript: transcriptRow !== null,
       recording,
-      events: events.reverse().map((e) => ({
-        type: e.type,
-        summary: e.summary,
-        ts: e.ts,
-      })),
+      events,
+      comments,
       // The devbox row's existence is the liveness signal: rows are deleted
       // when the VM is destroyed, and the monitoring page dies with the VM.
       monitoringUrl: devbox === null ? null : monitoringUrl(devbox.gatewayUrl),
       devboxStatus: devbox?.status ?? null,
     };
-  },
-});
-
-/** The persisted transcript JSON for a finished task, or null. Loaded only
- * when the operator expands it (the payload can approach 1 MB). */
-export const transcript = query({
-  args: { secret: v.string(), taskId: v.string() },
-  handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
-      return null;
-    }
-    const row = await ctx.db
-      .query("transcripts")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
-    return row === null ? null : { json: row.json, uploadedAt: row.uploadedAt };
   },
 });
 
@@ -427,3 +448,122 @@ export const retryTask = mutation({
     };
   },
 });
+
+// ---- Retro comments on a task's screen recording (#70) ----
+// Capture + persist only: feeding comments back to the agent is a separate
+// ticket. Authored anonymously under the shared DASHBOARD_SECRET, like every
+// other dashboard mutation.
+
+/** Hard cap on a comment's text so one row can't approach Convex's doc limit. */
+const MAX_COMMENT_CHARS = 10_000;
+
+type CommentResult =
+  | { ok: true; commentId: Id<"comments"> }
+  | { ok: false; reason: string };
+
+/**
+ * Pin a comment to a video-relative timestamp on a task's recording. The frame
+ * grabbed at that timestamp (the host frame-grab endpoint) is referenced by
+ * imageStorageId; absent when the grab failed, yielding a text-only comment.
+ * Post-hoc only — the recording must be finalized ("available").
+ */
+export const createComment = mutation({
+  args: {
+    secret: v.string(),
+    taskId: v.string(),
+    videoTimeSec: v.number(),
+    text: v.string(),
+    imageStorageId: v.optional(v.id("_storage")),
+  },
+  handler: async (ctx, args): Promise<CommentResult> => {
+    if (!secretOk(args.secret)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    const text = args.text.trim();
+    if (text === "") {
+      return { ok: false, reason: "comment is empty" };
+    }
+    if (!Number.isFinite(args.videoTimeSec) || args.videoTimeSec < 0) {
+      return { ok: false, reason: "invalid timestamp" };
+    }
+    const task = await loadTask(ctx, args.taskId);
+    if (task === null) {
+      return { ok: false, reason: `no task with id ${args.taskId}` };
+    }
+    if (task.recording?.status !== "available") {
+      // Post-hoc only: nothing to anchor a timestamped comment to until the
+      // recording is finalized and playable.
+      return {
+        ok: false,
+        reason: "this task has no finalized recording to comment on",
+      };
+    }
+    const now = Date.now();
+    const commentId = await ctx.db.insert("comments", {
+      taskId: args.taskId,
+      videoTimeSec: args.videoTimeSec,
+      text: text.slice(0, MAX_COMMENT_CHARS),
+      ...(args.imageStorageId === undefined
+        ? {}
+        : { imageStorageId: args.imageStorageId }),
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { ok: true, commentId };
+  },
+});
+
+/**
+ * Edit a comment's text. An empty edit deletes the comment (issue decision:
+ * "saving an empty edit is equivalent to deleting"), so the semantic holds even
+ * if a client forgets to route empties to deleteComment.
+ */
+export const editComment = mutation({
+  args: { secret: v.string(), commentId: v.id("comments"), text: v.string() },
+  handler: async (ctx, args): Promise<CommentResult> => {
+    if (!secretOk(args.secret)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    const comment = await ctx.db.get(args.commentId);
+    if (comment === null) {
+      return { ok: false, reason: "comment not found" };
+    }
+    const text = args.text.trim();
+    if (text === "") {
+      await deleteCommentRow(ctx, comment);
+      return { ok: true, commentId: args.commentId };
+    }
+    await ctx.db.patch(args.commentId, {
+      text: text.slice(0, MAX_COMMENT_CHARS),
+      updatedAt: Date.now(),
+    });
+    return { ok: true, commentId: args.commentId };
+  },
+});
+
+export const deleteComment = mutation({
+  args: { secret: v.string(), commentId: v.id("comments") },
+  handler: async (ctx, args): Promise<CommentResult> => {
+    if (!secretOk(args.secret)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    const comment = await ctx.db.get(args.commentId);
+    if (comment === null) {
+      return { ok: false, reason: "comment not found" };
+    }
+    await deleteCommentRow(ctx, comment);
+    return { ok: true, commentId: args.commentId };
+  },
+});
+
+/** Delete a comment row plus its grabbed frame blob (best-effort — a missing
+ * blob must not block the row delete). */
+async function deleteCommentRow(
+  ctx: MutationCtx,
+  comment: Doc<"comments">,
+): Promise<void> {
+  if (comment.imageStorageId !== undefined) {
+    await ctx.storage.delete(comment.imageStorageId).catch(() => undefined);
+  }
+  await ctx.db.delete(comment._id);
+}

@@ -1,8 +1,5 @@
 import { httpRouter } from "convex/server";
-import {
-  MAX_OUTBOUND_FILE_BYTES,
-  MAX_TRANSCRIPT_BYTES,
-} from "../shared/protocol";
+import { MAX_OUTBOUND_FILE_BYTES } from "../shared/protocol";
 import { parseDevboxEvent } from "../src/orchestration";
 import { timingSafeEqual, verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
@@ -142,7 +139,18 @@ http.route({
 
     const { taskFound, applied } = await ctx.runMutation(
       internal.devboxes.recordEvent,
-      event,
+      {
+        devboxId: event.devboxId,
+        taskId: event.taskId,
+        type: event.type,
+        summary: event.summary,
+        ts: event.ts,
+        ...(event.detail === undefined ? {} : { detail: event.detail }),
+        ...(event.tool === undefined ? {} : { tool: event.tool }),
+        ...(event.imageStorageId === undefined
+          ? {}
+          : { imageStorageId: event.imageStorageId as Id<"_storage"> }),
+      },
     );
     // Skip Slack noise for events that didn't change task state (e.g. a late
     // progress event racing the completed event it duplicates).
@@ -154,53 +162,6 @@ http.route({
         summary: event.summary,
       });
     }
-    return new Response(null, { status: 200 });
-  }),
-});
-
-// Gateway -> orchestrator transcript persistence (see shared/protocol.ts):
-// one JSON payload per task at terminal status, so the session record
-// outlives the ephemeral VM.
-http.route({
-  path: "/devbox/transcript",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
-      return new Response("unauthorized", { status: 401 });
-    }
-
-    // arrayBuffer first: the limit is BYTES (Convex's ~1 MiB document cap),
-    // and string .length undercounts multibyte content by up to 3x.
-    const rawBytes = await request.arrayBuffer();
-    if (rawBytes.byteLength > MAX_TRANSCRIPT_BYTES + 10_000) {
-      return new Response("payload too large", { status: 413 });
-    }
-    const raw = new TextDecoder().decode(rawBytes);
-    let payload: { devboxId?: unknown; taskId?: unknown; messages?: unknown };
-    try {
-      payload = JSON.parse(raw) as typeof payload;
-    } catch {
-      return new Response("invalid json", { status: 400 });
-    }
-    if (
-      typeof payload.devboxId !== "string" ||
-      typeof payload.taskId !== "string" ||
-      !Array.isArray(payload.messages)
-    ) {
-      return new Response("invalid transcript upload", { status: 400 });
-    }
-
-    await ctx.runMutation(internal.transcripts.store, {
-      taskId: payload.taskId,
-      devboxId: payload.devboxId,
-      json: JSON.stringify(payload.messages),
-    });
     return new Response(null, { status: 200 });
   }),
 });
@@ -256,10 +217,12 @@ http.route({
   }),
 });
 
-// Gateway -> orchestrator screen-recording upload URL (see shared/protocol.ts):
-// returns a short-lived Convex storage upload URL the gateway POSTs the
-// recording bytes to. The generateUploadUrl flow keeps the (multi-MB) .mov off
-// the size-capped HTTP-action path used by /devbox/artifact.
+// Shared storage upload URL: returns a short-lived Convex storage upload URL a
+// secret-holder POSTs bytes to (the generateUploadUrl flow keeps large/binary
+// blobs off the size-capped HTTP-action path used by /devbox/artifact). Used by
+// the gateway recorder (.mov), the gateway's tool-result screenshots (#70), and
+// the fleet host's frame-grab endpoint (#70 PNG frames). Path kept under
+// /devbox/recording for backwards-compatibility with in-flight gateways.
 http.route({
   path: "/devbox/recording/upload-url",
   method: "POST",
@@ -301,6 +264,7 @@ http.route({
       status?: unknown;
       storageId?: unknown;
       bytes?: unknown;
+      startedAt?: unknown;
     };
     try {
       payload = JSON.parse(await request.text()) as typeof payload;
@@ -330,8 +294,32 @@ http.route({
         ? { storageId: payload.storageId as Id<"_storage"> }
         : {}),
       ...(typeof payload.bytes === "number" ? { bytes: payload.bytes } : {}),
+      ...(typeof payload.startedAt === "number"
+        ? { startedAt: payload.startedAt }
+        : {}),
     });
     return new Response(null, { status: 200 });
+  }),
+});
+
+// Fleet host -> orchestrator recording URL resolver (#70): the host frame-grab
+// endpoint resolves a task's recording to a short-lived signed storage URL it
+// can ffmpeg-seek, without the browser ever supplying a URL (SSRF) or seeing a
+// raw storageId. Gated by the same shared secret as the rest of /devbox/*.
+// GET /devbox/recording-url?taskId=... -> { url: string | null }.
+http.route({
+  path: "/devbox/recording-url",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const taskId = new URL(request.url).searchParams.get("taskId");
+    if (taskId === null || taskId === "") {
+      return new Response("missing taskId", { status: 400 });
+    }
+    const url = await ctx.runQuery(internal.recordings.signedUrl, { taskId });
+    return Response.json({ url });
   }),
 });
 
