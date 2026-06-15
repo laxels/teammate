@@ -51,7 +51,10 @@ TART='~/tart.app/Contents/MacOS/tart'
 TART_URL="https://github.com/openai/tart/releases/download/2.32.1/tart.tar.gz"
 GOLDEN_REMOTE="ghcr.io/laxels/ultraclaude-golden:v4"
 GOLDEN_LOCAL="golden-v4"
-CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://zealous-robin-941.convex.site}"
+# Deployment-identity constants (CONVEX_SITE_URL et al.): single source of truth
+# shared with the other fleet scripts. Stays env-overridable so the GH Actions
+# provisioner / #30 cutover can point this at another deployment.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 
 log() { printf '\n==> %s\n' "$*"; }
 

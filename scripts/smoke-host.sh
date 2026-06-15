@@ -10,8 +10,8 @@
 # Usage: scripts/smoke-host.sh <host-ssh> <host-name>
 #        e.g. scripts/smoke-host.sh m1@51.x.x.x ultraclaude-host-2
 #
-# Env: CONVEX_SITE_URL (default prod), DEVBOX_SHARED_SECRET (env or .env),
-#      GOLDEN_LOCAL (default golden-v4).
+# Env: CONVEX_DEPLOYMENT_SLUG (default in scripts/deployment-constants.sh),
+#      DEVBOX_SHARED_SECRET (env or .env), GOLDEN_LOCAL (default golden-v4).
 
 set -euo pipefail
 
@@ -24,7 +24,9 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
-CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://zealous-robin-941.convex.site}"
+# Deployment-identity constants (CONVEX_SITE_URL): single source of truth shared
+# with the other fleet scripts; stays env-overridable.
+source "$REPO_ROOT/scripts/deployment-constants.sh"
 GOLDEN_LOCAL="${GOLDEN_LOCAL:-golden-v4}"
 # A host is "fresh" if seen within this window; > HEARTBEAT_FRESHNESS_MS (120s).
 FRESH_CUTOFF_SECS="${FLEET_SMOKE_FRESH_SECS:-180}"
