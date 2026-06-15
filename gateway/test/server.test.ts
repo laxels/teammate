@@ -258,6 +258,34 @@ describe("HTTP API", () => {
     expect(notJson.status).toBe(400);
   });
 
+  test("POST /task threads an explicit effort level to the session (#91)", async () => {
+    const { base, control } = makeHarness();
+    const accepted = await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({ taskId: "task-1", prompt: "work", effort: "low" }),
+    });
+    expect(accepted.status).toBe(202);
+    await until(() => control.calls.length > 0);
+    expect(control.calls[0]?.options?.effort).toBe("low");
+  });
+
+  test("POST /task drops an unknown effort and keeps the xhigh default (#91)", async () => {
+    const { base, control } = makeHarness();
+    const accepted = await fetch(`${base}/task`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({
+        taskId: "task-1",
+        prompt: "work",
+        effort: "ludicrous",
+      }),
+    });
+    expect(accepted.status).toBe(202);
+    await until(() => control.calls.length > 0);
+    expect(control.calls[0]?.options?.effort).toBe("xhigh");
+  });
+
   test("POST /task and /interrupt reject a missing or wrong secret (401)", async () => {
     const { base } = makeHarness();
     const missing = await fetch(`${base}/task`, {

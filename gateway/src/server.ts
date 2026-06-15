@@ -1,12 +1,13 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Server } from "bun";
-import type {
-  DeliverableFile,
-  GatewayHealth,
-  StartTaskRequest,
-  SteerServerMessage,
-  UserMessagePayload,
+import {
+  type DeliverableFile,
+  type GatewayHealth,
+  parseTaskEffort,
+  type StartTaskRequest,
+  type SteerServerMessage,
+  type UserMessagePayload,
 } from "../../shared/protocol";
 import { BrowserSession } from "./browser/executor";
 import { createBrowserMcpServer } from "./browser/mcp";
@@ -133,10 +134,12 @@ function parseStartTaskRequest(body: unknown): StartTaskRequest | null {
     return null;
   }
   const files = parseDeliverableFiles(candidate.files);
+  const effort = parseTaskEffort(candidate.effort);
   return {
     taskId: candidate.taskId,
     prompt: candidate.prompt,
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
+    ...(effort === undefined ? {} : { effort }),
     ...(files === undefined ? {} : { files }),
   };
 }

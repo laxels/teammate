@@ -91,6 +91,15 @@ describe("SessionManager", () => {
     expect(options?.fallbackModel).toBeUndefined();
   });
 
+  test("an explicit request effort overrides the xhigh default (#91)", async () => {
+    const { queryFn, control } = createEchoQueryFn();
+    const { session } = makeSession(queryFn);
+
+    session.start({ taskId: "task-1", prompt: "quick job", effort: "low" });
+
+    expect(control.calls[0]?.options?.effort).toBe("low");
+  });
+
   test("starts the screen recorder on launch and finishes it once at terminal", async () => {
     const { queryFn } = createEchoQueryFn();
     const { emitEvent } = createEventRecorder();
