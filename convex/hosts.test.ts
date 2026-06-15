@@ -9,7 +9,8 @@ import schema from "./schema";
 // provisionVmFailed schedules placeQueuedEphemeralTasks (hosts) and
 // notify.devboxEvent at 0ms — both must be resolvable, or the scheduler logs
 // "Could not find module" while the suite still passes. notify.devboxEvent
-// no-ops without SLACK_BOT_TOKEN (unset here), so it drains cleanly.
+// no-ops without SLACK_BOT_TOKEN (stripped by the test preload), so it drains
+// cleanly.
 const modules = {
   "./_generated/api.js": () => import("./_generated/api.js"),
   "./_generated/server.js": () => import("./_generated/server.js"),
@@ -34,26 +35,19 @@ async function drainScheduled(t: Tester): Promise<void> {
 }
 
 const SECRET = "s3cret";
-let savedSlackToken: string | undefined;
 
 beforeEach(() => {
   // secretOk() reads these; allocateEphemeralSlot needs TAILNET_SUFFIX to mint
-  // a gateway URL once a slot is free.
+  // a gateway URL once a slot is free. SLACK_BOT_TOKEN stays unset (stripped by
+  // scripts/test-preload.ts) so the drained notify.devboxEvent takes its
+  // no-token early return instead of firing a real Slack API call.
   process.env.DEVBOX_SHARED_SECRET = SECRET;
   process.env.TAILNET_SUFFIX = "ts.example.com";
-  // bun auto-loads .env.local, which carries a real SLACK_BOT_TOKEN. Unset it
-  // so the drained notify.devboxEvent takes its no-token early return instead
-  // of firing a real Slack API call from the test.
-  savedSlackToken = process.env.SLACK_BOT_TOKEN;
-  delete process.env.SLACK_BOT_TOKEN;
 });
 
 afterEach(() => {
   delete process.env.DEVBOX_SHARED_SECRET;
   delete process.env.TAILNET_SUFFIX;
-  if (savedSlackToken !== undefined) {
-    process.env.SLACK_BOT_TOKEN = savedSlackToken;
-  }
 });
 
 /** A host at its EULA cap of 2 VMs, both held by provisioning ephemeral rows —

@@ -22,25 +22,20 @@ function newT() {
 type Tester = ReturnType<typeof newT>;
 
 const SECRET = "dash-secret";
-let savedSlackToken: string | undefined;
 
 beforeEach(() => {
   process.env.DASHBOARD_SECRET = SECRET;
   process.env.DEVBOX_SHARED_SECRET = "s3cret";
   process.env.TAILNET_SUFFIX = "ts.example.com";
-  // Let the drained notify.taskNote take its no-token early return instead of
-  // hitting a real Slack API (bun auto-loads .env.local with a live token).
-  savedSlackToken = process.env.SLACK_BOT_TOKEN;
-  delete process.env.SLACK_BOT_TOKEN;
+  // SLACK_BOT_TOKEN stays unset (stripped by scripts/test-preload.ts) so the
+  // drained notify.taskNote takes its no-token early return instead of hitting
+  // a real Slack API.
 });
 
 afterEach(() => {
   delete process.env.DASHBOARD_SECRET;
   delete process.env.DEVBOX_SHARED_SECRET;
   delete process.env.TAILNET_SUFFIX;
-  if (savedSlackToken !== undefined) {
-    process.env.SLACK_BOT_TOKEN = savedSlackToken;
-  }
 });
 
 async function drainScheduled(t: Tester): Promise<void> {
