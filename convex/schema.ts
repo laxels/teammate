@@ -82,6 +82,12 @@ export const taskRecordingValidator = v.object({
   storageId: v.optional(v.id("_storage")),
   bytes: v.optional(v.number()),
   uploadedAt: v.optional(v.number()),
+  // Recorder wall-clock start time (ms), set with the first "recording" post
+  // and preserved across later transitions. The task-details page maps a
+  // video-relative second `t` to the absolute event timestamp `startedAt + t*1000`
+  // so comments and events share one timeline (#70). Absent on recordings made
+  // before the feature (those tasks can't align comments to events).
+  startedAt: v.optional(v.number()),
 });
 
 export default defineSchema({
@@ -291,15 +297,22 @@ export default defineSchema({
     .index("by_devbox_status", ["devboxId", "status"])
     .index("by_command_id", ["commandId"]),
 
-  // Terminal-task transcripts posted by gateways to /devbox/transcript: the
-  // session's SDK messages, so the record outlives the ephemeral VM. One row
-  // per task (latest upload wins); JSON-serialized, capped under the ~1 MB
-  // document limit by the gateway (MAX_TRANSCRIPT_BYTES).
-  transcripts: defineTable({
+  // Loom-style retro comments on a task's screen recording (#70). The operator
+  // pins a comment to a video-relative timestamp on the task-details page; a
+  // frame grabbed at that timestamp is stored separately and referenced by
+  // imageStorageId. Anonymous + single-author for now (the dashboard has one
+  // shared DASHBOARD_SECRET, no per-user identity). Scoped by taskId — a retry
+  // is a new task, so its comments never bleed in.
+  comments: defineTable({
     taskId: v.string(),
-    devboxId: v.string(),
-    json: v.string(),
-    uploadedAt: v.number(),
+    // Seconds into the recording (matches the video element's currentTime).
+    videoTimeSec: v.number(),
+    text: v.string(),
+    // The frame grabbed at videoTimeSec (PNG in Convex storage), absent when the
+    // grab failed or hasn't completed — the UI then shows a text-only comment.
+    imageStorageId: v.optional(v.id("_storage")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
   }).index("by_task_id", ["taskId"]),
 
   // Bookkeeping for inbound Slack files staged in Convex storage: the daily
@@ -317,12 +330,23 @@ export default defineSchema({
 
   // Lifecycle events posted by devbox gateways to /devbox/events, plus
   // orchestrator-recorded events for tasks that never reached a devbox
-  // (queue cancellations) — those have no devboxId.
+  // (queue cancellations) — those have no devboxId. Status events drive task
+  // status; info events (#70: assistant_text/tool_call/tool_result) only
+  // populate the task-details retro timeline and carry the optional fields
+  // below. High volume is expected for info events (a screenshot ~every step).
   taskEvents: defineTable({
     taskId: v.string(),
     devboxId: v.optional(v.string()),
     type: v.string(),
     summary: v.string(),
     ts: v.number(),
+    // Full body for the expandable timeline entry (assistant turn, tool input
+    // JSON, or tool result text); capped by the gateway (DETAIL_MAX_CHARS).
+    detail: v.optional(v.string()),
+    // Tool name for tool_call / tool_result events.
+    tool: v.optional(v.string()),
+    // Screenshot attached to a tool_result (computer-use), resolved to a URL by
+    // taskDetail.
+    imageStorageId: v.optional(v.id("_storage")),
   }).index("by_task_id", ["taskId"]),
 });

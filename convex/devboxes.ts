@@ -1,9 +1,9 @@
 import { v } from "convex/values";
 import {
-  DEVBOX_EVENT_TO_TASK_STATUS,
   EPHEMERAL_RETIRE_GRACE_MS,
   isTerminalTaskStatus,
   shouldApplyTaskStatus,
+  statusForEvent,
 } from "../shared/protocol";
 import { shouldRetireEphemeralDevbox } from "../src/hostPool";
 import { internal } from "./_generated/api";
@@ -107,6 +107,10 @@ export const recordEvent = internalMutation({
     type: devboxEventTypeValidator,
     summary: v.string(),
     ts: v.number(),
+    // Info-event enrichment (#70); absent on status events.
+    detail: v.optional(v.string()),
+    tool: v.optional(v.string()),
+    imageStorageId: v.optional(v.id("_storage")),
   },
   handler: async (ctx, args) => {
     await ctx.db.insert("taskEvents", {
@@ -115,9 +119,28 @@ export const recordEvent = internalMutation({
       type: args.type,
       summary: args.summary,
       ts: args.ts,
+      ...(args.detail === undefined ? {} : { detail: args.detail }),
+      ...(args.tool === undefined ? {} : { tool: args.tool }),
+      ...(args.imageStorageId === undefined
+        ? {}
+        : { imageStorageId: args.imageStorageId }),
     });
 
-    const incomingStatus = DEVBOX_EVENT_TO_TASK_STATUS[args.type];
+    const incomingStatus = statusForEvent(args.type);
+    // Info events (#70: assistant_text/tool_call/tool_result) only populate the
+    // retro timeline — they must never drive task status, retire a devbox, or
+    // re-mark it busy. Record liveness and stop here, before any of that logic.
+    if (incomingStatus === undefined) {
+      const infoDevbox = await ctx.db
+        .query("devboxes")
+        .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
+        .unique();
+      if (infoDevbox !== null) {
+        await ctx.db.patch(infoDevbox._id, { lastSeenAt: Date.now() });
+      }
+      return { taskFound: true, applied: false };
+    }
+
     const task = await ctx.db
       .query("tasks")
       .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))

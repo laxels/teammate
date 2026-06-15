@@ -188,3 +188,49 @@ test("setStatus refuses to regress an available recording (unit)", async () => {
     status: "available",
   });
 });
+
+// #70: startedAt rides the first "recording" post and must survive every later
+// transition (the "uploading"/"available" posts don't resend it). Without this,
+// the task-details page can't map a comment's video seconds to event time.
+test("startedAt is set once and preserved across transitions", async () => {
+  const t = newT();
+  await insertTask(t, "task-1");
+  await postRecording(t, {
+    taskId: "task-1",
+    status: "recording",
+    startedAt: 1700,
+  });
+  expect(await readRecording(t, "task-1")).toMatchObject({ startedAt: 1700 });
+
+  // A later post that omits startedAt must not erase it.
+  await postRecording(t, { taskId: "task-1", status: "uploading" });
+  expect(await readRecording(t, "task-1")).toMatchObject({
+    status: "uploading",
+    startedAt: 1700,
+  });
+
+  const storageId = await t.run((ctx) =>
+    ctx.storage.store(new Blob([new Uint8Array([9])])),
+  );
+  await postRecording(t, { taskId: "task-1", status: "available", storageId });
+  expect(await readRecording(t, "task-1")).toMatchObject({
+    status: "available",
+    startedAt: 1700,
+  });
+});
+
+test("recordings.signedUrl is null for an unknown or not-yet-available recording", async () => {
+  const t = newT();
+  await insertTask(t, "task-1"); // no recording yet
+  expect(
+    await t.query(internal.recordings.signedUrl, { taskId: "task-1" }),
+  ).toBeNull();
+  expect(
+    await t.query(internal.recordings.signedUrl, { taskId: "ghost" }),
+  ).toBeNull();
+
+  await postRecording(t, { taskId: "task-1", status: "uploading" });
+  expect(
+    await t.query(internal.recordings.signedUrl, { taskId: "task-1" }),
+  ).toBeNull();
+});
