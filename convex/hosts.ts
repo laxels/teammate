@@ -1,6 +1,5 @@
 import { v } from "convex/values";
 import {
-  type HostProvisionPayload,
   type HostVmPayload,
   isTerminalTaskStatus,
   type StartTaskRequest,
@@ -30,7 +29,6 @@ import { resolveDeliverableFiles, type StoredFile } from "./files";
 export const hostCommandKindValidator = v.union(
   v.literal("provision_vm"),
   v.literal("destroy_vm"),
-  v.literal("provision_host"),
 );
 
 /** Apple's EULA allows 2 concurrent macOS VMs per host. */
@@ -221,9 +219,9 @@ export const removeDevbox = mutation({
  * torn down: deletes the leaked devbox row (freeing the host VM slot — every
  * row counts against capacity regardless of status) and fails the associated
  * task so it surfaces in Slack and the dashboard instead of stalling forever.
- * Mirrors the provision_host failure path, where recordHostEvent deletes the
- * pre-created "provisioning" host row. Idempotent: a missing devbox row (an
- * already-cleaned-up retry) is a no-op.
+ * Mirrors the host-provision failure path, where a `provision_failed` fleet
+ * event deletes the pre-created "provisioning" host row (applyFleetEvent).
+ * Idempotent: a missing devbox row (an already-cleaned-up retry) is a no-op.
  */
 export const provisionVmFailed = mutation({
   args: { devboxId: v.string(), summary: v.string(), secret: v.string() },
@@ -291,33 +289,39 @@ export const provisionVmFailed = mutation({
   },
 });
 
-/** Host agents post fleet lifecycle events (bootstrap progress, failures). */
-export const recordHostEvent = mutation({
-  args: {
-    hostId: v.string(),
-    type: v.string(),
-    summary: v.string(),
-    secret: v.string(),
-  },
+/**
+ * Fleet lifecycle events (host bootstrap progress, failures) into hostEvents,
+ * which get_fleet surfaces. The only writer is the secret-gated /fleet/event
+ * HTTP endpoint (the GitHub Actions provisioner / a laptop run): it checks the
+ * `x-devbox-secret` header, then calls this — so no Convex client and no
+ * per-arg secret are needed. (Host agents no longer post events; the provision
+ * executor that did was retired in #87.)
+ */
+export const recordFleetEvent = internalMutation({
+  args: { hostId: v.string(), type: v.string(), summary: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
-      return;
-    }
-    await recordHostEventRow(ctx, args);
-    // A failed bootstrap frees the serialization slot for a retry on the next
-    // allocation attempt; mark the pre-created row so it stops counting as
-    // in-flight.
-    if (args.type === "provision_failed") {
-      const host = await ctx.db
-        .query("hosts")
-        .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
-        .unique();
-      if (host !== null && host.status === "provisioning") {
-        await ctx.db.delete(host._id);
-      }
-    }
+    await applyFleetEvent(ctx, args);
   },
 });
+
+async function applyFleetEvent(
+  ctx: MutationCtx,
+  args: { hostId: string; type: string; summary: string },
+): Promise<void> {
+  await recordHostEventRow(ctx, args);
+  // A failed bootstrap drops the pre-created "provisioning" row (if any —
+  // #88's monitor pre-creates one) so it stops counting as the in-flight
+  // provision, freeing the serialization slot for a retry.
+  if (args.type === "provision_failed") {
+    const host = await ctx.db
+      .query("hosts")
+      .withIndex("by_host_id", (q) => q.eq("hostId", args.hostId))
+      .unique();
+    if (host !== null && host.status === "provisioning") {
+      await ctx.db.delete(host._id);
+    }
+  }
+}
 
 async function recordHostEventRow(
   ctx: MutationCtx,
@@ -331,83 +335,11 @@ async function recordHostEventRow(
   });
 }
 
-/**
- * Boot-time reconciliation called by a provisioner host agent on startup. A new
- * host bootstrap runs as a DETACHED child of the host-agent process, tracked
- * only by an in-memory flag (hostagent/src/hostProvision.ts). When the agent
- * restarts mid-bootstrap — a crash, or a deploy-payload `kickstart -k` that
- * kills the whole launchd job tree — the bootstrap dies WITHOUT emitting
- * `provision_failed`, so its pre-created "provisioning" host row would keep
- * holding the fleet-wide scale-up lock until HOST_PROVISION_STALE_MS (90 min),
- * blocking every queued task that whole time.
- *
- * The just-restarted provisioner owns no live bootstrap, so any "provisioning"
- * row naming it as `provisionedBy` is orphaned. Fail each (delete the row +
- * record the event), freeing the lock in seconds instead of after 90 min, and
- * re-drain the queue so a fresh bootstrap starts at once rather than waiting for
- * an external event. Mirrors the gateway's boot-time orphan reconciliation
- * (tasks.orphansForDevbox).
- *
- * Safe even in the rare case the detached bootstrap survived the restart as an
- * orphaned process: the new host still self-registers an "active" row on its own
- * first heartbeat, so it comes online regardless; at worst a redundant second
- * bootstrap runs, which provision-host.sh makes idempotent (it reuses an
- * existing Scaleway server by name). Idempotent: a second call (nothing
- * orphaned) returns an empty list and schedules nothing.
- */
-export const failOrphanedProvisions = mutation({
-  args: { provisionerHostId: v.string(), secret: v.string() },
-  handler: async (ctx, args): Promise<{ failed: string[] }> => {
-    if (!secretOk(args.secret)) {
-      return { failed: [] };
-    }
-    const hosts = await ctx.db.query("hosts").collect();
-    const orphaned = hosts.filter(
-      (host) =>
-        host.status === "provisioning" &&
-        host.provisionedBy === args.provisionerHostId,
-    );
-    for (const host of orphaned) {
-      await ctx.db.delete(host._id);
-      await recordHostEventRow(ctx, {
-        hostId: host.hostId,
-        type: "provision_failed",
-        summary:
-          `Provisioner ${args.provisionerHostId} restarted mid-bootstrap; ` +
-          "freeing the scale-up lock (the detached bootstrap did not survive the restart).",
-      });
-    }
-    if (orphaned.length > 0) {
-      // This mutation is the just-restarted provisioner's first contact with
-      // Convex, so it also serves as a liveness signal: refresh its host row
-      // before re-draining the queue. Otherwise, if the agent was down longer
-      // than HEARTBEAT_FRESHNESS_MS (a crash-loop, a slow deploy, a reboot),
-      // the scheduled requestHostProvisionRow's pickProvisioner would see a
-      // stale provisioner and return no_provisioner — freeing the lock but
-      // never requesting the replacement bootstrap. (The agent's own first
-      // heartbeat refreshes lastSeenAt too, but races this scheduled drain and,
-      // being a plain active heartbeat, schedules no drain of its own.) The
-      // caller owns "provisioning" rows, so it was a credentialed provisioner;
-      // its row already exists.
-      const self = hosts.find((host) => host.hostId === args.provisionerHostId);
-      if (self !== undefined) {
-        await ctx.db.patch(self._id, { lastSeenAt: Date.now() });
-      }
-      await ctx.scheduler.runAfter(
-        0,
-        internal.hosts.placeQueuedEphemeralTasks,
-        {},
-      );
-    }
-    return { failed: orphaned.map((host) => host.hostId) };
-  },
-});
-
 async function enqueueHostCommand(
   ctx: MutationCtx,
   args: {
     hostId: string;
-    kind: "provision_vm" | "destroy_vm" | "provision_host";
+    kind: "provision_vm" | "destroy_vm";
     payload: string;
   },
 ): Promise<string> {
@@ -544,27 +476,20 @@ export type PlacementResult =
   | { placed: true; devboxId: string; hostId: string }
   | {
       placed: false;
-      scaling:
-        | {
-            kind: "provisioning_started";
-            hostName: string;
-            provisionedBy: string;
-          }
-        | {
-            kind: "already_provisioning";
-            hostName: string;
-            requestedAt: number;
-          }
-        | { kind: "no_provisioner" };
+      // On-demand autoscale on task spillover is gated off (issue #87): an
+      // unplaceable task simply stays queued and drains when a slot frees
+      // (placeQueuedEphemeralTasks). Proactive capacity growth moves to the
+      // background monitor in #88, which fires the GitHub Actions provisioner.
+      scaling: { kind: "autoscale_disabled" };
       queuedTasks: number;
     };
 
 /**
- * Places a task on an ephemeral devbox, or — when every slot is taken —
- * leaves it queued and (idempotently) kicks off a new-host bootstrap. The
- * scale-up is serialized: one new Mac at a time; queued bursts ride the same
- * bootstrap. Plain-function form so other mutations (dashboard retry) can
- * place inside their own transaction.
+ * Places a task on an ephemeral devbox, or — when every slot is taken — leaves
+ * it queued. On-demand autoscale on spillover is gated off (#87): the task
+ * drains when a slot frees (placeQueuedEphemeralTasks), and the #88 monitor
+ * grows the fleet proactively in the background. Plain-function form so other
+ * mutations (dashboard retry) can place inside their own transaction.
  */
 export async function placeEphemeralTaskRow(
   ctx: MutationCtx,
@@ -582,9 +507,12 @@ export async function placeEphemeralTaskRow(
     await dispatchTaskToSlot(ctx, task, slot);
     return { placed: true, devboxId: slot.devboxId, hostId: slot.hostId };
   }
-  const scaling = await requestHostProvisionRow(ctx);
   const queued = await queuedEphemeralTasks(ctx);
-  return { placed: false, scaling, queuedTasks: queued.length };
+  return {
+    placed: false,
+    scaling: { kind: "autoscale_disabled" },
+    queuedTasks: queued.length,
+  };
 }
 
 export const placeEphemeralTask = internalMutation({
@@ -605,42 +533,46 @@ async function queuedEphemeralTasks(ctx: MutationCtx) {
 }
 
 /**
- * Drains queued ephemeral tasks into freed/new slots, oldest first. Scheduled
- * from heartbeat (new host online) and removeDevbox (slot freed). If tasks
- * remain unplaced and no bootstrap is in flight, requests the next host so a
- * deep queue keeps scaling without waiting for the next start_task call.
+ * Drains queued ephemeral tasks into freed slots, oldest first. Scheduled from
+ * heartbeat (a new host came online) and removeDevbox (a slot freed). Tasks
+ * that still don't fit stay queued — on-demand autoscale is gated off (#87);
+ * the #88 monitor grows the fleet proactively in the background.
  */
 export const placeQueuedEphemeralTasks = internalMutation({
   args: {},
   handler: async (ctx) => {
     const waiting = await queuedEphemeralTasks(ctx);
-    let unplaced = 0;
     for (const task of waiting) {
       const slot = await allocateEphemeralSlot(ctx, task.taskId);
       if (slot === null) {
-        unplaced = waiting.length - waiting.indexOf(task);
         break;
       }
       await dispatchTaskToSlot(ctx, task, slot);
     }
-    if (unplaced > 0) {
-      await requestHostProvisionRow(ctx);
-    }
   },
 });
 
+export type ProvisionDecision =
+  | { kind: "provisioning_started"; hostName: string; provisionedBy: string }
+  | { kind: "already_provisioning"; hostName: string; requestedAt: number }
+  | { kind: "no_provisioner" };
+
 /**
- * Idempotently requests a new fleet host: pre-creates its "provisioning" row
- * (visible in get_fleet) and enqueues provision_host to a credential-holding
- * live host. No-ops with the in-flight bootstrap when one is already running.
+ * Decides whether a new fleet host should be provisioned and, if so, reserves
+ * the slot: pre-creates its serialized "provisioning" row (visible in
+ * get_fleet) and records the request, returning the chosen host name. One
+ * provision in flight at a time (inflightProvision) — never double-provisions.
+ *
+ * This is the kept Convex decision/serialization machinery (#87 step 2). The
+ * on-demand task-spillover trigger that used to call it is gated off; the #88
+ * capacity monitor calls requestHostProvision proactively and then fires the
+ * GitHub Actions provisioner (repository_dispatch) — GH Actions is the doer
+ * now, so this no longer enqueues any host-agent command. Exposed for that
+ * monitor and for manual ops (`convex run`).
  */
 async function requestHostProvisionRow(
   ctx: MutationCtx,
-): Promise<
-  | { kind: "provisioning_started"; hostName: string; provisionedBy: string }
-  | { kind: "already_provisioning"; hostName: string; requestedAt: number }
-  | { kind: "no_provisioner" }
-> {
+): Promise<ProvisionDecision> {
   const hosts = await ctx.db.query("hosts").collect();
   const now = Date.now();
   const inflight = inflightProvision(hosts, now);
@@ -668,19 +600,20 @@ async function requestHostProvisionRow(
     provisionRequestedAt: now,
     provisionedBy: provisioner,
   });
-  const payload: HostProvisionPayload = { hostName };
-  await enqueueHostCommand(ctx, {
-    hostId: provisioner,
-    kind: "provision_host",
-    payload: JSON.stringify(payload),
-  });
   await recordHostEventRow(ctx, {
     hostId: hostName,
     type: "provision_requested",
-    summary: `New Mac host requested; bootstrap delegated to ${provisioner}.`,
+    summary: `New Mac host ${hostName} requested (provisioner of record: ${provisioner}).`,
   });
   return { kind: "provisioning_started", hostName, provisionedBy: provisioner };
 }
+
+export const requestHostProvision = internalMutation({
+  args: {},
+  handler: async (ctx): Promise<ProvisionDecision> => {
+    return await requestHostProvisionRow(ctx);
+  },
+});
 
 const RECENT_HOST_EVENTS = 15;
 

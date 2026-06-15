@@ -54,8 +54,8 @@ Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with te
 
 You receive Slack messages (DMs and @mentions). Either answer directly or use your tools:
 - start_task delegates work to a Claude Code instance on a devbox. By default every task gets a FRESH ephemeral devbox VM (~1-2 min to provision; no state left over from previous tasks). Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. When the task involves the browser or another GUI app, say so in the prompt — the devbox decides on its own when to use its computer-use tools.
-- When all VM slots are full, start_task queues the task and the fleet AUTOMATICALLY starts bootstrapping a new Mac host (the tool result tells you the host name and that this takes roughly 20-45 minutes). Relay that honestly. The permanent devbox devbox-1 may be idle as a faster fallback: offer it, but only use it when the user says so or explicitly asked for it up front (set use_permanent_devbox: true) — it can carry state between tasks, which is why ephemeral is the default.
-- get_fleet shows the Mac hosts, VM slots, in-flight host bootstraps, queued tasks, and recent fleet events. Use it when the user asks about capacity/infrastructure or when debugging why a task hasn't started.
+- When all VM slots are full, start_task queues the task and it starts automatically the moment a slot frees (a running task finishing). On-demand auto-scaling is OFF — a new Mac host is NOT bootstrapped just for a queued task — so don't promise a host is "spinning up" or give a bootstrap ETA; the standing warm fleet is grown separately, out of band. Relay the wait honestly. The permanent devbox devbox-1 may be idle as a faster fallback: offer it, but only use it when the user says so or explicitly asked for it up front (set use_permanent_devbox: true) — it can carry state between tasks, which is why ephemeral is the default.
+- get_fleet shows the Mac hosts, VM slots, queued tasks, and recent fleet events. Use it when the user asks about capacity/infrastructure or when debugging why a task hasn't started.
 - get_task / list_tasks answer questions about ongoing work.
 - steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts).
 - stop_task interrupts a running task (it also cancels a task still waiting in the queue).
@@ -88,7 +88,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "start_task",
     description:
-      "Start a new Claude Code task. Default: a fresh ephemeral devbox VM (provisioned in ~1-2 min, destroyed after the task). When every VM slot is busy the task is queued and a new Mac host bootstraps automatically (~20-45 min) — the result describes the situation so you can relay it and offer alternatives.",
+      "Start a new Claude Code task. Default: a fresh ephemeral devbox VM (provisioned in ~1-2 min, destroyed after the task). When every VM slot is busy the task is queued and starts when a slot frees (on-demand auto-scaling is off — no host is bootstrapped just for a queued task); the result describes the situation so you can relay it and offer alternatives.",
     input_schema: {
       type: "object",
       properties: {
@@ -113,7 +113,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_fleet",
     description:
-      "Snapshot of the Mac host fleet: hosts with VM slot usage, in-flight new-host bootstraps (with elapsed time), devboxes, queued tasks awaiting placement, and recent fleet events. Call this for capacity/infrastructure questions or to debug a task stuck in the queue.",
+      "Snapshot of the Mac host fleet: hosts with VM slot usage, any in-flight host provisions (with elapsed time; these are grown out of band, not triggered by queued tasks), devboxes, queued tasks awaiting placement, and recent fleet events. Call this for capacity/infrastructure questions or to debug a task stuck in the queue.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -418,10 +418,7 @@ async function executeTool(
         scaling: placement.scaling,
         queuedTasks: placement.queuedTasks,
         permanentDevboxIdle: permanentIdle,
-        note:
-          placement.scaling.kind === "no_provisioner"
-            ? "All VM slots are busy AND no live host holds fleet credentials, so automatic scaling is unavailable — the task stays queued until a slot frees up. Tell the user; manual options: wait, stop a running task, or run scripts/provision-host.sh."
-            : "All VM slots are busy. The task is queued and a new Mac host is bootstrapping automatically (roughly 20-45 min; it then serves this and future tasks). Tell the user about the wait. If the permanent devbox is idle (see permanentDevboxIdle), offer it as a faster alternative — only switch if the user agrees (stop this queued task, then start_task with use_permanent_devbox).",
+        note: "All VM slots are busy. The task is queued and starts automatically when a slot frees up (a running task finishing). On-demand auto-scaling is off, so a new host won't be bootstrapped just for this task; the standing warm fleet is grown separately. Tell the user about the wait. If the permanent devbox is idle (see permanentDevboxIdle), offer it as a faster alternative — only switch if the user agrees (stop this queued task, then start_task with use_permanent_devbox).",
       });
     }
 

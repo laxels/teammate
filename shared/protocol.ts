@@ -100,9 +100,11 @@ export type GatewayHealth = {
 
 // ---- Host-level control plane: orchestrator -> host agent ----
 // Each Mac host runs a host agent (same outbound-subscription pattern as the
-// gateway, against the `hostCommands` table) that manages VM lifecycle.
-// Apple's EULA caps each host at 2 concurrent macOS VMs; concurrency scales
-// by adding hosts (scripts/provision-host.sh).
+// gateway, against the `hostCommands` table) that manages VM lifecycle on a
+// host that is already up. Apple's EULA caps each host at 2 concurrent macOS
+// VMs; concurrency scales by adding hosts. Host *provisioning* itself is no
+// longer a host-agent command — GitHub Actions is the doer (#87,
+// .github/workflows/provision-host.yml).
 //
 // VM lifecycle for ephemeral devboxes: the orchestrator pre-creates the
 // devbox row (status "provisioning", deterministic gatewayUrl from the
@@ -112,18 +114,11 @@ export type GatewayHealth = {
 // "retiring" (never back to warm) and is destroyed after a short grace
 // period, so no task ever runs on a previous task's VM.
 
-export type HostCommandKind = "provision_vm" | "destroy_vm" | "provision_host";
+export type HostCommandKind = "provision_vm" | "destroy_vm";
 
 // JSON payload for the VM command kinds.
 export type HostVmPayload = {
   devboxId: string;
-};
-
-// JSON payload for provision_host: a fleet host with provisioning capability
-// bootstraps a brand-new Scaleway Mac under this name (Scaleway server name,
-// tailnet hostname, and Convex hostId are all the same string).
-export type HostProvisionPayload = {
-  hostName: string;
 };
 
 /** How long a finished ephemeral devbox stays up (monitoring page, final

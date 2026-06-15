@@ -49,18 +49,35 @@ which copies `.env`/`.env.local` from the primary checkout and runs
 immediately. Validation is safe to run concurrently in any number of worktrees
 (tests bind ephemeral ports and read no env).
 
-Operations that touch shared live systems are the **singleton lane** and are
-serialized by [scripts/singleton-lock.sh](scripts/singleton-lock.sh), which
-also refuses to run them from a worktree (only the primary checkout's code
-should reach live systems; override with `ULTRACLAUDE_SINGLETON_FROM_WORKTREE=1`):
+Operations that touch shared live systems are the **singleton lane**. They are
+serialized by one of two locks, and the rule for which is: **a lock must live
+where it can see every initiator.**
+
+**Local lock** — [scripts/singleton-lock.sh](scripts/singleton-lock.sh), a
+`.git`-dir filesystem lock shared across a checkout and its worktrees; refuses
+to run from a worktree (only the primary checkout's code should reach live
+systems; override with `ULTRACLAUDE_SINGLETON_FROM_WORKTREE=1`). Use it when
+every initiator is a local checkout:
 
 - `convex` lock: `bun run dev` (continuous push to the live Convex deployment)
   and `bun run deploy:convex` (one-shot deploy — prefer this over raw
   `bunx convex dev --once`).
-- `fleet` lock: `scripts/deploy-payload.sh`, `provision-host.sh`,
-  `adopt-host.sh`, `bake-golden.sh` (Scaleway hosts, golden image; the bake is
-  version-parameterized — `--from`/`--to`). The lock no-ops on fleet hosts
-  themselves, where the payload has no git checkout.
+- `fleet` lock: `scripts/deploy-payload.sh`, `scripts/bake-golden.sh`
+  (golden-image bake — version-parameterized `--from`/`--to`; a bake produces an
+  immutable `golden:vN`, it does **not** mutate the live fleet). The lock no-ops
+  on fleet hosts themselves, where the payload has no git checkout.
+
+**Convex fleet lock** — [scripts/fleet-lock.sh](scripts/fleet-lock.sh), an
+authoritative lease in Convex state. Use it for fleet **provisioning**
+(`scripts/provision-host.sh`, `scripts/adopt-host.sh`), which is **multi-origin**
+— a laptop, a GitHub Actions runner ([provision-host.yml](.github/workflows/provision-host.yml)),
+or the future capacity monitor (#88) can all mutate live host state Convex reads
+immediately, so only authoritative Convex state can serialize them. It is one
+**global** lock: one fleet op at a time across all origins; parallelism (the GH
+Actions matrix provisioning several hosts) happens *within* a single held op. As
+a lease it auto-reclaims if a holder dies mid-op (the distributed analogue of
+the local lock's dead-owner steal). New Mac hosts are provisioned by the GitHub
+Actions workflow, not on a task-running host.
 
 Merge hygiene across worktrees: never hand-merge `bun.lock` (take both sides'
 package.json, then re-run `bun install`) or `convex/_generated/` (re-run

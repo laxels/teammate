@@ -16,10 +16,12 @@
 
 set -euo pipefail
 
-# Singleton lane: one fleet operation at a time, from the primary checkout
-# (scripts/singleton-lock.sh; no-ops on fleet hosts, which have no git).
-if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
-  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
+# Fleet lock: one fleet-provisioning op at a time, GLOBALLY, via authoritative
+# Convex state (scripts/fleet-lock.sh). FLEET_LOCK_HELD=1 means the caller
+# already holds it — when provision-host.sh runs us inside its lock, or a GH
+# Actions matrix job holds the run's lock — so we run directly without re-locking.
+if [[ "${FLEET_LOCK_HELD:-}" != "1" ]]; then
+  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fleet-lock.sh" with "$0" "$@"
 fi
 
 HOST_SSH="${1:-}"
@@ -42,11 +44,14 @@ log() { printf '\n==> %s\n' "$*"; }
 
 host() { ssh -o ConnectTimeout=10 "$HOST_SSH" "$@"; }
 
-env_secret() { # <KEY> -> value from repo .env, never echoed
-  local val
-   val="$(grep "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+env_secret() { # <KEY> -> value from the environment, else repo .env; never echoed
+  # Prefer an env var of the same name (GitHub Actions injects secrets that
+  # way); fall back to $ENV_FILE for laptop runs.
+  local key="$1" val="${!1:-}"
+  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
+  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
   if [[ -z "$val" ]]; then
-    echo "ERROR: $1 missing from $ENV_FILE" >&2
+    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
     return 1
   fi
   printf '%s' "$val"

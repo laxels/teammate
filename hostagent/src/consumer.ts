@@ -17,15 +17,6 @@ export const removeDevboxRef =
 export const provisionVmFailedRef = makeFunctionReference<"mutation">(
   "hosts:provisionVmFailed",
 );
-/** Posts fleet lifecycle events (host bootstrap progress/failures). */
-export const recordHostEventRef = makeFunctionReference<"mutation">(
-  "hosts:recordHostEvent",
-);
-/** Boot-time reconciliation: fails bootstraps this provisioner left dangling
- * when its process restarted mid-bootstrap (frees the fleet scale-up lock). */
-export const failOrphanedProvisionsRef = makeFunctionReference<"mutation">(
-  "hosts:failOrphanedProvisions",
-);
 
 export type PendingHostCommand = {
   commandId: string;

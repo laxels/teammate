@@ -20,10 +20,14 @@
 
 set -euo pipefail
 
-# Singleton lane: one fleet operation at a time, from the primary checkout
-# (scripts/singleton-lock.sh; no-ops on fleet hosts, which have no git).
-if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
-  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
+# Fleet lock: one fleet-provisioning op at a time, GLOBALLY (laptop, GitHub
+# Actions, the future #88 monitor), via authoritative Convex state
+# (scripts/fleet-lock.sh). `with` acquires the lock, renews it for the duration,
+# refuses to run from a linked worktree, and releases on exit. FLEET_LOCK_HELD=1
+# means the caller already holds it (the GH Actions matrix job, or a parent
+# provision-host -> adopt-host), so we run our body directly and don't re-lock.
+if [[ "${FLEET_LOCK_HELD:-}" != "1" ]]; then
+  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fleet-lock.sh" with "$0" "$@"
 fi
 
 HOST_NAME="${1:-}"
@@ -47,14 +51,34 @@ TART='~/tart.app/Contents/MacOS/tart'
 TART_URL="https://github.com/openai/tart/releases/download/2.32.1/tart.tar.gz"
 GOLDEN_REMOTE="ghcr.io/laxels/ultraclaude-golden:v4"
 GOLDEN_LOCAL="golden-v4"
+CONVEX_SITE_URL="${CONVEX_SITE_URL:-https://zealous-robin-941.convex.site}"
 
 log() { printf '\n==> %s\n' "$*"; }
 
-env_secret() { # <KEY> -> value from repo .env, never echoed
-  local val
-   val="$(grep "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+# Best-effort fleet lifecycle event into Convex hostEvents (get_fleet surfaces
+# these). Never fails the bootstrap on a reporting error. No-op until
+# DEVBOX_SHARED_SECRET is resolved in preflight.
+fleet_event() { # <type> <summary>
+  [[ -z "${DEVBOX_SHARED_SECRET:-}" ]] && return 0
+  curl -sS -m 10 -X POST \
+    -H "x-devbox-secret: $DEVBOX_SHARED_SECRET" \
+    -H "Content-Type: application/json" \
+    -d "{\"hostId\":\"$HOST_NAME\",\"type\":\"$1\",\"summary\":$(json_string "$2")}" \
+    "$CONVEX_SITE_URL/fleet/event" >/dev/null 2>&1 || true
+}
+
+json_string() { # <str> -> JSON-quoted string (escapes via python3)
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+env_secret() { # <KEY> -> value from the environment, else repo .env; never echoed
+  # Prefer an env var of the same name so GitHub Actions can inject secrets
+  # without writing them to a file; fall back to $ENV_FILE for laptop runs.
+  local key="$1" val="${!1:-}"
+  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
+  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
   if [[ -z "$val" ]]; then
-    echo "ERROR: $1 missing from $ENV_FILE" >&2
+    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
     return 1
   fi
   printf '%s' "$val"
@@ -107,7 +131,22 @@ SCALEWAY_ACCESS_KEY_ID="$(env_secret SCALEWAY_ACCESS_KEY_ID)"
 SCALEWAY_SECRET_KEY="$(env_secret SCALEWAY_SECRET_KEY)"
 GITHUB_PAT="$(env_secret GITHUB_PAT)"
 TAILSCALE_AUTHKEY="$(env_secret TAILSCALE_AUTHKEY)"
-env_secret DEVBOX_SHARED_SECRET >/dev/null # adopt-host.sh needs it; fail early
+# Kept (not just validated): adopt-host.sh needs it, and fleet_event reports
+# bootstrap progress to Convex with it.
+DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
+
+# Report a failed bootstrap to Convex so get_fleet shows it (and a stale
+# pre-created "provisioning" row, if any, is dropped). Only fires on a non-zero
+# exit; the success path emits provision_succeeded explicitly below.
+on_exit() {
+  local rc=$?
+  if (( rc != 0 )); then
+    fleet_event provision_failed \
+      "Bootstrap of $HOST_NAME failed (exit $rc); see the provisioner logs."
+  fi
+}
+trap on_exit EXIT
+fleet_event provision_started "Bootstrap of $HOST_NAME started."
 
 # ------------------------------------------------------------ create server
 # scw_api results are captured before parsing (never piped into a parser):
@@ -329,4 +368,11 @@ host "$TART list"
 log "Adopting the host (bun, payload, host agent)"
 "$REPO_ROOT/scripts/adopt-host.sh" "$HOST_SSH" "$HOST_NAME"
 
-log "Done. $HOST_NAME ($SERVER_IP) is bootstrapped and running the host agent."
+# --------------------------------------------------------------- smoke test
+# Readiness is the smoke test, not "hostagent started": the host must heartbeat
+# active in Convex AND clone+boot+destroy one throwaway VM (issue #87).
+"$REPO_ROOT/scripts/smoke-host.sh" "$HOST_SSH" "$HOST_NAME"
+
+fleet_event provision_succeeded \
+  "$HOST_NAME is task-ready (heartbeating active + smoke test passed)."
+log "Done. $HOST_NAME ($SERVER_IP) is bootstrapped, smoke-tested, and task-ready."

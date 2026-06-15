@@ -1,0 +1,143 @@
+# Decoupled fleet provisioner (issue #87): bootstraps Scaleway Mac hosts from an
+# ephemeral Linux runner over ssh — off the task hot path, no longer tied to a
+# task-running host-1 agent. Triggered manually (workflow_dispatch) or by the
+# future #88 capacity monitor (repository_dispatch). Hosts in the matrix
+# provision IN PARALLEL, all under ONE global Convex fleet lock held by this run
+# (scripts/fleet-lock.sh): a second fleet op from any origin (laptop, another
+# run, the monitor) waits.
+#
+# Required secrets (GitHub Environment "fleet"):
+#   SCALEWAY_ACCESS_KEY_ID, SCALEWAY_SECRET_KEY  Scaleway API (create the Mac)
+#   GHCR_PAT                                     ghcr pull of the golden image
+#                                                (GitHub forbids GITHUB_-prefixed
+#                                                secret names, so it's mapped to
+#                                                the GITHUB_PAT env var)
+#   TAILSCALE_AUTHKEY                            host joins the tailnet
+#   TAILSCALE_EPHEMERAL_AUTHKEY                  hostagent enrolls ephemeral VMs
+#   DEVBOX_SHARED_SECRET                         fleet lock + /fleet/event auth
+#   FLEET_SSH_PRIVATE_KEY                        post-bootstrap ssh to the host
+
+name: Provision fleet host
+
+on:
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "Host names to provision (space/comma-separated, e.g. 'ultraclaude-host-2 ultraclaude-host-3')"
+        required: true
+        type: string
+  repository_dispatch:
+    # client_payload.hosts: space/comma-separated host names (string).
+    types: [provision-host]
+
+# Serialize runs of THIS workflow natively (cheap). The Convex fleet lock is the
+# cross-origin authority that also serializes against laptop / monitor runs.
+concurrency:
+  group: fleet-provision
+  cancel-in-progress: false
+
+env:
+  CONVEX_SITE_URL: https://zealous-robin-941.convex.site
+
+jobs:
+  # Parse the host list into a JSON array for the matrix.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      hosts: ${{ steps.parse.outputs.hosts }}
+    steps:
+      - id: parse
+        env:
+          RAW_HOSTS: ${{ github.event.inputs.hosts || github.event.client_payload.hosts }}
+        run: |
+          raw="${RAW_HOSTS//,/ }"   # accept commas or spaces
+          json="["
+          n=0
+          for h in $raw; do
+            [[ "$h" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "invalid host name: $h" >&2; exit 1; }
+            [[ $n -gt 0 ]] && json+=","
+            json+="\"$h\""
+            n=$((n + 1))
+          done
+          [[ $n -gt 0 ]] || { echo "no host names provided" >&2; exit 1; }
+          json+="]"
+          echo "hosts=$json" >> "$GITHUB_OUTPUT"
+          echo "Provisioning: $json"
+
+  # Acquire the ONE global fleet lock for this whole run (held until `release`).
+  lock:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: fleet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Acquire the global fleet lock
+        env:
+          DEVBOX_SHARED_SECRET: ${{ secrets.DEVBOX_SHARED_SECRET }}
+          FLEET_LOCK_HOLDER: gh:${{ github.run_id }}
+          # Wait out a concurrent laptop/monitor op rather than failing the run.
+          FLEET_LOCK_WAIT_SECS: "1800"
+          # 90-min lease: comfortably exceeds a full provision (even a slow ~60GB
+          # first golden pull), so it survives the lock-job -> matrix scheduling
+          # gap AND a dead renewer. The matrix renewer just refreshes it; a hard
+          # run crash reclaims after ≤90 min (the proven provision budget).
+          FLEET_LOCK_TTL_MS: "5400000"
+        run: scripts/fleet-lock.sh acquire
+
+  # Provision each host in parallel under the run's already-held lock.
+  provision:
+    needs: [plan, lock]
+    runs-on: ubuntu-latest
+    environment: fleet
+    strategy:
+      # One host failing must not cancel the others; each reports itself.
+      fail-fast: false
+      matrix:
+        host: ${{ fromJson(needs.plan.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sshpass (first-contact key install fallback)
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+      - name: Install the fleet SSH key
+        env:
+          FLEET_SSH_PRIVATE_KEY: ${{ secrets.FLEET_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$FLEET_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+      - name: "Provision ${{ matrix.host }}"
+        env:
+          # Fleet creds injected as env vars — provision-host.sh's env_secret
+          # reads them directly, so no secret ever lands in a file on disk.
+          SCALEWAY_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          GITHUB_PAT: ${{ secrets.GHCR_PAT }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          TAILSCALE_EPHEMERAL_AUTHKEY: ${{ secrets.TAILSCALE_EPHEMERAL_AUTHKEY }}
+          DEVBOX_SHARED_SECRET: ${{ secrets.DEVBOX_SHARED_SECRET }}
+          # The run already holds the fleet lock — don't re-acquire it (that
+          # would serialize the matrix). Just keep its lease renewed while we
+          # work; the renewer dies with the step's shell at job end. Same 90-min
+          # lease as the lock job so renewals don't shrink the ceiling.
+          FLEET_LOCK_HELD: "1"
+          FLEET_LOCK_HOLDER: gh:${{ github.run_id }}
+          FLEET_LOCK_TTL_MS: "5400000"
+        run: |
+          nohup scripts/fleet-lock.sh renew-loop >/tmp/fleet-renew.log 2>&1 &
+          scripts/provision-host.sh "${{ matrix.host }}"
+
+  # Release the lock once, however the run ended (success, failure, or skip).
+  release:
+    needs: [plan, lock, provision]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: fleet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release the global fleet lock
+        env:
+          DEVBOX_SHARED_SECRET: ${{ secrets.DEVBOX_SHARED_SECRET }}
+          FLEET_LOCK_HOLDER: gh:${{ github.run_id }}
+        # No-op if we never acquired it (a concurrent holder still owns it).
+        run: scripts/fleet-lock.sh release
