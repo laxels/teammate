@@ -4,9 +4,9 @@
 
 import { v } from "convex/values";
 import {
-  DEVBOX_EVENT_TO_TASK_STATUS,
   EPHEMERAL_RETIRE_GRACE_MS,
   isTerminalTaskStatus,
+  statusForEvent,
 } from "../shared/protocol";
 import {
   buildDevboxEventMessage,
@@ -173,9 +173,11 @@ export const devboxEvent = internalAction({
           : "";
       // A terminal event sends an ephemeral devbox into "retiring": warn that
       // the monitoring page is about to disappear with the VM.
+      const incomingStatus = statusForEvent(args.type);
       const retireNote =
         devbox?.ephemeral === true &&
-        isTerminalTaskStatus(DEVBOX_EVENT_TO_TASK_STATUS[args.type])
+        incomingStatus !== undefined &&
+        isTerminalTaskStatus(incomingStatus)
           ? `\n_This devbox (and its monitoring page) retires in ~${RETIRE_GRACE_MIN} minutes._`
           : "";
       await postSlackMessage({

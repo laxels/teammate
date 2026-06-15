@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { convexTest } from "convex-test";
 import type { TaskEffort } from "../shared/protocol";
 import { api, internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 
 // Bun has no import.meta.glob; hand-build the module map convex-test needs.
@@ -177,7 +176,8 @@ test("provisionVmFailed never regresses a task that already reached terminal", a
       .query("tasks")
       .withIndex("by_task_id", (q) => q.eq("taskId", "task-1"))
       .unique();
-    await ctx.db.patch(task!._id as Id<"tasks">, { status: "stopped" });
+    if (!task) throw new Error("seedFullHost should have created task-1");
+    await ctx.db.patch(task._id, { status: "stopped" });
   });
 
   await t.mutation(api.hosts.provisionVmFailed, {

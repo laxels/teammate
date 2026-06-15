@@ -1,10 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
+  clip,
   excerpt,
   extractAssistantText,
+  extractToolResults,
+  extractToolUses,
   mapResultMessage,
+  prettyToolName,
+  stringifyToolInput,
 } from "../src/summary";
-import { assistantMessage, resultError, resultSuccess } from "./helpers";
+import {
+  assistantMessage,
+  assistantWithToolUse,
+  resultError,
+  resultSuccess,
+  toolResultMessage,
+} from "./helpers";
 
 describe("excerpt", () => {
   test("collapses whitespace and trims", () => {
@@ -66,5 +77,91 @@ describe("mapResultMessage", () => {
   test("summaries respect the 300-char cap", () => {
     const mapped = mapResultMessage(resultSuccess("y".repeat(1000)));
     expect(mapped.summary.length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("clip", () => {
+  test("preserves whitespace, unlike excerpt", () => {
+    expect(clip("a\n  b", 100)).toBe("a\n  b");
+  });
+
+  test("truncates with an ellipsis past the budget", () => {
+    const result = clip("x".repeat(50), 10);
+    expect(result.length).toBe(10);
+    expect(result.endsWith("…")).toBe(true);
+  });
+});
+
+describe("prettyToolName", () => {
+  test("strips the in-process MCP namespace", () => {
+    expect(prettyToolName("mcp__computer-use__left_click")).toBe("left_click");
+  });
+
+  test("leaves a bare name untouched", () => {
+    expect(prettyToolName("Read")).toBe("Read");
+  });
+});
+
+describe("stringifyToolInput", () => {
+  test("serializes an object input", () => {
+    expect(stringifyToolInput({ coordinate: [1, 2] })).toBe(
+      '{"coordinate":[1,2]}',
+    );
+  });
+
+  test("empty for null/undefined", () => {
+    expect(stringifyToolInput(undefined)).toBe("");
+    expect(stringifyToolInput(null)).toBe("");
+  });
+});
+
+describe("extractToolUses", () => {
+  test("returns each tool_use block with id, name, input", () => {
+    const message = assistantWithToolUse({
+      text: "clicking",
+      toolName: "mcp__computer-use__left_click",
+      toolUseId: "tu-1",
+      input: { coordinate: [3, 4] },
+    });
+    expect(extractToolUses(message)).toEqual([
+      {
+        id: "tu-1",
+        name: "mcp__computer-use__left_click",
+        input: { coordinate: [3, 4] },
+      },
+    ]);
+  });
+
+  test("empty for a plain text message", () => {
+    expect(extractToolUses(assistantMessage("just text"))).toEqual([]);
+  });
+});
+
+describe("extractToolResults", () => {
+  test("splits a tool_result into text and base64 images", () => {
+    const data = Buffer.from("png").toString("base64");
+    const message = toolResultMessage({
+      toolUseId: "tu-1",
+      text: "Clicked.",
+      imageBase64: data,
+    });
+    expect(extractToolResults(message)).toEqual([
+      {
+        toolUseId: "tu-1",
+        text: "Clicked.",
+        images: [{ data, mimeType: "image/png" }],
+        isError: false,
+      },
+    ]);
+  });
+
+  test("a plain steer message (string content) yields nothing", () => {
+    expect(
+      extractToolResults({
+        type: "user",
+        message: { role: "user", content: "just a steer" },
+        parent_tool_use_id: null,
+      }),
+    ).toEqual([]);
   });
 });

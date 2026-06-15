@@ -16,7 +16,7 @@ import { createComputerUseMcpServer } from "./computer/mcp";
 import type { GatewayConfig } from "./config";
 import {
   createEventSender,
-  createTranscriptSender,
+  createScreenshotUploader,
   type FetchLike,
 } from "./events";
 import {
@@ -197,7 +197,8 @@ export function createGatewayServer(
   // `server` is assigned below; the callbacks only run once it is listening.
   let server: Server<WsData>;
 
-  const uploadTranscript = createTranscriptSender(config, fetchFn);
+  // Uploads tool-result screenshots to Convex storage for the retro timeline (#70).
+  const uploadScreenshot = createScreenshotUploader(config, fetchFn);
 
   // Records the devbox screen for each task and uploads it to Convex storage;
   // the SessionManager drives its start/finish around the task lifecycle.
@@ -211,7 +212,7 @@ export function createGatewayServer(
 
   const session = new SessionManager({
     emitEvent,
-    uploadTranscript,
+    uploadScreenshot,
     recorder,
     createMcpServers: (taskId) => ({
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
