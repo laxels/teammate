@@ -9,6 +9,8 @@
 //                       $HOME/ultraclaude-dashboard/server-config.json. Lives
 //                       OUTSIDE DASHBOARD_DIR so the browser can't fetch it.
 
+import { unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import {
   type FrameGrabConfig,
@@ -70,7 +72,10 @@ async function frameGrabConfig(): Promise<FrameGrabConfig | null> {
 }
 
 /** Spawn ffmpeg, resolve its stdout PNG bytes; reject on non-zero exit, a
- * timeout (SIGKILL), or a missing binary. */
+ * timeout (SIGKILL), or a missing binary. stdout AND stderr are drained
+ * concurrently: ffmpeg can be chatty (the mov demuxer emits a warning per odd
+ * read), and an undrained stderr pipe fills its ~64 KB OS buffer and deadlocks
+ * the process until the timeout SIGKILLs it. */
 async function runFfmpeg(
   args: string[],
   timeoutMs: number,
@@ -82,18 +87,31 @@ async function runFfmpeg(
   });
   const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
   try {
-    const [bytes, exitCode] = await Promise.all([
+    const [bytes, err, exitCode] = await Promise.all([
       new Response(proc.stdout).bytes(),
+      new Response(proc.stderr).text().catch(() => ""),
       proc.exited,
     ]);
     if (exitCode !== 0) {
-      const err = await new Response(proc.stderr).text().catch(() => "");
       throw new Error(`ffmpeg exited ${exitCode}: ${err.slice(0, 300)}`);
     }
     return bytes;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Write recording bytes to a unique temp .mov ffmpeg can seek locally (#102).
+ * A fresh ArrayBuffer slice keeps Bun.write happy regardless of the
+ * Uint8Array's underlying buffer offset. */
+async function writeTempFile(bytes: Uint8Array): Promise<string> {
+  const path = join(tmpdir(), `ultraclaude-frame-${crypto.randomUUID()}.mov`);
+  await Bun.write(path, bytes.slice().buffer as ArrayBuffer);
+  return path;
+}
+
+async function removeFile(path: string): Promise<void> {
+  await unlink(path).catch(() => undefined);
 }
 
 // One ffmpeg per request; bound concurrency so a burst (e.g. a comment-heavy
@@ -134,7 +152,12 @@ async function handleFrameGrab(request: Request): Promise<Response> {
   }
   inFlight++;
   try {
-    const result = await grabFrame(config, req, { fetchFn: fetch, runFfmpeg });
+    const result = await grabFrame(config, req, {
+      fetchFn: fetch,
+      runFfmpeg,
+      writeTempFile,
+      removeFile,
+    });
     return result.ok
       ? Response.json({ storageId: result.storageId })
       : Response.json({ error: result.reason }, { status: result.status });

@@ -3,10 +3,21 @@
 // ffmpeg or network. dashboard-server.ts wires this to Bun.serve + Bun.spawn.
 //
 // Flow for one grab: resolve the task's recording to a signed Convex storage
-// URL (secret-gated, so the browser never supplies a URL) -> ffmpeg-seek a
-// single PNG frame at the timestamp -> upload the PNG to Convex storage ->
-// return the new storageId for the comment to reference. No repo imports: the
-// host runs only this file + dashboard-server.ts + the prebuilt dist.
+// URL (secret-gated, so the browser never supplies a URL) -> download the .mov
+// to a local temp file -> ffmpeg-seek a single PNG frame at the timestamp ->
+// upload the PNG to Convex storage -> return the new storageId for the comment
+// to reference. No repo imports: the host runs only this file +
+// dashboard-server.ts + the prebuilt dist.
+//
+// Why download instead of ffmpeg-seeking the URL directly (#102): a
+// `screencapture -v` .mov is non-faststart — its `moov` atom is written at the
+// END of the file. To extract any frame, ffmpeg must read that trailing moov
+// first, which over HTTP means a byte-range request to the tail. If the storage
+// URL doesn't honor ranges flawlessly (a redirect, a CDN that answers 200 with
+// the whole body, etc.), ffmpeg can't read the moov and produces a failed or
+// empty frame. Seeking a LOCAL file sidesteps range entirely and is reliable
+// regardless of moov position. (Verified: input-seeking a range-less HTTP
+// server yields a 0-byte frame; the local-file path always yields the frame.)
 
 /** Config the host needs, written by deploy-dashboard.sh to a mode-0600 file
  * OUTSIDE the browser-served dist dir (the devbox secret must never be
@@ -50,11 +61,15 @@ export function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** ffmpeg args to extract ONE PNG frame at `videoTimeSec` from `url` to stdout.
- * `-ss` before `-i` is an input seek: ffmpeg issues an HTTP range request when
- * the server supports it (Convex storage does), so it reads only near the
- * target instead of downloading the whole .mov. */
-export function ffmpegFrameArgs(url: string, videoTimeSec: number): string[] {
+/** ffmpeg args to extract ONE PNG frame at `videoTimeSec` from a LOCAL file
+ * `inputPath` to stdout. `-ss` before `-i` is an input seek: against a local
+ * file ffmpeg uses the moov index to jump straight to the nearest keyframe
+ * (fast, and reliable regardless of where the moov atom sits — unlike seeking
+ * the .mov over HTTP, see the file header re #102). */
+export function ffmpegFrameArgs(
+  inputPath: string,
+  videoTimeSec: number,
+): string[] {
   return [
     "-nostdin",
     "-loglevel",
@@ -62,7 +77,7 @@ export function ffmpegFrameArgs(url: string, videoTimeSec: number): string[] {
     "-ss",
     String(videoTimeSec),
     "-i",
-    url,
+    inputPath,
     "-frames:v",
     "1",
     "-f",
@@ -78,6 +93,11 @@ export type FrameGrabDeps = {
   /** Runs ffmpeg with the given args, resolving the PNG bytes from stdout.
    * Throws on a non-zero exit, a timeout, or a missing binary. */
   runFfmpeg: (args: string[], timeoutMs: number) => Promise<Uint8Array>;
+  /** Persists the downloaded recording to a local temp path ffmpeg can seek,
+   * returning that path. grabFrame always removes it once extraction is done. */
+  writeTempFile: (bytes: Uint8Array) => Promise<string>;
+  /** Best-effort delete of a temp path; must not throw. */
+  removeFile: (path: string) => Promise<void>;
 };
 
 export type FrameGrabResult =
@@ -128,21 +148,45 @@ export async function grabFrame(
     return { ok: false, status: 502, reason: "recording-url unreachable" };
   }
 
-  // 2. Extract the frame.
+  // 2. Download the recording to a local temp file. Seeking the .mov over HTTP
+  // is unreliable for the non-faststart files screencapture produces (#102, see
+  // the file header) — a local file always works.
+  let recordingBytes: Uint8Array;
+  try {
+    const res = await deps.fetchFn(recordingUrl);
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: 502,
+        reason: `recording fetch ${res.status}`,
+      };
+    }
+    recordingBytes = new Uint8Array(await res.arrayBuffer());
+  } catch {
+    return { ok: false, status: 502, reason: "recording fetch failed" };
+  }
+  if (recordingBytes.byteLength === 0) {
+    return { ok: false, status: 404, reason: "recording not available" };
+  }
+
+  // 3. Extract one frame from the local file, always cleaning the temp file up.
   let png: Uint8Array;
+  const tempPath = await deps.writeTempFile(recordingBytes);
   try {
     png = await deps.runFfmpeg(
-      ffmpegFrameArgs(recordingUrl, req.videoTimeSec),
+      ffmpegFrameArgs(tempPath, req.videoTimeSec),
       FFMPEG_TIMEOUT_MS,
     );
   } catch {
     return { ok: false, status: 500, reason: "frame extraction failed" };
+  } finally {
+    await deps.removeFile(tempPath);
   }
   if (png.byteLength === 0) {
     return { ok: false, status: 500, reason: "empty frame" };
   }
 
-  // 3. Get a one-shot upload URL.
+  // 4. Get a one-shot upload URL.
   let uploadUrl: string;
   try {
     const res = await deps.fetchFn(`${base}/devbox/recording/upload-url`, {
@@ -161,7 +205,7 @@ export async function grabFrame(
     return { ok: false, status: 502, reason: "upload-url unreachable" };
   }
 
-  // 4. Upload the PNG; read back its storageId.
+  // 5. Upload the PNG; read back its storageId.
   try {
     const res = await deps.fetchFn(uploadUrl, {
       method: "POST",
