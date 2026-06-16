@@ -124,7 +124,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    thread, chat.update'd in place on every event (status, latest summary,
    duration, monitoring link). Detail events that deserve a notification ping
    (needs_input/terminal) still arrive as fresh thread replies; progress only
-   refreshes the card. Status reactions (✅/❌/🛑) land on the request
+   refreshes the card. Status reactions (🙋/✅/❌/🛑) land on the request
    message, on top of the orchestrator's instant 🫡 ack. Legacy threadless
    tasks adopt their card as the thread anchor.
 6. Replies in a task's thread reach the orchestrator with that task injected

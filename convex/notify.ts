@@ -193,7 +193,7 @@ export const devboxEvent = internalAction({
 
     // 3. Glanceable reaction on the anchor message (usually the user's
     // request). Reactions accumulate on top of the orchestrator's 🫡 ack
-    // (then ✅/❌/🛑) — removal needs another scope round-trip and adds little.
+    // (then 🙋/✅/❌/🛑) — removal needs another scope round-trip and adds little.
     const reaction = STATUS_REACTION[args.type];
     if (reaction !== undefined && threadTs !== undefined) {
       await addSlackReaction({
