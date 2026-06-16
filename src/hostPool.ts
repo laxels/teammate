@@ -133,10 +133,10 @@ export function ephemeralGatewayUrl(
 
 /**
  * Whether a recorded devbox event should push the devbox into "retiring":
- * only an APPLIED terminal task status on an EPHEMERAL devbox qualifies.
- * Permanent devboxes return to the warm pool instead, and unapplied events
- * (late duplicates that didn't change task state) must not trigger a second
- * retire. Ephemeral devboxes never go back to warm: no task ever runs on a
+ * only an APPLIED terminal task status on an EPHEMERAL devbox qualifies. The
+ * ephemeral guard is defensive — every devbox is ephemeral now — and unapplied
+ * events (late duplicates that didn't change task state) must not trigger a
+ * second retire. A retired devbox is never reused: no task ever runs on a
  * previous task's VM.
  */
 export function shouldRetireEphemeralDevbox(args: {

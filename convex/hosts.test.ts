@@ -714,8 +714,8 @@ test("setHostStatus leaves a provisioning host alone and reports unknown hosts",
 });
 
 // #89 all-at-once: force-evict every ephemeral on a host (mark retiring +
-// enqueue destroy_vm), abandoning in-flight tasks. Permanent devboxes and other
-// hosts' VMs are never touched.
+// enqueue destroy_vm), abandoning in-flight tasks. Other hosts' VMs are never
+// touched.
 test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals only", async () => {
   const t = newT();
   await t.run(async (ctx) => {
@@ -755,13 +755,6 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
       ephemeral: true,
       lastSeenAt: now,
     });
-    // The permanent devbox (no hostId, not ephemeral) — never evicted.
-    await ctx.db.insert("devboxes", {
-      devboxId: "devbox-1",
-      gatewayUrl: "http://devbox-1.ts.example.com:8787",
-      status: "warm",
-      lastSeenAt: now,
-    });
   });
 
   const result = await t.mutation(internal.hosts.evictHostEphemerals, {
@@ -782,9 +775,8 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
     expect(d?.status).toBe("retiring");
     expect(d?.taskId).toBeUndefined();
   }
-  // The other host's VM and the permanent devbox are untouched.
+  // The other host's VM is untouched.
   expect((await byId("eph-other"))?.status).toBe("busy");
-  expect((await byId("devbox-1"))?.status).toBe("warm");
 
   // A destroy_vm was enqueued to host-1 for each evicted ephemeral.
   const commands = await allHostCommands(t);

@@ -64,10 +64,10 @@ const startConsumer = () =>
           });
         let response = await post();
         if (response.status === 409) {
-          // A finished-but-steerable session still occupies the slot. The
-          // orchestrator only assigns devboxes Convex considers warm, so a new
-          // task wins: end the old session, wait for the slot to actually free
-          // (teardown is asynchronous), then retry.
+          // A finished-but-steerable session still occupies the slot. A new
+          // start command means a new task should win: end the old session,
+          // wait for the slot to actually free (teardown is asynchronous),
+          // then retry.
           await fetch(`${localUrl}/interrupt`, {
             method: "POST",
             headers: authHeader,

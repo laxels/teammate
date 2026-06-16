@@ -64,21 +64,6 @@ machinery (`hosts.requestHostProvision`, `inflightProvision`, `pickProvisioner`)
 is kept for the proactive capacity monitor in #88, which will grow the fleet
 ahead of demand and fire the provisioner via `repository_dispatch`.
 
-The permanent devbox `devbox-1` is the one exception: it is registered manually
-and cycles `warm` ↔ `busy` so it can carry state across tasks (used only when a
-task opts in with `use_permanent_devbox`). Register or re-point it with:
-
-```sh
-npx convex run devboxes:registerDevbox \
-  '{"devboxId": "devbox-1", "gatewayUrl": "http://<tailnet-host>:8787"}'
-```
-
-`registerDevbox` is an `internalMutation`, which `convex run` invokes fine.
-Re-running upserts by `devboxId` and resets it to `warm`. Pass an optional
-`hostId` when the devbox occupies a managed host's VM slots, so capacity
-accounting doesn't oversubscribe it (Apple's EULA caps a host at 2 concurrent
-VMs).
-
 ## Flow
 
 1. Slack message → `/slack/events` → `slackEvents` row → scheduled
@@ -90,9 +75,8 @@ VMs).
    that task injected as `<thread_context>` (looked up via the tasks
    `by_channel_thread` index), so thread replies steer, query, or stop their
    task without naming it.
-3. `start_task` places the task on a devbox — by default it allocates a fresh
-   ephemeral VM (`hosts.placeEphemeralTask`), or claims the warm permanent
-   devbox when `use_permanent_devbox` is set — enqueues a command in the
+3. `start_task` places the task on a fresh ephemeral VM
+   (`hosts.placeEphemeralTask`), enqueues a command in the
    `commands` table (gateways subscribe outbound — Convex cannot reach the
    tailnet), and inserts a `tasks` row anchored to the thread; the gateway then posts
    `DevboxEvent`s to `/devbox/events`, which update task/devbox state and

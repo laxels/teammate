@@ -38,8 +38,8 @@ fi
 
 for HOST_SSH in "$@"; do
   log "[$HOST_SSH] Syncing devbox payload to ~/ultraclaude-payload"
-  # --relative from the repo root, mirroring provision-devbox.sh: the host
-  # agent later rsyncs this directory verbatim into each VM's ~/ultraclaude/.
+  # --relative from the repo root: the host agent later rsyncs this directory
+  # verbatim into each VM's ~/ultraclaude/.
   # scripts/ rides along so fleet hosts can bootstrap new hosts; secrets do
   # NOT (the fleet env lives outside the payload — see ULTRACLAUDE_ENV).
   # The full workspace-manifest skeleton rides along (root + every member

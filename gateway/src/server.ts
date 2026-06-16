@@ -158,8 +158,8 @@ export function createGatewayServer(
   // Where inbound Slack files are downloaded before a session starts/steers.
   // Each task gets its OWN subdir (files.taskInboxDir), so cleaning up one task
   // never races another's downloads. Inbound Slack files are private, so the
-  // accepted task's dir is removed when that task ends — they never survive
-  // into an unrelated later task on the stateful permanent devbox.
+  // accepted task's dir is removed when that task ends — they never linger
+  // past the task that received them.
   const inboxDir = options.inboxDir ?? join(homedir(), "ultraclaude-inbox");
   /** The accepted task whose inbox dir to remove on teardown. */
   let activeInboxTaskId: string | null = null;

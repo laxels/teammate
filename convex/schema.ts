@@ -112,9 +112,12 @@ export default defineSchema({
     prompt: v.string(),
     status: taskStatusValidator,
     devboxId: v.optional(v.string()),
-    // Requested placement. "ephemeral" tasks with no devboxId are waiting for
-    // a VM slot (placed by hosts.placeQueuedEphemeralTasks when one frees up
-    // or a new host comes online). Absent on pre-placement-era rows.
+    // Requested placement — always "ephemeral" now (the only path). An
+    // "ephemeral" task with no devboxId is waiting for a VM slot (placed by
+    // hosts.placeQueuedEphemeralTasks when one frees up or a new host comes
+    // online). The "permanent" literal is retained ONLY so historical rows
+    // from the retired always-on devbox-1 (#107) still validate; no code path
+    // writes it. Absent on pre-placement-era rows.
     placement: v.optional(
       v.union(v.literal("ephemeral"), v.literal("permanent")),
     ),
@@ -140,14 +143,14 @@ export default defineSchema({
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
     // Files the requester shared in Slack, staged in Convex storage. The
-    // storageId rides the start command (hosts.dispatchTaskToSlot / orchestrator
-    // permanent path); the devbox fetches the bytes from the secret-gated
-    // /devbox/file endpoint, never a public storage URL.
+    // storageId rides the start command (hosts.dispatchTaskToSlot); the devbox
+    // fetches the bytes from the secret-gated /devbox/file endpoint, never a
+    // public storage URL.
     files: v.optional(v.array(taskFileValidator)),
     // Reasoning effort for the task agent's session, threaded into the start
-    // command at placement (hosts.dispatchTaskToSlot / orchestrator permanent
-    // path). Absent => the gateway's "xhigh" default; only the orchestrator
-    // sets it, and only on an explicit user request (#91).
+    // command at placement (hosts.dispatchTaskToSlot). Absent => the gateway's
+    // "xhigh" default; only the orchestrator sets it, and only on an explicit
+    // user request (#91).
     effort: v.optional(effortValidator),
     // Devbox screen recording lifecycle + stored .mov (see recordings.ts and
     // gateway/src/recorder.ts). Absent on tasks that predate the feature.
@@ -158,15 +161,13 @@ export default defineSchema({
     // Inbound thread replies look their task(s) up by thread anchor.
     .index("by_channel_thread", ["slackChannel", "slackThreadTs"]),
 
-  // Devbox VMs. Permanent devboxes are registered manually via
-  // devboxes.registerDevbox and cycle warm <-> busy; ephemeral devboxes are
-  // created by hosts.allocateEphemeral (provisioning -> busy -> retiring ->
-  // row deleted by hosts.removeDevbox) and never enter the warm pool.
+  // Devbox VMs — all ephemeral, created by hosts.allocateEphemeral
+  // (provisioning -> busy -> retiring -> row deleted by hosts.removeDevbox).
+  // A devbox is never reused: no task runs on a previous task's VM.
   devboxes: defineTable({
     devboxId: v.string(),
     gatewayUrl: v.string(),
     status: v.union(
-      v.literal("warm"),
       v.literal("busy"),
       v.literal("provisioning"),
       v.literal("retiring"),

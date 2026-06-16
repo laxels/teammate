@@ -554,7 +554,7 @@ describe("SessionManager", () => {
     session.start({ taskId: "task-1", prompt: "quick job" });
     await until(() => events.some((e) => e.type === "completed"));
 
-    // A permanent devbox idles finished-but-steerable far past stallMs; the
+    // A finished-but-steerable session idles far past stallMs; the
     // completed task must not be regressed to failed.
     clock.t = 5_000;
     await new Promise((resolve) => setTimeout(resolve, 30));

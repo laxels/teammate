@@ -9,7 +9,6 @@ import {
   MAX_ORCHESTRATOR_IMAGE_BYTES,
   MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES,
   parseTaskEffort,
-  type StartTaskRequest,
   TASK_EFFORTS,
   type UserMessagePayload,
 } from "../shared/protocol";
@@ -56,7 +55,7 @@ Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with te
 
 You receive Slack messages (DMs and @mentions). Either answer directly or use your tools:
 - start_task delegates work to a Claude Code instance on a devbox. By default every task gets a FRESH ephemeral devbox VM (~1-2 min to provision; no state left over from previous tasks). Write the prompt as a complete, self-contained spec: all context, constraints, and a clear definition of done up front. When the task involves the browser or another GUI app, say so in the prompt — the devbox decides on its own when to use its computer-use tools. Task agents run at the xhigh reasoning-effort level by default (most accurate, but slower). Only if the user EXPLICITLY and unambiguously asks for a specific effort level (e.g. "use low effort", "run this at max effort") do you pass that level via the effort parameter — otherwise omit it. Never trade effort down on your own to go faster, and never infer it from urgency or task size; it takes a literal request.
-- When all VM slots are full, start_task queues the task and it starts automatically the moment a slot frees (a running task finishing). On-demand auto-scaling is OFF — a new Mac host is NOT bootstrapped just for a queued task — so don't promise a host is "spinning up" or give a bootstrap ETA; the standing warm fleet is grown separately, out of band. Relay the wait honestly. The permanent devbox devbox-1 may be idle as a faster fallback: offer it, but only use it when the user says so or explicitly asked for it up front (set use_permanent_devbox: true) — it can carry state between tasks, which is why ephemeral is the default.
+- When all VM slots are full, start_task queues the task and it starts automatically the moment a slot frees (a running task finishing). On-demand auto-scaling is OFF — a new Mac host is NOT bootstrapped just for a queued task — so don't promise a host is "spinning up" or give a bootstrap ETA; the standing warm fleet is grown separately, out of band. Relay the wait honestly.
 - get_fleet shows the Mac hosts, VM slots, queued tasks, and recent fleet events. Use it when the user asks about capacity/infrastructure or when debugging why a task hasn't started.
 - get_task / list_tasks answer questions about ongoing work.
 - steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts).
@@ -102,11 +101,6 @@ const TOOLS: Anthropic.Tool[] = [
           type: "string",
           description:
             "Complete, self-contained task spec handed to Claude Code: context, constraints, and definition of done.",
-        },
-        use_permanent_devbox: {
-          type: "boolean",
-          description:
-            "Run on the always-on permanent devbox (devbox-1) instead of an ephemeral VM. Only when the user explicitly asks for it, or approves it as a faster fallback while the fleet is scaling. State can persist between tasks there.",
         },
         effort: {
           type: "string",
@@ -333,62 +327,16 @@ async function executeTool(
       });
       const permalinkArgs =
         permalink === null ? {} : { slackPermalink: permalink };
-      // Shared attachments ride along: stored on the task row (resolved for
-      // the devbox at placement) and, for the permanent path, baked into the
-      // start command here.
+      // Shared attachments ride along, stored on the task row and resolved
+      // for the devbox at placement (hosts.dispatchTaskToSlot).
       const fileArgs = inboundFiles.length > 0 ? { files: inboundFiles } : {};
-      const deliverable = resolveDeliverableFiles(inboundFiles);
       // Effort override (#91): only present when the user explicitly named a
       // level. Unknown values degrade to undefined (gateway xhigh default).
       const effort = parseTaskEffort(input.effort);
       const effortArgs = effort === undefined ? {} : { effort };
 
-      // Explicit opt-in: the always-on permanent devbox. State can persist
-      // between tasks there, so this path is never chosen silently.
-      if (input.use_permanent_devbox === true) {
-        const claimed = await ctx.runMutation(internal.devboxes.claimWarm, {
-          taskId,
-        });
-        if (claimed === null) {
-          return toolError(
-            "the permanent devbox is busy (or not heartbeating). Options: run the task on an ephemeral devbox instead (the default), or stop the task currently occupying it.",
-          );
-        }
-        const request: StartTaskRequest = {
-          taskId,
-          prompt,
-          ...effortArgs,
-          ...(deliverable.length > 0 ? { files: deliverable } : {}),
-        };
-        await ctx.runMutation(internal.commands.enqueue, {
-          devboxId: claimed.devboxId,
-          kind: "start",
-          payload: JSON.stringify(request),
-        });
-        await ctx.runMutation(internal.tasks.create, {
-          taskId,
-          title,
-          prompt,
-          devboxId: claimed.devboxId,
-          placement: "permanent",
-          slackChannel: target.channel,
-          slackThreadTs: target.threadTs,
-          slackUser: requester,
-          ...permalinkArgs,
-          ...effortArgs,
-          ...fileArgs,
-        });
-        return JSON.stringify({
-          ok: true,
-          taskId,
-          devboxId: claimed.devboxId,
-          monitoringUrl: monitoringUrl(claimed.gatewayUrl),
-          note: "Running on the permanent devbox as requested. Status updates will be posted to this conversation automatically.",
-        });
-      }
-
-      // Default: a fresh ephemeral devbox. The task row is created first so
-      // it can wait in the queue when every VM slot is taken; placement
+      // Every task runs on a fresh ephemeral devbox. The task row is created
+      // first so it can wait in the queue when every VM slot is taken; placement
       // (devbox assignment + start command + provision_vm) happens in
       // hosts.placeEphemeralTask — immediately when a slot is free, or from
       // placeQueuedEphemeralTasks when capacity arrives. Start commands are
@@ -420,20 +368,13 @@ async function executeTool(
           note: "A fresh ephemeral devbox VM is being provisioned for this task (~1-2 min before the 'started' update). Status updates will be posted to this conversation automatically.",
         });
       }
-      const permanentIdle =
-        (
-          await ctx.runQuery(internal.devboxes.getByDevboxId, {
-            devboxId: "devbox-1",
-          })
-        )?.status === "warm";
       return JSON.stringify({
         ok: true,
         taskId,
         queued: true,
         scaling: placement.scaling,
         queuedTasks: placement.queuedTasks,
-        permanentDevboxIdle: permanentIdle,
-        note: "All VM slots are busy. The task is queued and starts automatically when a slot frees up (a running task finishing). On-demand auto-scaling is off, so a new host won't be bootstrapped just for this task; the standing warm fleet is grown separately. Tell the user about the wait. If the permanent devbox is idle (see permanentDevboxIdle), offer it as a faster alternative — only switch if the user agrees (stop this queued task, then start_task with use_permanent_devbox).",
+        note: "All VM slots are busy. The task is queued and starts automatically when a slot frees up (a running task finishing). On-demand auto-scaling is off, so a new host won't be bootstrapped just for this task; the standing warm fleet is grown separately. Tell the user about the wait.",
       });
     }
 

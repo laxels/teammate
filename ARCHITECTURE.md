@@ -115,7 +115,8 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    reach the tailnet); the gateway's outbound subscription picks it up within
    seconds, runs an Agent SDK session (streaming input mode), and posts
    `DevboxEvent`s back to Convex `/devbox/events`. Gateways heartbeat every
-   60s; `claimWarm` only assigns devboxes seen in the last 2 minutes.
+   60s; the staleness check-in treats a devbox as alive only if seen in the
+   last 2 minutes.
 4. Orchestrator turns events into Slack updates posted to the task's thread,
    with the monitoring link `https://<devbox-tailnet-host>/` (Tailscale
    Serve).

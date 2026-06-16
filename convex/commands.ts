@@ -104,7 +104,8 @@ export const ack = mutation({
   },
 });
 
-/** Liveness signal; claimWarm only hands tasks to recently-seen devboxes. */
+/** Liveness signal; the staleness check-in treats a devbox as alive only when
+ * its heartbeat is recent (HEARTBEAT_FRESHNESS_MS — see staleness.ts). */
 export const heartbeat = mutation({
   args: { devboxId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {

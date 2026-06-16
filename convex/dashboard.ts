@@ -392,15 +392,6 @@ export const retryTask = mutation({
         reason: `task is still ${source.status} — stop it first or send a follow-up instead`,
       };
     }
-    if (source.placement === "permanent") {
-      // The permanent devbox is explicit-opt-in (state persists there); a
-      // dashboard retry must not silently convert it to an ephemeral VM.
-      return {
-        ok: false,
-        reason:
-          "this task ran on the permanent devbox (explicit opt-in, stateful) — re-ask in Slack so placement is chosen deliberately",
-      };
-    }
     if (source.slackThreadTs === undefined) {
       // Pre-threading rows have no home thread: the retry's updates would
       // scatter as top-level messages. Re-asking in Slack creates an anchor.
