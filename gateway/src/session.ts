@@ -307,7 +307,7 @@ export class SessionManager {
   /** Hang detection: a healthy session emits its SDK init message within
    * seconds and streams messages continuously thereafter. Only turns in
    * flight are policed: a finished-but-steerable session sits legitimately
-   * silent (permanent devboxes idle indefinitely), and its task already
+   * silent (a devbox idles, steerable, until it retires), and its task already
    * reported a terminal status that a late "failed" would regress. */
   #checkWatchdog(taskId: string): void {
     if (!this.#running || !this.#turnInFlight) return;
@@ -342,9 +342,9 @@ export class SessionManager {
     this.#finishRecording(taskId);
     void this.stop();
     // A subprocess hung badly enough to trip the watchdog may also ignore the
-    // interrupt, leaving #run blocked forever — which would wedge a permanent
-    // devbox's gateway (eviction polls /health until free). Last resort:
-    // exit for a clean launchd relaunch. unref so tests never hang on it.
+    // interrupt, leaving #run blocked forever — which would wedge the gateway
+    // (retire polls /health until the slot frees). Last resort: exit for a
+    // clean launchd relaunch. unref so tests never hang on it.
     const hardExit = setTimeout(() => {
       if (this.#running) {
         console.error(

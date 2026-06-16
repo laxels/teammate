@@ -66,9 +66,8 @@ env_secret() { # <KEY> -> value from the environment, else repo .env; never echo
 log "Preflight checks"
 # The hostagent enrolls EPHEMERAL VMs, so its authkey must be the
 # reusable+ephemeral one (nodes auto-purge from the tailnet when they go
-# offline). The non-ephemeral TAILSCALE_AUTHKEY is only for permanent
-# enrollments: hosts (provision-host.sh) and permanent devboxes
-# (provision-devbox.sh) — never give it to a hostagent.
+# offline). The non-ephemeral TAILSCALE_AUTHKEY is only for host enrollments
+# (provision-host.sh) — never give it to a hostagent.
 TAILSCALE_EPHEMERAL_AUTHKEY="$(env_secret TAILSCALE_EPHEMERAL_AUTHKEY)"
 DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
 host true

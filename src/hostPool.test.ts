@@ -171,7 +171,7 @@ describe("shouldRetireEphemeralDevbox", () => {
     }
   });
 
-  test("permanent devboxes (ephemeral unset or false) never retire", () => {
+  test("a devbox with ephemeral unset or false never retires (defensive guard)", () => {
     for (const ephemeral of [false, undefined]) {
       expect(
         shouldRetireEphemeralDevbox({

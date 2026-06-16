@@ -796,8 +796,8 @@ export const setHostStatus = internalMutation({
  * destroyed VM, with steering/stopping later hitting a missing devbox), the same
  * way provisionVmFailed handles a torn-down provision. Idempotent: a re-evict
  * just re-enqueues a destroy_vm (itself idempotent — a VM already gone removes
- * its row anyway) and re-fails an already-terminal task to a no-op. Permanent
- * devboxes (no hostId, not ephemeral) are never touched.
+ * its row anyway) and re-fails an already-terminal task to a no-op. Only this
+ * host's ephemeral VMs are touched (the `ephemeral === true` filter).
  */
 export const evictHostEphemerals = internalMutation({
   args: { hostId: v.string() },

@@ -1,7 +1,7 @@
 // VM lifecycle executors for host commands (provision_vm / destroy_vm).
 // Every side effect goes through an injected `Run` so tests can record and
-// stub the exact tart/ssh command sequences. The provisioning steps mirror
-// scripts/provision-devbox.sh, executed from ON the host (no ssh jump).
+// stub the exact tart/ssh command sequences. The provisioning steps run from
+// ON the host (no ssh jump).
 
 export type RunResult = { code: number; stdout: string; stderr: string };
 export type RunOptions = { stdin?: string };
@@ -95,8 +95,8 @@ const IP_ATTEMPTS = 36; // 3 min
 const SSH_ATTEMPTS = 60; // 5 min
 const HEALTH_ATTEMPTS = 36; // 3 min
 
-// Devbox ids are interpolated into remote shell commands; the same pattern
-// scripts/provision-devbox.sh enforces keeps them shell-inert.
+// Devbox ids are interpolated into remote shell commands; this pattern
+// (lowercase letters, digits, hyphens only) keeps them shell-inert.
 const DEVBOX_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 // Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so
@@ -128,8 +128,8 @@ function sshCommand(ip: string, remoteCommand: string): string[] {
   return [...SSH_BASE, `${VM_USER}@${ip}`, remoteCommand];
 }
 
-// Exact pattern from scripts/provision-devbox.sh: kickstart the baked
-// LaunchAgent, bootstrapping it first if this boot never loaded it.
+// Kickstart the baked gateway LaunchAgent, bootstrapping it first if this
+// boot never loaded it.
 const GATEWAY_KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
   "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
@@ -187,8 +187,8 @@ export function createVmExecutors(options: VmExecutorOptions): VmExecutors {
     await must("tart clone", [tart, "clone", config.goldenImage, devboxId]);
 
     // Boot headless, detached: `tart run` blocks for the VM's lifetime, so it
-    // is backgrounded under nohup (same pattern as provision-devbox.sh). The
-    // tart path and VM name are passed as positional args to dodge quoting.
+    // is backgrounded under nohup. The tart path and VM name are passed as
+    // positional args to dodge quoting.
     await must("tart run (detached)", [
       "/bin/sh",
       "-c",

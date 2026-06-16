@@ -19,7 +19,7 @@ export type StoredFile = {
  * command payload grants no access. A blob pruned while the task sat queued is
  * NOT filtered here: the gateway's fetch 404s and it tells the session the file
  * couldn't be downloaded (no silent drop). Shared by hosts.dispatchTaskToSlot
- * (ephemeral start) and the orchestrator (permanent start / steer).
+ * (ephemeral start) and the orchestrator (steer).
  */
 export function resolveDeliverableFiles(
   files: StoredFile[] | undefined,

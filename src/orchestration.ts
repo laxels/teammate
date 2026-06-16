@@ -454,8 +454,8 @@ type DevboxForGuard = {
 
 /**
  * Why a steering message cannot be delivered to this task's session, or null
- * when it can. The devbox.taskId check is load-bearing: a devbox that moved
- * on to another task (permanent devbox reuse, retire races) must never
+ * when it can. The devbox.taskId check is load-bearing: a devbox whose row
+ * has moved on to another task (retire races, stale commands) must never
  * receive messages aimed at its previous occupant.
  */
 export function steerRejection(
