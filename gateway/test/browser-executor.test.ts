@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +15,7 @@ import {
   BrowserError,
   BrowserSession,
   findChrome,
+  type ManualBrowserProcess,
 } from "../src/browser/executor";
 
 // Integration tests against a real headless Chrome (the same binary the
@@ -251,4 +260,139 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
     const state = await session.state();
     expect(state.title).toBe("Counter");
   }, 60_000);
+});
+
+// Unit tests of the non-automated-browser handoff (#117). The spawned Chrome is
+// stubbed via the injected launcher, so these run without a real browser and
+// assert the exact contract that makes the window non-automated: the same
+// persistent profile (so logins carry over) and a command line free of every
+// automation tell.
+describe("BrowserSession.launchManual", () => {
+  // Flags/instrumentation that mark Chrome as automated — exactly what a
+  // non-automated handoff window must NOT carry, or the site's bot detection
+  // defeats the point of the handoff.
+  const AUTOMATION_TELLS =
+    /enable-automation|remote-debugging|--headless|webdriver|--load-extension/;
+  const FAKE_CHROME =
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+  let profileDir: string;
+
+  beforeEach(() => {
+    profileDir = mkdtempSync(join(tmpdir(), "ultraclaude-profile-"));
+  });
+  afterEach(() => {
+    rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  function recordingLauncher(): {
+    launch: (command: string[]) => ManualBrowserProcess;
+    commands: string[][];
+    kills: number[];
+  } {
+    const commands: string[][] = [];
+    const kills: number[] = [];
+    const launch = (command: string[]): ManualBrowserProcess => {
+      const index = commands.length;
+      commands.push(command);
+      return {
+        kill: () => {
+          kills.push(index);
+        },
+      };
+    };
+    return { launch, commands, kills };
+  }
+
+  function sessionWith(launch: (command: string[]) => ManualBrowserProcess) {
+    return new BrowserSession({
+      executablePath: FAKE_CHROME,
+      profileDir,
+      launchManualProcess: launch,
+    });
+  }
+
+  test("opens a non-automated Chrome on the same profile, no automation flags", async () => {
+    const rec = recordingLauncher();
+    await sessionWith(rec.launch).launchManual(
+      "https://accounts.google.com/signin",
+    );
+
+    expect(rec.commands).toHaveLength(1);
+    const argv = rec.commands[0] ?? [];
+    // Same binary, same persistent profile -> the manual window inherits the
+    // automation profile's cookies/logins.
+    expect(argv[0]).toBe(FAKE_CHROME);
+    expect(argv).toContain(`--user-data-dir=${profileDir}`);
+    // The requested URL is opened (last positional arg).
+    expect(argv.at(-1)).toBe("https://accounts.google.com/signin");
+    // The crux: nothing on the command line marks the browser as automated.
+    expect(argv.some((arg) => AUTOMATION_TELLS.test(arg))).toBe(false);
+  });
+
+  test("without a url, opens no page", async () => {
+    const rec = recordingLauncher();
+    await sessionWith(rec.launch).launchManual();
+
+    const argv = rec.commands[0] ?? [];
+    expect(argv).toContain(`--user-data-dir=${profileDir}`);
+    // No positional URL argument — every entry past the binary is a flag.
+    expect(argv.every((arg, i) => i === 0 || arg.startsWith("--"))).toBe(true);
+  });
+
+  test("rejects a non-http(s) url instead of letting Chrome read it as a flag", async () => {
+    const rec = recordingLauncher();
+    const session = sessionWith(rec.launch);
+
+    // A leading-dash value would otherwise reach argv, where Chrome parses it as
+    // a switch — e.g. reintroducing the very automation fingerprint this handoff
+    // is supposed to strip.
+    await expect(session.launchManual("--enable-automation")).rejects.toThrow(
+      BrowserError,
+    );
+    // Non-web schemes are out too (no javascript:/file:/data: into the window).
+    await expect(session.launchManual("file:///etc/passwd")).rejects.toThrow(
+      BrowserError,
+    );
+    await expect(session.launchManual("not a url")).rejects.toThrow(
+      BrowserError,
+    );
+
+    // A rejected url tears nothing down and launches nothing.
+    expect(rec.commands).toHaveLength(0);
+  });
+
+  test("a validated url is passed after a -- end-of-switches separator", async () => {
+    const rec = recordingLauncher();
+    await sessionWith(rec.launch).launchManual(
+      "https://accounts.google.com/signin",
+    );
+
+    const argv = rec.commands[0] ?? [];
+    const sep = argv.indexOf("--");
+    expect(sep).toBeGreaterThan(-1);
+    // Everything after "--" is positional, so the URL can't be read as a switch.
+    expect(argv.slice(sep + 1)).toEqual(["https://accounts.google.com/signin"]);
+  });
+
+  test("a second handoff replaces the first window", async () => {
+    const rec = recordingLauncher();
+    const session = sessionWith(rec.launch);
+    await session.launchManual();
+    await session.launchManual();
+
+    // Two windows launched; the first was killed before the second opened, so
+    // only one Chrome ever holds the profile at a time.
+    expect(rec.commands).toHaveLength(2);
+    expect(rec.kills).toEqual([0]);
+  });
+
+  test("close() kills an open manual window", async () => {
+    const rec = recordingLauncher();
+    const session = sessionWith(rec.launch);
+    await session.launchManual();
+    await session.close();
+
+    expect(rec.kills).toEqual([0]);
+  });
 });
