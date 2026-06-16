@@ -82,6 +82,7 @@ function createFakeControl(
     settle: async () => {
       log.push("settle");
     },
+    launchManual: record("launchManual"),
     ...overrides,
   };
   return { control, log };
@@ -135,6 +136,7 @@ describe("browser MCP tools", () => {
         "browser_tabs",
         "browser_screenshot",
         "browser_console",
+        "browser_handoff_to_desktop",
         "browser_batch",
       ].sort(),
     );
@@ -396,5 +398,50 @@ describe("browser MCP tools", () => {
     const second = await call(tools, "browser_batch", { actions });
     expect(second.isError).toBe(true);
     expect(allText(second)).toContain(FALLBACK_MARKER);
+  });
+
+  test("browser_handoff_to_desktop opens the same profile and points at computer use", async () => {
+    const urls: (string | undefined)[] = [];
+    const { control } = createFakeControl({
+      launchManual: async (url?: string) => {
+        urls.push(url);
+      },
+    });
+    const tools = createBrowserTools(control);
+    const result = await call(tools, "browser_handoff_to_desktop", {
+      url: "https://www.linkedin.com",
+    });
+
+    expect(urls).toEqual(["https://www.linkedin.com"]);
+    expect(result.isError).toBeUndefined();
+    const text = allText(result);
+    expect(text).toContain("computer-use");
+    expect(text).toContain("same profile");
+  });
+
+  test("browser_handoff_to_desktop passes undefined when no url is given", async () => {
+    const urls: (string | undefined)[] = [];
+    const { control } = createFakeControl({
+      launchManual: async (url?: string) => {
+        urls.push(url);
+      },
+    });
+    const tools = createBrowserTools(control);
+    await call(tools, "browser_handoff_to_desktop", {});
+    expect(urls).toEqual([undefined]);
+  });
+
+  test("browser_handoff_to_desktop surfaces a launch failure as an error", async () => {
+    const { control } = createFakeControl({
+      launchManual: async () => {
+        throw new Error(
+          "No Chrome or Chromium executable found on this machine.",
+        );
+      },
+    });
+    const tools = createBrowserTools(control);
+    const result = await call(tools, "browser_handoff_to_desktop", {});
+    expect(result.isError).toBe(true);
+    expect(allText(result)).toContain("No Chrome or Chromium executable");
   });
 });
