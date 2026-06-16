@@ -309,3 +309,77 @@ describe("unknown-type tolerance", () => {
     expect(state.items).toHaveLength(1);
   });
 });
+
+describe("tool results fold into their pill (#113)", () => {
+  const toolUse = assistantMessage("msg_1", [
+    { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } },
+  ]);
+
+  test("a tool_result attaches text + screenshot to the matching tool_use", () => {
+    const state = run([
+      sdk(toolUse),
+      sdk({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "file-a\nfile-b" },
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: "image/png",
+                    data: "AAAA",
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      kind: "tool_use",
+      result: "file-a\nfile-b",
+      imageUrl: "data:image/png;base64,AAAA",
+    });
+  });
+
+  test("string tool_result content attaches as the result text", () => {
+    const state = run([
+      sdk(toolUse),
+      sdk({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "done" },
+          ],
+        },
+      }),
+    ]);
+    expect(state.items[0]).toMatchObject({ result: "done", imageUrl: null });
+  });
+
+  test("a result for an unknown tool_use is dropped (no new row)", () => {
+    const state = run([
+      sdk({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "ghost", content: "x" },
+          ],
+        },
+      }),
+    ]);
+    expect(state.items).toHaveLength(0);
+  });
+
+  test("a tool_use starts with null result until its result lands", () => {
+    const state = run([sdk(toolUse)]);
+    expect(state.items[0]).toMatchObject({ result: null, imageUrl: null });
+  });
+});

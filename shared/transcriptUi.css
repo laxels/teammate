@@ -1,0 +1,114 @@
+/* Styles for the shared transcript primitives (transcriptUi.tsx). Imported by
+ * both web/ and dashboard/, which each define the referenced design tokens
+ * (--paper-raised, --ink, --border, fonts…) in their own :root — the branding
+ * invariant keeps those identical across the two apps. */
+
+.tx-assistant {
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--ink);
+}
+
+/* Tool pill: a content-width gear+name summary that expands to params + result.
+ * align-self keeps it shrink-to-fit inside a flex column (the sidebar); it is
+ * ignored in the timeline's block column, where the pill is a normal block. */
+.tx-tool {
+  align-self: flex-start;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.tx-tool-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-secondary);
+  background: var(--paper-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 9px;
+  user-select: none;
+}
+
+.tx-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tx-tool-summary:hover {
+  border-color: rgba(61, 58, 52, 0.25);
+  color: var(--ink);
+}
+
+.tx-tool[open] > .tx-tool-summary {
+  border-radius: 8px 8px 0 0;
+  border-bottom-color: var(--border-faint);
+}
+
+.tx-tool-gear {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tx-tool-name {
+  font-family: var(--font-mono);
+  color: var(--terracotta-deep);
+}
+
+.tx-tool-body {
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+
+.tx-tool-params,
+.tx-tool-result-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+  background: var(--paper-raised);
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* The result sits below the params, set off by a labelled divider so it reads
+ * as a distinct section of the same pill. */
+.tx-tool-result {
+  border-top: 1px solid var(--border-faint);
+  background: var(--paper-sunken, var(--paper));
+}
+
+.tx-tool-result::before {
+  content: "result";
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 5px 10px 0;
+}
+
+.tx-tool-result-text {
+  background: transparent;
+}
+
+.tx-tool-shot {
+  display: block;
+  max-width: 100%;
+  margin: 6px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}

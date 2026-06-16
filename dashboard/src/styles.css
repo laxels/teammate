@@ -53,7 +53,7 @@ body {
 }
 
 main {
-  max-width: 1180px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 28px 28px 96px;
 }
@@ -537,7 +537,27 @@ section[aria-label="task history"] h2 {
   margin: 0 0 8px;
 }
 
-/* ---- task-details timeline + comment rail (#70) ---- */
+/* ---- task-details prompt + timeline + comment rail (#70, #113) ---- */
+
+.detail-prompt-section {
+  margin-top: 22px;
+}
+
+/* Full-width prompt block, lifted out of the events timeline (#113). */
+.detail-prompt {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--paper-sunken);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  color: var(--ink);
+}
 
 .detail-timeline-section {
   margin-top: 22px;
@@ -561,7 +581,7 @@ section[aria-label="task history"] h2 {
 
 .timeline-rail-col {
   position: relative;
-  flex: 0 0 300px;
+  flex: 0 0 360px;
   align-self: stretch;
 }
 
@@ -579,181 +599,92 @@ section[aria-label="task history"] h2 {
   z-index: 1;
 }
 
+/* Each event row: a fixed timestamp gutter + the event content column. The
+ * timestamp is top-aligned with the event and right-aligned so the column of
+ * timestamps reads as a clean, horizontally-aligned gutter (#113). */
 .tl-row {
-  padding: 5px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 6px 0;
   border-bottom: 1px solid var(--border-faint);
 }
 .tl-row:last-of-type {
   border-bottom: none;
 }
-
-.tl-label {
-  display: inline-block;
-  font-family: var(--font-sans);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  margin-bottom: 4px;
-}
-.tl-label-prompt {
-  color: var(--terracotta-deep);
-}
-
-.tl-prompt-text {
+.tl-time {
+  flex: 0 0 62px;
+  text-align: right;
   font-family: var(--font-mono);
-  font-size: 12.5px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: var(--paper-sunken);
-  border: 1px solid var(--border-faint);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-  margin: 0;
-  max-height: 220px;
-  overflow: auto;
-  color: var(--ink);
-}
-
-.tl-row-status {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.tl-status-dot {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--ink-faint);
-}
-.tl-status-ok,
-.tl-status-rocket {
-  background: var(--ok-green);
-}
-.tl-status-fail,
-.tl-status-stop {
-  background: var(--stop-red);
-}
-.tl-status-needs {
-  background: var(--info-blue);
-}
-.tl-status-label {
-  font-family: var(--font-sans);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: capitalize;
-  color: var(--ink-secondary);
-  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+  padding-top: 1px;
+  user-select: none;
 }
-.tl-status-summary {
+.tl-content {
+  flex: 1 1 0;
   min-width: 0;
-  font-size: 13px;
-  overflow-wrap: anywhere;
 }
 
-.tl-assistant-text {
-  font-size: 13.5px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--ink);
-}
-.tl-expand {
-  margin-top: 3px;
-  background: none;
-  border: none;
-  padding: 0;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--terracotta);
-  cursor: pointer;
-}
-.tl-expand:hover {
-  color: var(--terracotta-deep);
-}
-
-.tl-row-tool {
+/* Status events: a distinct, color-coded pill centered in the content column,
+ * with connector lines reaching the column's left/right edges (never the
+ * timestamp or comment areas) (#113). */
+.tl-statusrow {
   padding: 2px 0;
 }
-.tl-tool-head {
+.tl-statusbar {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
-  padding: 4px 6px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  color: var(--ink-secondary);
+  align-items: center;
+  gap: 12px;
+}
+.tl-statusline {
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--border);
+}
+.tl-statuspill {
+  flex: none;
   font-family: var(--font-sans);
-}
-.tl-tool-head:hover:not(:disabled) {
-  background: var(--paper-sunken);
-}
-.tl-tool-head:disabled {
-  cursor: default;
-}
-.tl-tool-caret {
-  flex: none;
-  color: var(--ink-faint);
-  font-size: 10px;
-  transition: transform 120ms ease;
-  display: inline-block;
-}
-.tl-tool-caret-open {
-  transform: rotate(90deg);
-}
-.tl-tool-kind {
-  flex: none;
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-faint);
+  padding: 3px 14px;
+  border-radius: 999px;
+  border: 1px solid transparent;
 }
-.tl-tool-name {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--terracotta-deep);
-}
-.tl-tool-summary {
-  min-width: 0;
+.tl-statussummary {
+  margin-top: 6px;
+  text-align: center;
   font-size: 12.5px;
   color: var(--ink-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
-.tl-tool-detail {
-  margin: 2px 0 6px 22px;
+
+.tl-status-needs_input .tl-statuspill {
+  color: var(--info-blue);
+  background: var(--info-tint);
+  border-color: rgba(85, 136, 187, 0.45);
 }
-.tl-tool-pre {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: var(--paper-sunken);
-  border: 1px solid var(--border-faint);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  margin: 0 0 8px;
-  max-height: 260px;
-  overflow: auto;
-  color: var(--ink);
+.tl-status-needs_input .tl-statusline {
+  background: rgba(85, 136, 187, 0.35);
 }
-.tl-tool-shot {
-  display: block;
-  max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow);
+.tl-status-failed .tl-statuspill {
+  color: var(--stop-red);
+  background: var(--stop-tint);
+  border-color: rgba(229, 72, 77, 0.45);
+}
+.tl-status-failed .tl-statusline {
+  background: rgba(229, 72, 77, 0.32);
+}
+.tl-status-stopped .tl-statuspill {
+  color: var(--warn-ochre);
+  background: var(--warn-tint);
+  border-color: rgba(184, 134, 13, 0.45);
+}
+.tl-status-stopped .tl-statusline {
+  background: rgba(184, 134, 13, 0.32);
 }
 
 /* ---- comment rail (Notion-style, focus-driven reflow) ---- */
@@ -800,10 +731,10 @@ section[aria-label="task history"] h2 {
 }
 .comment-thumb {
   flex: none;
-  width: 56px;
-  height: 40px;
+  width: 112px;
+  height: 63px;
   object-fit: cover;
-  border-radius: 4px;
+  border-radius: 5px;
   border: 1px solid var(--border);
   background: var(--paper-sunken);
 }
@@ -864,6 +795,32 @@ section[aria-label="task history"] h2 {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* The timeline is a desktop layout: events beside a fixed-width comment rail.
+ * On narrow (mobile-width) windows that fixed rail would squeeze the events
+ * column to nothing and overflow the page, so stack the rail below the events
+ * as a plain top-to-bottom list (the anchor-aligned absolute positioning is
+ * meaningless once it's no longer beside the events). */
+@media (max-width: 760px) {
+  .timeline-grid {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .timeline-rail-col {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  /* height + per-block translateY are set inline by the rail's layout code;
+   * override them so the blocks simply flow in document order. */
+  .comment-rail {
+    height: auto !important;
+  }
+  .comment-block {
+    position: static;
+    transform: none !important;
+    margin-bottom: 10px;
+  }
 }
 
 .comment-editor-text {
@@ -1275,8 +1232,8 @@ section[aria-label="task history"] h2 {
   position: absolute;
   bottom: 0;
   transform: translateX(-50%);
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   background: none;
   border: none;
@@ -1288,29 +1245,35 @@ section[aria-label="task history"] h2 {
   justify-content: center;
 }
 .rec-marker-glyph {
-  width: 14px;
-  height: 14px;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.4));
+  width: 22px;
+  height: 22px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
   transition: transform 120ms ease;
 }
 .rec-marker:hover .rec-marker-glyph {
-  transform: scale(1.3);
+  transform: scale(1.25);
   color: var(--terracotta-deep);
 }
+/* The hover preview can grow to a full multi-line comment card (#113); it wraps
+ * and scrolls rather than truncating to a single ellipsised line. */
 .rec-marker-preview {
   position: absolute;
-  bottom: 22px;
-  max-width: 220px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  bottom: 30px;
+  width: max-content;
+  max-width: min(360px, 60vw);
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
   background: var(--paper-raised);
   color: var(--ink);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow);
-  padding: 5px 9px;
-  font-size: 12px;
+  padding: 8px 11px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-align: left;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -1329,58 +1292,65 @@ section[aria-label="task history"] h2 {
   right: 0;
 }
 
-.rec-capture {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
+/* Loom-style inline comment composer: occupies the control button row's slot so
+ * the video is never covered while commenting (#113). */
+.rec-compose {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
 }
-.rec-capture-scrim {
-  position: absolute;
-  inset: 0;
-  border: none;
-  padding: 0;
-  background: rgba(26, 25, 22, 0.55);
-  cursor: default;
-}
-.rec-capture-card {
-  position: relative;
-  z-index: 1;
-  width: min(72%, 460px);
-  background: var(--paper-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 14px;
-}
-.rec-capture-label {
+.rec-compose-ts {
+  flex: none;
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-secondary);
-  margin-bottom: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(250, 249, 245, 0.8);
 }
-.rec-capture-text {
-  width: 100%;
-  min-height: 84px;
-  resize: vertical;
+.rec-compose-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
   font-family: var(--font-sans);
   font-size: 13.5px;
-  line-height: 1.45;
-  padding: 10px;
+  line-height: 1.4;
+  padding: 8px 10px;
   border: 1px solid var(--terracotta);
   border-radius: var(--radius-sm);
   background: var(--paper);
   color: var(--ink);
+}
+.rec-compose-text:focus {
+  outline: none;
   box-shadow: 0 0 0 3px var(--terracotta-tint);
 }
-.rec-capture-text:focus {
-  outline: none;
+.rec-compose-btn {
+  flex: none;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #faf9f5;
+  background: rgba(250, 249, 245, 0.14);
+  border: 1px solid rgba(250, 249, 245, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
 }
-.rec-capture-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 10px;
+.rec-compose-btn:hover:not(:disabled) {
+  background: rgba(250, 249, 245, 0.24);
+}
+.rec-compose-btn-primary {
+  color: #fff;
+  background: var(--terracotta);
+  border-color: var(--terracotta);
+}
+.rec-compose-btn-primary:hover:not(:disabled) {
+  background: var(--terracotta-deep);
+  border-color: var(--terracotta-deep);
+}
+.rec-compose-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }

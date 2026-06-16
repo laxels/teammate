@@ -89,23 +89,19 @@ function ThemedPlayer({
       load="eager"
       // Global shortcuts (no focus needed); Vidstack suppresses them while a
       // text input / textarea / contenteditable is focused — issue decision #5,
-      // which is also exactly what makes the comment textareas safe to type in.
+      // which is also exactly what makes the comment textarea safe to type in.
       keyTarget="document"
     >
       <MediaProvider />
-      {captureAt !== null && (
-        <CommentCaptureOverlay
-          videoTimeSec={captureAt}
-          onCancel={() => setCaptureAt(null)}
-          onSubmit={async (text) => {
-            await onCreateComment(captureAt, text);
-            setCaptureAt(null);
-          }}
-        />
-      )}
       <PlayerControls
         comments={comments}
+        captureAt={captureAt}
         onArm={(t) => setCaptureAt(t)}
+        onCancelCapture={() => setCaptureAt(null)}
+        onSubmitCapture={async (text) => {
+          if (captureAt !== null) await onCreateComment(captureAt, text);
+          setCaptureAt(null);
+        }}
         onFocusComment={onFocusComment}
       />
     </MediaPlayer>
@@ -114,11 +110,18 @@ function ThemedPlayer({
 
 function PlayerControls({
   comments,
+  captureAt,
   onArm,
+  onCancelCapture,
+  onSubmitCapture,
   onFocusComment,
 }: {
   comments: PlayerComment[];
+  /** The video second being commented at, or null when not capturing. */
+  captureAt: number | null;
   onArm: (videoTimeSec: number) => void;
+  onCancelCapture: () => void;
+  onSubmitCapture: (text: string) => Promise<void>;
   onFocusComment: (id: string) => void;
 }) {
   return (
@@ -134,29 +137,39 @@ function PlayerControls({
           <TimeSlider.Thumb className="rec-slider-thumb" />
         </TimeSlider.Root>
       </Controls.Group>
-      <Controls.Group className="rec-button-row">
-        <PlayButton className="rec-btn">
-          <PlayPauseGlyph />
-        </PlayButton>
-        <SeekButton className="rec-btn" seconds={-10}>
-          <SeekGlyph dir="back" />
-        </SeekButton>
-        <SeekButton className="rec-btn" seconds={10}>
-          <SeekGlyph dir="fwd" />
-        </SeekButton>
-        <span className="rec-time">
-          <Time className="rec-time-cur" type="current" />
-          <span className="rec-time-sep">/</span>
-          <Time className="rec-time-dur" type="duration" />
-        </span>
-        <span className="rec-spacer" />
-        <CommentButton onArm={onArm} />
-        <SpeedControl />
-        <VolumeControl />
-        <FullscreenButton className="rec-btn">
-          <FullscreenGlyph />
-        </FullscreenButton>
-      </Controls.Group>
+      {captureAt !== null ? (
+        // Loom-style: the composer replaces the button row below the seek bar,
+        // so writing a comment never obscures the video (#113).
+        <CommentComposer
+          videoTimeSec={captureAt}
+          onCancel={onCancelCapture}
+          onSubmit={onSubmitCapture}
+        />
+      ) : (
+        <Controls.Group className="rec-button-row">
+          <PlayButton className="rec-btn">
+            <PlayPauseGlyph />
+          </PlayButton>
+          <SeekButton className="rec-btn" seconds={-10}>
+            <SeekGlyph dir="back" />
+          </SeekButton>
+          <SeekButton className="rec-btn" seconds={10}>
+            <SeekGlyph dir="fwd" />
+          </SeekButton>
+          <span className="rec-time">
+            <Time className="rec-time-cur" type="current" />
+            <span className="rec-time-sep">/</span>
+            <Time className="rec-time-dur" type="duration" />
+          </span>
+          <span className="rec-spacer" />
+          <CommentButton onArm={onArm} />
+          <SpeedControl />
+          <VolumeControl />
+          <FullscreenButton className="rec-btn">
+            <FullscreenGlyph />
+          </FullscreenButton>
+        </Controls.Group>
+      )}
     </Controls.Root>
   );
 }
@@ -224,7 +237,9 @@ function CommentMarkers({
   );
 }
 
-function CommentCaptureOverlay({
+/** Loom-style inline composer that replaces the control button row while a
+ * comment is being written, so the video stays fully visible (#113). */
+function CommentComposer({
   videoTimeSec,
   onSubmit,
   onCancel,
@@ -254,60 +269,44 @@ function CommentCaptureOverlay({
   };
 
   return (
-    <div className="rec-capture">
-      {/* Real button backdrop: click (or keyboard-activate) to cancel, without
-          an interactive-div a11y violation. The card sits above it. */}
-      <button
-        type="button"
-        className="rec-capture-scrim"
-        aria-label="Cancel comment"
+    <Controls.Group className="rec-compose">
+      <span className="rec-compose-ts">{formatTimecode(videoTimeSec)}</span>
+      <textarea
+        // biome-ignore lint/a11y/noAutofocus: the box exists to be typed in
+        autoFocus
+        className="rec-compose-text"
+        value={text}
         disabled={saving}
-        onClick={() => {
-          if (!saving) onCancel();
+        rows={1}
+        placeholder="Add a comment…  (Enter to save · Shift+Enter for a newline · Esc to cancel)"
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void submit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            if (!saving) onCancel();
+          }
         }}
       />
-      <div className="rec-capture-card">
-        <div className="rec-capture-label">
-          Comment at {formatTimecode(videoTimeSec)}
-        </div>
-        <textarea
-          // biome-ignore lint/a11y/noAutofocus: the box exists to be typed in
-          autoFocus
-          className="rec-capture-text"
-          value={text}
-          disabled={saving}
-          placeholder="Add a comment…  (Enter to save · Shift+Enter for a newline · Esc to cancel)"
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              if (!saving) onCancel();
-            }
-          }}
-        />
-        <div className="rec-capture-actions">
-          <button
-            type="button"
-            className="act"
-            onClick={onCancel}
-            disabled={saving}
-          >
-            cancel
-          </button>
-          <button
-            type="button"
-            className="act act-primary"
-            onClick={() => void submit()}
-            disabled={saving}
-          >
-            {saving ? "saving…" : "comment"}
-          </button>
-        </div>
-      </div>
-    </div>
+      <button
+        type="button"
+        className="rec-compose-btn"
+        onClick={onCancel}
+        disabled={saving}
+      >
+        cancel
+      </button>
+      <button
+        type="button"
+        className="rec-compose-btn rec-compose-btn-primary"
+        onClick={() => void submit()}
+        disabled={saving}
+      >
+        {saving ? "saving…" : "comment"}
+      </button>
+    </Controls.Group>
   );
 }
 

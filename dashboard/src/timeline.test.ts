@@ -14,112 +14,162 @@ function ev(
 }
 
 describe("buildTimeline", () => {
-  test("prepends the prompt as the first row", () => {
-    const rows = buildTimeline([], "do the thing", 1000);
-    expect(rows).toEqual([{ kind: "prompt", ts: 1000, text: "do the thing" }]);
+  test("is empty for no events (the prompt is rendered separately now)", () => {
+    expect(buildTimeline([])).toEqual([]);
   });
 
   test("drops throttled progress echoes (superseded by assistant_text)", () => {
-    const rows = buildTimeline(
-      [
-        ev({ type: "progress", ts: 2, summary: "working" }),
-        ev({
-          type: "assistant_text",
-          ts: 2,
-          summary: "working",
-          detail: "working in full",
-        }),
-      ],
-      "p",
-      1,
-    );
-    expect(rows.map((r) => r.kind)).toEqual(["prompt", "assistant"]);
+    const rows = buildTimeline([
+      ev({ type: "progress", ts: 2, summary: "working" }),
+      ev({
+        type: "assistant_text",
+        ts: 2,
+        summary: "working",
+        detail: "working in full",
+      }),
+    ]);
+    expect(rows.map((r) => r.kind)).toEqual(["assistant"]);
   });
 
-  test("shapes tool calls/results with their tool name + image", () => {
-    const rows = buildTimeline(
-      [
-        ev({
-          type: "tool_call",
-          ts: 3,
-          tool: "left_click",
-          summary: "left_click",
-          detail: '{"coordinate":[1,2]}',
-        }),
-        ev({
-          type: "tool_result",
-          ts: 4,
-          tool: "left_click",
-          summary: "Left-clicked.",
-          detail: "Left-clicked (1, 2).",
-          imageUrl: "https://blob/shot.png",
-        }),
-      ],
-      "p",
-      1,
-    );
-    expect(rows[1]).toEqual({
-      kind: "tool_call",
-      ts: 3,
-      tool: "left_click",
-      summary: "left_click",
-      detail: '{"coordinate":[1,2]}',
-    });
-    expect(rows[2]).toMatchObject({
-      kind: "tool_result",
-      tool: "left_click",
-      imageUrl: "https://blob/shot.png",
+  test("assistant rows carry the full detail text, not the excerpt", () => {
+    const rows = buildTimeline([
+      ev({
+        type: "assistant_text",
+        ts: 2,
+        summary: "short excerpt…",
+        detail: "the complete narration",
+      }),
+    ]);
+    expect(rows[0]).toEqual({
+      kind: "assistant",
+      ts: 2,
+      text: "the complete narration",
     });
   });
 
-  test("tolerates older-backend events missing the new fields (no 'undefined' leaks)", () => {
-    // Simulate a staggered rollout: events from a Convex backend that predates
-    // #70 carry only { type, summary, ts }.
+  test("assistant falls back to summary when there is no detail", () => {
+    const rows = buildTimeline([
+      ev({ type: "assistant_text", ts: 2, summary: "only summary" }),
+    ]);
+    expect(rows[0]).toEqual({
+      kind: "assistant",
+      ts: 2,
+      text: "only summary",
+    });
+  });
+
+  test("folds a tool_call and its tool_result into one combined pill", () => {
+    const rows = buildTimeline([
+      ev({
+        type: "tool_call",
+        ts: 3,
+        tool: "left_click",
+        summary: "left_click",
+        detail: '{"coordinate":[1,2]}',
+      }),
+      ev({
+        type: "tool_result",
+        ts: 4,
+        tool: "left_click",
+        summary: "Left-clicked.",
+        detail: "Left-clicked (1, 2).",
+        imageUrl: "https://blob/shot.png",
+      }),
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "tool",
+        ts: 3,
+        tool: "left_click",
+        params: '{"coordinate":[1,2]}',
+        result: "Left-clicked (1, 2).",
+        imageUrl: "https://blob/shot.png",
+      },
+    ]);
+  });
+
+  test("pairs interleaved calls/results by tool name, oldest first", () => {
+    const rows = buildTimeline([
+      ev({ type: "tool_call", ts: 1, tool: "Bash", detail: "b1" }),
+      ev({ type: "tool_call", ts: 2, tool: "Read", detail: "r1" }),
+      ev({ type: "tool_result", ts: 3, tool: "Read", detail: "read done" }),
+      ev({ type: "tool_result", ts: 4, tool: "Bash", detail: "bash done" }),
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "tool",
+        ts: 1,
+        tool: "Bash",
+        params: "b1",
+        result: "bash done",
+        imageUrl: null,
+      },
+      {
+        kind: "tool",
+        ts: 2,
+        tool: "Read",
+        params: "r1",
+        result: "read done",
+        imageUrl: null,
+      },
+    ]);
+  });
+
+  test("an orphan tool_result renders as a result-only pill", () => {
+    const rows = buildTimeline([
+      ev({
+        type: "tool_result",
+        ts: 4,
+        tool: "left_click",
+        detail: "clicked",
+        imageUrl: "https://blob/shot.png",
+      }),
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "tool",
+        ts: 4,
+        tool: "left_click",
+        params: null,
+        result: "clicked",
+        imageUrl: "https://blob/shot.png",
+      },
+    ]);
+  });
+
+  test("tolerates older-backend events missing the new fields", () => {
+    // A pre-#70 backend emits only { type, summary, ts }.
     const old = [
       { type: "tool_call", summary: "left_click", ts: 3 },
       { type: "tool_result", summary: "clicked", ts: 4 },
       { type: "assistant_text", summary: "thinking", ts: 5 },
     ] as unknown as RawEvent[];
-    const rows = buildTimeline(old, "p", 1);
-    // No tool name on old events -> the generic "tool" fallback; new fields null.
-    expect(rows[1]).toEqual({
-      kind: "tool_call",
-      ts: 3,
-      tool: "tool",
-      summary: "left_click",
-      detail: null,
-    });
-    expect(rows[2]).toEqual({
-      kind: "tool_result",
-      ts: 4,
-      tool: null,
-      summary: "clicked",
-      detail: null,
-      imageUrl: null,
-    });
-    expect(rows[3]).toEqual({
-      kind: "assistant",
-      ts: 5,
-      summary: "thinking",
-      detail: null,
-    });
+    const rows = buildTimeline(old);
+    // call + result fold into one pill with the generic "tool" fallback name.
+    expect(rows).toEqual([
+      {
+        kind: "tool",
+        ts: 3,
+        tool: "tool",
+        params: null,
+        result: null,
+        imageUrl: null,
+      },
+      { kind: "assistant", ts: 5, text: "thinking" },
+    ]);
   });
 
-  test("keeps status events and ignores unknown types", () => {
-    const rows = buildTimeline(
-      [
-        ev({ type: "started", ts: 2, summary: "Started" }),
-        ev({ type: "mystery_future_type", ts: 3, summary: "?" }),
-        ev({ type: "completed", ts: 4, summary: "Done" }),
-      ],
-      "p",
-      1,
-    );
-    expect(rows.map((r) => r.kind)).toEqual(["prompt", "status", "status"]);
-    expect(
-      rows
-        .filter((r) => r.kind === "status")
-        .map((r) => (r as { status: string }).status),
-    ).toEqual(["started", "completed"]);
+  test("keeps only needs_input/failed/stopped statuses; hides started/completed", () => {
+    const rows = buildTimeline([
+      ev({ type: "started", ts: 2, summary: "Started" }),
+      ev({ type: "needs_input", ts: 3, summary: "Need a hand" }),
+      ev({ type: "mystery_future_type", ts: 4, summary: "?" }),
+      ev({ type: "completed", ts: 5, summary: "Done" }),
+      ev({ type: "failed", ts: 6, summary: "Boom" }),
+    ]);
+    expect(rows.map((r) => (r.kind === "status" ? r.status : r.kind))).toEqual([
+      "needs_input",
+      "failed",
+    ]);
   });
 });
