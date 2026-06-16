@@ -50,6 +50,15 @@ export type WaitForOptions = {
   seconds?: number;
 };
 
+/** A non-automated Chrome process launched by launchManual(), reduced to the
+ * one operation the session needs over its lifetime (kill it to free the
+ * profile when automation resumes). Bun's Subprocess satisfies this. */
+export type ManualBrowserProcess = { kill: () => void };
+export type ManualBrowserLauncher = (command: string[]) => ManualBrowserProcess;
+
+const DEFAULT_MANUAL_LAUNCHER: ManualBrowserLauncher = (command) =>
+  Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+
 export type BrowserSessionOptions = {
   /** Defaults to findChrome(). */
   executablePath?: string;
@@ -58,6 +67,9 @@ export type BrowserSessionOptions = {
   /** Headed by default so the desktop/VNC shows the window. */
   headless?: boolean;
   actionTimeoutMs?: number;
+  /** Spawns the non-automated Chrome for launchManual(); defaults to Bun.spawn.
+   * Injected in tests to assert the command line carries no automation flags. */
+  launchManualProcess?: ManualBrowserLauncher;
 };
 
 export class BrowserError extends Error {}
@@ -102,15 +114,21 @@ export class BrowserSession {
   #profileDir: string;
   #headless: boolean;
   #actionTimeoutMs: number;
+  #launchManualProcess: ManualBrowserLauncher;
   #contextPromise: Promise<BrowserContext> | null = null;
   #activePage: Page | null = null;
   #consoleBuffers = new WeakMap<Page, ConsoleMessage[]>();
+  /** A non-automated Chrome opened by launchManual(), holding the profile until
+   * automation resumes (the next #launch() kills it to take the profile back). */
+  #manualChrome: ManualBrowserProcess | null = null;
 
   constructor(options: BrowserSessionOptions = {}) {
     this.#executablePath = options.executablePath ?? null;
     this.#profileDir = options.profileDir ?? DEFAULT_PROFILE_DIR;
     this.#headless = options.headless ?? false;
     this.#actionTimeoutMs = options.actionTimeoutMs ?? ACTION_TIMEOUT_MS;
+    this.#launchManualProcess =
+      options.launchManualProcess ?? DEFAULT_MANUAL_LAUNCHER;
   }
 
   async navigate(url: string): Promise<void> {
@@ -324,7 +342,59 @@ export class BrowserSession {
     await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
   }
 
+  /**
+   * Quit the automated Chrome and reopen the SAME persistent profile in a
+   * plain, non-automated Chrome window — for sites that refuse automated
+   * browsers (Google account sign-in, anti-bot walls like LinkedIn) even when
+   * the profile is already logged in. The new window carries this profile's
+   * cookies/logins and is meant to be driven by the pixel computer-use tools,
+   * not the browser_* tools. Automation resumes (and this window is killed) the
+   * moment any browser_* tool relaunches Playwright on the profile (#launch).
+   */
+  async launchManual(url?: string): Promise<void> {
+    const executablePath = this.#executablePath ?? findChrome();
+    if (executablePath === null) {
+      throw new BrowserError(
+        "No Chrome or Chromium executable found on this machine.",
+      );
+    }
+    // Free the profile first: the automated Chrome (and any prior manual
+    // window) holds a ProcessSingleton lock on this --user-data-dir, so a second
+    // Chrome on it would merely focus the existing window instead of starting a
+    // clean process. Cap the close so a wedged Playwright Chrome can't hang the
+    // handoff — #clearProfileLock force-evicts whatever is left.
+    await Promise.race([
+      this.close(),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+    this.#clearProfileLock();
+    mkdirSync(this.#profileDir, { recursive: true });
+    // A plain Chrome: no --remote-debugging-pipe, no --enable-automation, no
+    // Playwright instrumentation — so navigator.webdriver is undefined and the
+    // session presents as an ordinary human one, which is exactly what these
+    // sites gate on.
+    this.#manualChrome = this.#launchManualProcess([
+      executablePath,
+      `--user-data-dir=${this.#profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--window-size=1440,900",
+      ...(url !== undefined ? [url] : []),
+    ]);
+  }
+
+  #killManual(): void {
+    if (this.#manualChrome === null) return;
+    try {
+      this.#manualChrome.kill();
+    } catch {
+      // Already gone (the VNC user quit it, it crashed) — nothing to reap.
+    }
+    this.#manualChrome = null;
+  }
+
   async close(): Promise<void> {
+    this.#killManual();
     const pending = this.#contextPromise;
     this.#contextPromise = null;
     this.#activePage = null;
@@ -369,6 +439,15 @@ export class BrowserSession {
       throw new BrowserError(
         "No Chrome or Chromium executable found on this machine.",
       );
+    }
+    // Resuming automation: a non-automated window from launchManual() may still
+    // hold the profile. It must go before Playwright can reopen the same
+    // --user-data-dir; #launchWithRecovery's lock eviction is the backstop if
+    // the kill hasn't fully released the lock yet.
+    if (this.#manualChrome !== null) {
+      this.#killManual();
+      this.#clearProfileLock();
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     mkdirSync(this.#profileDir, { recursive: true });
     const context = await chromium.launchPersistentContext(this.#profileDir, {

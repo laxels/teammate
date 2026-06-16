@@ -156,6 +156,17 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
   couple of failed `browser_*` attempts on a step rather than grinding on DOM/JS
   workarounds — and the browser tools append a one-line fallback nudge to their
   error results once actions fail repeatedly in a row.
+- A third path handles sites that refuse an automated browser outright (Google
+  account sign-in, anti-bot walls like LinkedIn) even when the profile is logged
+  in: `browser_handoff_to_desktop` (#117) quits the Playwright Chrome and
+  reopens the *same* persistent profile in a plain, non-automated Chrome window
+  (`BrowserSession.launchManual` — no `--remote-debugging-pipe`/Playwright
+  instrumentation, so `navigator.webdriver` is undefined) that the agent then
+  drives with the pixel computer-use tools. Chrome's ProcessSingleton allows
+  only one process per `--user-data-dir`, so the handoff must quit automation
+  first; resuming automation is implicit — the next `browser_*` call kills the
+  manual window and relaunches Playwright on the profile. A sign-in completed in
+  the manual window therefore persists for later automation.
 - The gateway owns one Chrome instance for its lifetime, launched lazily by
   `playwright-core` over a stdio pipe (`launchPersistentContext`) — NOT
   attached over CDP: playwright's bundled WebSocket client never completes its
