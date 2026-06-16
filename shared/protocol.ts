@@ -264,15 +264,20 @@ export type DevboxEvent = {
   devboxId: string;
   taskId: string;
   type: DevboxEventType;
-  // One- or two-sentence human-readable summary: for status events the
-  // Slack-suitable status line; for info events a short preview of `detail`.
+  // Human-readable body shown everywhere this event surfaces (Slack + dashboard).
+  // For status events it is the Slack-suitable status line. For assistant_text —
+  // and the assistant-derived progress / completed / failed lines — it is the
+  // FULL response, never excerpted (#114): a retrieval task's answer is the
+  // deliverable, so it is shown whole. For tool_call / tool_result info events it
+  // is a one-line preview of `detail`. Always clipped to DETAIL_MAX_CHARS.
   summary: string;
   ts: number;
   // ---- Info-event enrichment (set only on info events) ----
-  // The full, un-excerpted body the expandable retro view renders: the complete
-  // assistant text turn, the tool input JSON, or the tool result text. Capped at
-  // DETAIL_MAX_CHARS so a single event row stays well under Convex's ~1 MB doc
-  // limit even under the high info-event volume.
+  // The full, un-excerpted body the expandable retro view renders: the tool input
+  // JSON or the tool result text. (assistant_text no longer sets this — its full
+  // text already rides in `summary` per #114.) Capped at DETAIL_MAX_CHARS so a
+  // single event row stays well under Convex's ~1 MB doc limit even under the
+  // high info-event volume.
   detail?: string;
   // Tool name for tool_call / tool_result events (e.g. "left_click").
   tool?: string;

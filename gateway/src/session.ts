@@ -511,20 +511,24 @@ export class SessionManager {
       // the progress throttle: this is exactly the event the user must see.
       const question = extractAskUserQuestion(message);
       if (question !== null) {
-        this.#emit("needs_input", excerpt(question));
+        // #114: the question is assistant text the user must read to answer —
+        // emit it in full, clipped only for size.
+        this.#emit("needs_input", clip(question, DETAIL_MAX_CHARS));
         return;
       }
       const text = extractAssistantText(message);
       if (text !== null) {
+        // #114: assistant text is never summarized — emit the whole response so
+        // the user sees all of it everywhere (the dashboard timeline AND the
+        // Slack thread). Clip only to stay under the per-row / Slack size cap;
+        // whitespace is preserved, so there is no separate `detail` excerpt.
+        const full = clip(text, DETAIL_MAX_CHARS);
         // Full narration for the retro timeline (#70): every turn, un-throttled,
         // info-only. The dashboard renders this as the assistant's words and
         // hides the throttled `progress` echo below to avoid duplication.
-        this.#emitInfo("assistant_text", excerpt(text), {
-          detail: clip(text, DETAIL_MAX_CHARS),
-        });
-        // The throttled excerpt still drives the Slack thread + "running"
-        // liveness, exactly as before.
-        if (this.#throttle.tryAcquire()) this.#emit("progress", excerpt(text));
+        this.#emit("assistant_text", full);
+        // The throttled echo drives the Slack thread + "running" liveness.
+        if (this.#throttle.tryAcquire()) this.#emit("progress", full);
       }
       // Each tool the model invoked this turn -> a collapsible timeline entry.
       for (const use of extractToolUses(message)) {
