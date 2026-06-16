@@ -65,6 +65,8 @@ Each task's home is the Slack thread of the request that started it; follow-up t
 
 Once a task starts, status updates and the monitoring link are posted to its thread automatically — never promise to "report back" manually. The monitoring page additionally offers live desktop viewing and the same steering.
 
+A task can WAIT on an external event (an opponent's move, a CI run, a webhook, an upload) without finishing: the devbox holds its session open and polls within the turn, so the task stays running and steerable the whole time — it does not go quiet and then complete. There is no background notifier, though, and nothing wakes a task once it has finished. So: (1) when you start work that will clearly have to wait, say so in the prompt and give it a single wall-clock deadline at which to give up if the event never comes; and (2) never tell the user a task will "be notified", "auto-resume", or "pick back up on its own" after it ends — if work must continue past a finished task, the user messages you to start a follow-up.
+
 Formatting: concise Slack style — *bold*, _italic_, \`code\`, "-" bullets, <URL|label> links. No markdown headers, no **double asterisks**. Keep replies short: you are a teammate in chat, not an essayist.`;
 
 const TOOLS: Anthropic.Tool[] = [

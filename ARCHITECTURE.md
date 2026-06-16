@@ -146,6 +146,23 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 9. A Convex cron flags tasks with no events for >30 min and the orchestrator
    checks on them proactively.
 
+### Waiting on external events (#69)
+
+A task goes terminal — and a terminal ephemeral devbox is reaped after the
+grace period — only when the SDK emits a `result`, i.e. when the agent ends its
+turn. So a task that must wait on something outside the devbox (an opponent's
+move, a CI run, a webhook) waits *inside* its single turn rather than ending it:
+it never goes terminal, so it is never reaped, and stays steerable throughout.
+There is no event-driven wake-up — the Agent SDK has none and the gateway wires
+none in (mode (b) in the ticket). The discipline lives in the devbox session's
+system prompt (`gateway/src/prompt.ts`): poll in a loop, cap every individual
+wait/read at **≤4 minutes** then re-check, and stop at a single self-checked
+wall-clock deadline. That one cap is load-bearing — it keeps each cycle under
+the 10-min stall watchdog (`session.ts`), under the 30-min staleness cron (each
+cycle's tool results count as activity), and under the ~5-min prompt-cache TTL.
+The orchestrator sets a deadline in the spec for work it expects to wait, and
+never promises a finished task will be "notified" or "auto-resume".
+
 ## Browser automation
 
 - Devbox sessions get two complementary browser paths: Playwright `browser_*`
