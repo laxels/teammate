@@ -46,11 +46,11 @@ verified by the Slack signature instead.
 
 ## Devbox placement
 
-By default every task runs on a **fresh ephemeral devbox VM** — there is nothing
+Every task runs on a **fresh ephemeral devbox VM** — there is nothing
 to register. When a task starts, `hosts.allocateEphemeral` provisions a VM on an
 available Mac host (`provisioning` → `busy` → `retiring` → row deleted by
 `hosts.removeDevbox`) and derives its gateway URL from `TAILNET_SUFFIX`.
-Ephemeral devboxes never enter the warm pool — no task reuses a previous task's
+A devbox is never reused — no task runs on a previous task's
 VM. When all host VM slots are full, the task simply **queues** and drains the
 moment a slot frees (`hosts.placeQueuedEphemeralTasks`, scheduled on every
 `removeDevbox` and host `heartbeat`).

@@ -25,9 +25,9 @@ export const getByDevboxId = internalQuery({
 
 /**
  * Records a DevboxEvent posted by a gateway: appends to taskEvents, moves the
- * task to the mapped TaskStatus, and refreshes the devbox row (lastSeenAt +
- * busy/warm). Returns whether the task exists so the caller can decide
- * whether to notify Slack.
+ * task to the mapped TaskStatus, and refreshes the devbox row (lastSeenAt, and
+ * busy/retiring as the event warrants). Returns whether the task exists so the
+ * caller can decide whether to notify Slack.
  */
 export const recordEvent = internalMutation({
   args: {
