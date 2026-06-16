@@ -15,6 +15,7 @@ import {
 } from "../../shared/protocol";
 import type { EventExtra, EventSender, ScreenshotUploader } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
+import { DEVBOX_SYSTEM_PROMPT } from "./prompt";
 import type { ScreenRecorder } from "./recorder";
 import {
   clip,
@@ -259,6 +260,11 @@ export class SessionManager {
     const options: Options = {
       model: MODEL,
       effort: request.effort ?? DEFAULT_EFFORT,
+      // The session's only standing instruction (the SDK default is an empty
+      // system prompt): how to wait on an external event in-turn rather than
+      // ending the turn and being reaped mid-task (#69). The per-task spec
+      // rides in as the first user message.
+      systemPrompt: DEVBOX_SYSTEM_PROMPT,
       permissionMode: "bypassPermissions",
       // AskUserQuestion is the one tool bypassPermissions can't auto-allow
       // (requiresUserInteraction): without this callback the CLI fails the
