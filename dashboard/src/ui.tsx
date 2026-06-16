@@ -100,6 +100,37 @@ export function ArmedButton({
   );
 }
 
+/**
+ * Toggle a task's archived flag (#122). Reversible and low-stakes, so it skips
+ * the ArmedButton confirm step. The label flips to reflect the current state;
+ * the result note lands via the page's action-note channel like stop/retry.
+ */
+export function ArchiveButton({
+  taskId,
+  archived,
+  onNote,
+}: {
+  taskId: string;
+  archived: boolean;
+  onNote: (taskId: string, note: string) => void;
+}) {
+  const secret = useDashboardSecret();
+  const setArchived = useMutation(api.dashboard.setTaskArchived);
+  return (
+    <button
+      type="button"
+      className="act"
+      onClick={() => {
+        void setArchived({ secret, taskId, archived: !archived }).then((r) =>
+          onNote(taskId, r.ok ? `✓ ${r.note}` : `✗ ${r.reason}`),
+        );
+      }}
+    >
+      {archived ? "unarchive" : "archive"}
+    </button>
+  );
+}
+
 export function FollowUp({
   taskId,
   onNote,

@@ -23,6 +23,7 @@ import { playerState } from "./recording";
 import { spaLink } from "./router";
 import { buildTimeline, type TimelineRow } from "./timeline";
 import {
+  ArchiveButton,
   ArmedButton,
   calendar,
   clock,
@@ -230,6 +231,13 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
                   ),
                 );
               }}
+            />
+          )}
+          {terminal && (
+            <ArchiveButton
+              taskId={task.taskId}
+              archived={task.archived}
+              onNote={postNote}
             />
           )}
         </span>

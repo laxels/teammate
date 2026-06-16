@@ -155,6 +155,11 @@ export default defineSchema({
     // Devbox screen recording lifecycle + stored .mov (see recordings.ts and
     // gateway/src/recorder.ts). Absent on tasks that predate the feature.
     recording: v.optional(taskRecordingValidator),
+    // Dashboard-local bookkeeping (#122): an archived task drops out of every
+    // status filter on the fleet board and surfaces only under the "archived"
+    // filter. Purely cosmetic — it never touches `status` or the task's
+    // execution. Absent/false => not archived (the default for every row).
+    archived: v.optional(v.boolean()),
   })
     .index("by_task_id", ["taskId"])
     .index("by_status", ["status"])

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { convexTest } from "convex-test";
-import type { TaskEffort } from "../shared/protocol";
+import type { TaskEffort, TaskStatus } from "../shared/protocol";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
@@ -85,6 +85,121 @@ function loadTask(t: Tester, taskId: string) {
       .unique(),
   );
 }
+
+/** Seeds a task with an explicit status and archived flag (#122 tests). */
+async function seedTask(
+  t: Tester,
+  taskId: string,
+  opts: { status: TaskStatus; archived?: boolean },
+): Promise<void> {
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("tasks", {
+      taskId,
+      title: taskId,
+      prompt: "do the thing",
+      status: opts.status,
+      placement: "ephemeral",
+      slackChannel: "C1",
+      slackThreadTs: "100.0",
+      slackUser: "U1",
+      ...(opts.archived === undefined ? {} : { archived: opts.archived }),
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+}
+
+const ALL_PAGES = { numItems: 50, cursor: null };
+
+function listTaskIds(
+  t: Tester,
+  args: { status?: TaskStatus; archived?: boolean },
+) {
+  return t
+    .query(api.dashboard.listTasks, {
+      secret: SECRET,
+      paginationOpts: ALL_PAGES,
+      ...args,
+    })
+    .then((r) => r.page.map((task) => task.taskId).sort());
+}
+
+test("setTaskArchived archives and unarchives a terminal task (#122)", async () => {
+  const t = newT();
+  await seedTask(t, "task-done", { status: "completed" });
+
+  const archive = await t.mutation(api.dashboard.setTaskArchived, {
+    secret: SECRET,
+    taskId: "task-done",
+    archived: true,
+  });
+  expect(archive.ok).toBe(true);
+  expect((await loadTask(t, "task-done"))?.archived).toBe(true);
+
+  const unarchive = await t.mutation(api.dashboard.setTaskArchived, {
+    secret: SECRET,
+    taskId: "task-done",
+    archived: false,
+  });
+  expect(unarchive.ok).toBe(true);
+  expect((await loadTask(t, "task-done"))?.archived).toBe(false);
+});
+
+test("setTaskArchived refuses to archive a non-terminal task (#122)", async () => {
+  const t = newT();
+  await seedTask(t, "task-live", { status: "running" });
+
+  const result = await t.mutation(api.dashboard.setTaskArchived, {
+    secret: SECRET,
+    taskId: "task-live",
+    archived: true,
+  });
+  expect(result.ok).toBe(false);
+  expect((await loadTask(t, "task-live"))?.archived).toBeUndefined();
+});
+
+test("setTaskArchived rejects an unknown task and a bad secret (#122)", async () => {
+  const t = newT();
+  await seedTask(t, "task-done", { status: "completed" });
+
+  const missing = await t.mutation(api.dashboard.setTaskArchived, {
+    secret: SECRET,
+    taskId: "nope",
+    archived: true,
+  });
+  expect(missing.ok).toBe(false);
+
+  const unauthorized = await t.mutation(api.dashboard.setTaskArchived, {
+    secret: "wrong",
+    taskId: "task-done",
+    archived: true,
+  });
+  expect(unauthorized.ok).toBe(false);
+  // The bad-secret call must not have mutated the row.
+  expect((await loadTask(t, "task-done"))?.archived).toBeUndefined();
+});
+
+test("listTasks hides archived tasks from the default and status filters (#122)", async () => {
+  const t = newT();
+  await seedTask(t, "live-archived", { status: "completed", archived: true });
+  await seedTask(t, "live-plain", { status: "completed", archived: false });
+  await seedTask(t, "legacy-plain", { status: "failed" }); // archived absent
+
+  // Default ("all") filter: archived row excluded, the rest present.
+  expect(await listTaskIds(t, {})).toEqual(["legacy-plain", "live-plain"]);
+  // Status filter: still excludes the archived "completed" row.
+  expect(await listTaskIds(t, { status: "completed" })).toEqual(["live-plain"]);
+});
+
+test("listTasks archived:true returns only archived tasks (#122)", async () => {
+  const t = newT();
+  await seedTask(t, "a1", { status: "completed", archived: true });
+  await seedTask(t, "a2", { status: "failed", archived: true });
+  await seedTask(t, "plain", { status: "completed", archived: false });
+
+  expect(await listTaskIds(t, { archived: true })).toEqual(["a1", "a2"]);
+});
 
 // #91: a dashboard retry must re-run faithfully, including the effort level the
 // original was started with — otherwise a "low effort" task silently reverts to
