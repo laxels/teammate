@@ -9,14 +9,11 @@
 //                       $HOME/ultraclaude-dashboard/server-config.json. Lives
 //                       OUTSIDE DASHBOARD_DIR so the browser can't fetch it.
 
-import { unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import {
   type FrameGrabConfig,
   grabFrame,
   parseFrameGrabRequest,
-  type RecordingDownload,
   timingSafeEqual,
 } from "./frame-grab";
 
@@ -72,11 +69,26 @@ async function frameGrabConfig(): Promise<FrameGrabConfig | null> {
   return cachedConfig;
 }
 
-/** Spawn ffmpeg, resolve its stdout PNG bytes; reject on non-zero exit, a
- * timeout (SIGKILL), or a missing binary. stdout AND stderr are drained
- * concurrently: ffmpeg can be chatty (the mov demuxer emits a warning per odd
- * read), and an undrained stderr pipe fills its ~64 KB OS buffer and deadlocks
- * the process until the timeout SIGKILLs it. */
+/** Read a subprocess stdout stream fully into a REAL Uint8Array.
+ *
+ * #102: `new Response(stream).bytes()` hands back a bare `ArrayBuffer` (not a
+ * Uint8Array) for a multi-chunk subprocess stdout — and an `ArrayBuffer` has no
+ * `.buffer`, so the old upload body `png.slice().buffer` silently evaluated to
+ * `undefined` and POSTed an EMPTY body → 0-byte image blobs. (Single-chunk
+ * output happened to come back as a Uint8Array, which masked the bug for tiny
+ * frames.) `new Uint8Array(await ...arrayBuffer())` always yields a proper
+ * Uint8Array. */
+export async function readAll(
+  stream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> {
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Spawn ffmpeg, resolve its stdout PNG bytes as a Uint8Array; reject on a
+ * non-zero exit, a timeout (SIGKILL), or a missing binary. stdout AND stderr
+ * are drained concurrently: ffmpeg can be chatty (the mov demuxer emits a
+ * warning per odd read), and an undrained stderr pipe fills its ~64 KB OS
+ * buffer and deadlocks the process until the timeout SIGKILLs it. */
 export async function runFfmpeg(
   args: string[],
   timeoutMs: number,
@@ -89,7 +101,7 @@ export async function runFfmpeg(
   const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
   try {
     const [bytes, err, exitCode] = await Promise.all([
-      new Response(proc.stdout).bytes(),
+      readAll(proc.stdout),
       new Response(proc.stderr).text().catch(() => ""),
       proc.exited,
     ]);
@@ -99,75 +111,6 @@ export async function runFfmpeg(
     return bytes;
   } finally {
     clearTimeout(timer);
-  }
-}
-
-export async function removeFile(path: string): Promise<void> {
-  await unlink(path).catch(() => undefined);
-}
-
-/** Hard cap on a single recording download. A signed storage URL that stalls
- * mid-stream must not pin an /api/frame slot open forever (only
- * MAX_CONCURRENT_FRAMES exist; pinning them all wedges the endpoint at 429).
- * Generous vs. a real screen recording — this only bounds the pathological. */
-export const RECORDING_DOWNLOAD_TIMEOUT_MS = 60_000;
-/** Disk/abuse sanity ceiling for a downloaded recording (1 GiB). A genuine
- * task recording is far smaller; this just stops a wrong/hostile URL from
- * filling the host disk. */
-export const MAX_RECORDING_BYTES = 1_073_741_824;
-
-/** Stream the recording at `url` to a unique temp .mov ffmpeg can seek locally
- * (#102), bounded by `timeoutMs` (whole-download abort) and `maxBytes`. Streams
- * straight to disk rather than buffering the body in JS memory. Any non-ok
- * outcome cleans up its own partial file; success hands the path to the caller,
- * which removes it after extraction. */
-export async function downloadRecording(
-  url: string,
-  opts: { timeoutMs: number; maxBytes: number } = {
-    timeoutMs: RECORDING_DOWNLOAD_TIMEOUT_MS,
-    maxBytes: MAX_RECORDING_BYTES,
-  },
-): Promise<RecordingDownload> {
-  const path = join(tmpdir(), `ultraclaude-frame-${crypto.randomUUID()}.mov`);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
-  const writer = Bun.file(path).writer();
-  let total = 0;
-  let ok = false;
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok || res.body === null) {
-      return { ok: false, reason: "fetch-failed" };
-    }
-    const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > opts.maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        return { ok: false, reason: "too-large" };
-      }
-      writer.write(value);
-    }
-    if (total === 0) {
-      return { ok: false, reason: "empty" };
-    }
-    ok = true;
-    return { ok: true, path, bytes: total };
-  } catch {
-    // Timeout abort, network error, or a stream read error.
-    return { ok: false, reason: "fetch-failed" };
-  } finally {
-    clearTimeout(timer);
-    // Flush+close the sink (completes the file on success) before any cleanup.
-    // FileSink.end() may return a number or a Promise; await tolerates both.
-    try {
-      await writer.end();
-    } catch {
-      // Already closed / errored — nothing more to flush.
-    }
-    if (!ok) await removeFile(path);
   }
 }
 
@@ -209,12 +152,7 @@ async function handleFrameGrab(request: Request): Promise<Response> {
   }
   inFlight++;
   try {
-    const result = await grabFrame(config, req, {
-      fetchFn: fetch,
-      runFfmpeg,
-      downloadRecording,
-      removeFile,
-    });
+    const result = await grabFrame(config, req, { fetchFn: fetch, runFfmpeg });
     return result.ok
       ? Response.json({ storageId: result.storageId })
       : Response.json({ error: result.reason }, { status: result.status });
