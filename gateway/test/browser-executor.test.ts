@@ -340,6 +340,41 @@ describe("BrowserSession.launchManual", () => {
     expect(argv.every((arg, i) => i === 0 || arg.startsWith("--"))).toBe(true);
   });
 
+  test("rejects a non-http(s) url instead of letting Chrome read it as a flag", async () => {
+    const rec = recordingLauncher();
+    const session = sessionWith(rec.launch);
+
+    // A leading-dash value would otherwise reach argv, where Chrome parses it as
+    // a switch — e.g. reintroducing the very automation fingerprint this handoff
+    // is supposed to strip.
+    await expect(session.launchManual("--enable-automation")).rejects.toThrow(
+      BrowserError,
+    );
+    // Non-web schemes are out too (no javascript:/file:/data: into the window).
+    await expect(session.launchManual("file:///etc/passwd")).rejects.toThrow(
+      BrowserError,
+    );
+    await expect(session.launchManual("not a url")).rejects.toThrow(
+      BrowserError,
+    );
+
+    // A rejected url tears nothing down and launches nothing.
+    expect(rec.commands).toHaveLength(0);
+  });
+
+  test("a validated url is passed after a -- end-of-switches separator", async () => {
+    const rec = recordingLauncher();
+    await sessionWith(rec.launch).launchManual(
+      "https://accounts.google.com/signin",
+    );
+
+    const argv = rec.commands[0] ?? [];
+    const sep = argv.indexOf("--");
+    expect(sep).toBeGreaterThan(-1);
+    // Everything after "--" is positional, so the URL can't be read as a switch.
+    expect(argv.slice(sep + 1)).toEqual(["https://accounts.google.com/signin"]);
+  });
+
   test("a second handoff replaces the first window", async () => {
     const rec = recordingLauncher();
     const session = sessionWith(rec.launch);

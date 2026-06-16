@@ -352,6 +352,27 @@ export class BrowserSession {
    * moment any browser_* tool relaunches Playwright on the profile (#launch).
    */
   async launchManual(url?: string): Promise<void> {
+    // Validate BEFORE any teardown: a bad url must fail fast without tearing
+    // down the live automated session. An unconstrained string here is a real
+    // hazard — Chrome reads a leading-dash positional (e.g. "--enable-automation"
+    // or "--load-extension=…") as a SWITCH, which would reintroduce exactly the
+    // automation fingerprint this handoff exists to remove. Only absolute
+    // http(s) URLs are openable; everything else is rejected.
+    if (url !== undefined) {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new BrowserError(
+          `launchManual needs an absolute http(s) URL, got: ${url}`,
+        );
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new BrowserError(
+          `launchManual only opens http(s) URLs, got: ${url}`,
+        );
+      }
+    }
     const executablePath = this.#executablePath ?? findChrome();
     if (executablePath === null) {
       throw new BrowserError(
@@ -372,14 +393,16 @@ export class BrowserSession {
     // A plain Chrome: no --remote-debugging-pipe, no --enable-automation, no
     // Playwright instrumentation — so navigator.webdriver is undefined and the
     // session presents as an ordinary human one, which is exactly what these
-    // sites gate on.
+    // sites gate on. The "--" ends Chrome's switch parsing, so the validated URL
+    // is read as a positional value and can never be mistaken for a flag (a
+    // defense-in-depth backstop to the validation above).
     this.#manualChrome = this.#launchManualProcess([
       executablePath,
       `--user-data-dir=${this.#profileDir}`,
       "--no-first-run",
       "--no-default-browser-check",
       "--window-size=1440,900",
-      ...(url !== undefined ? [url] : []),
+      ...(url !== undefined ? ["--", url] : []),
     ]);
   }
 
