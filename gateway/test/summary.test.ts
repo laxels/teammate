@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DETAIL_MAX_CHARS } from "../../shared/protocol";
 import {
   clip,
   excerpt,
@@ -74,9 +75,20 @@ describe("mapResultMessage", () => {
     });
   });
 
-  test("summaries respect the 300-char cap", () => {
-    const mapped = mapResultMessage(resultSuccess("y".repeat(1000)));
-    expect(mapped.summary.length).toBeLessThanOrEqual(300);
+  test("the success summary is the full result, not a 300-char excerpt (#114)", () => {
+    // A retrieval-style final answer is the deliverable: show it whole.
+    const long = "y".repeat(1000);
+    expect(mapResultMessage(resultSuccess(long)).summary).toBe(long);
+  });
+
+  test("the success summary preserves whitespace and clips only at DETAIL_MAX_CHARS (#114)", () => {
+    const multiline = "line one\n\nline two\n  indented";
+    expect(mapResultMessage(resultSuccess(multiline)).summary).toBe(multiline);
+
+    const huge = "z".repeat(DETAIL_MAX_CHARS + 500);
+    const summary = mapResultMessage(resultSuccess(huge)).summary;
+    expect(summary.length).toBe(DETAIL_MAX_CHARS);
+    expect(summary.endsWith("…")).toBe(true);
   });
 });
 

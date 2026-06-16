@@ -257,6 +257,31 @@ describe("SessionManager", () => {
     expect(session.start({ taskId: "task-2", prompt: "next" })).toBe(true);
   });
 
+  test("a long, multi-line assistant response is emitted in full, never excerpted (#114)", async () => {
+    // A retrieval-style turn: the assistant's text IS the output. It is longer
+    // than the old 300-char Slack excerpt and carries newlines + indentation
+    // that whitespace-collapsing used to destroy.
+    const body = `Here are the results:\n${Array.from(
+      { length: 40 },
+      (_, i) => `  ${i}. item number ${i}`,
+    ).join("\n")}`;
+    expect(body.length).toBeGreaterThan(300); // would have been cut before #114
+    const { queryFn } = createEchoQueryFn(() => [
+      assistantMessage(body),
+      resultSuccess(body),
+    ]);
+    const { session, events } = makeSession(queryFn);
+
+    session.start({ taskId: "task-1", prompt: "retrieve everything" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    // assistant_text (dashboard timeline), progress (Slack thread), and
+    // completed (Slack) all carry the full text verbatim — whitespace intact.
+    expect(events.find((e) => e.type === "assistant_text")?.summary).toBe(body);
+    expect(events.find((e) => e.type === "progress")?.summary).toBe(body);
+    expect(events.find((e) => e.type === "completed")?.summary).toBe(body);
+  });
+
   test("progress events are throttled to one per window", async () => {
     const clock = { t: 0 };
     const queryFn: QueryFn = (params) => {
