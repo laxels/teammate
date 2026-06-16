@@ -55,6 +55,7 @@ function publicTask(task: Doc<"tasks">) {
     updatedAt: task.updatedAt,
     startedAt: task.startedAt,
     finishedAt: task.finishedAt,
+    archived: task.archived ?? false,
   };
 }
 
@@ -105,27 +106,46 @@ export const activeTasks = query({
   },
 });
 
-/** Paginated task list, newest first, optionally filtered by status. */
+/**
+ * Paginated task list, newest first, optionally filtered by status.
+ *
+ * Archived tasks (#122) are hidden from every status filter and surface only
+ * when `archived: true` is passed (the dashboard's dedicated "archived" filter).
+ * `archived` is an optional field, so the predicate keys off `!== true` /
+ * `=== true` to treat absent rows as not-archived.
+ */
 export const listTasks = query({
   args: {
     secret: v.string(),
     paginationOpts: paginationOptsValidator,
     status: v.optional(taskStatusValidator),
+    archived: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     if (!secretOk(args.secret)) {
       return { page: [], isDone: true, continueCursor: "" };
     }
+    const onlyArchived = args.archived === true;
     const results =
       args.status === undefined
         ? await ctx.db
             .query("tasks")
+            .filter((q) =>
+              onlyArchived
+                ? q.eq(q.field("archived"), true)
+                : q.neq(q.field("archived"), true),
+            )
             .order("desc")
             .paginate(args.paginationOpts)
         : await ctx.db
             .query("tasks")
             .withIndex("by_status", (q) =>
               q.eq("status", args.status as Doc<"tasks">["status"]),
+            )
+            .filter((q) =>
+              onlyArchived
+                ? q.eq(q.field("archived"), true)
+                : q.neq(q.field("archived"), true),
             )
             .order("desc")
             .paginate(args.paginationOpts);
@@ -436,6 +456,39 @@ export const retryTask = mutation({
       note: placement.placed
         ? "retry placed on a fresh devbox (~1-2 min to provision)"
         : "retry queued — every VM slot is busy (the fleet may be scaling up)",
+    };
+  },
+});
+
+/**
+ * Archive or unarchive a task (#122). Archiving is dashboard-local
+ * bookkeeping: it hides the task from every status filter (the "archived"
+ * filter is the only place it then shows) without touching `status` or the
+ * task's execution, so there's deliberately no Slack note. Only terminal tasks
+ * can be archived — a live task must be stopped first; unarchiving is always
+ * allowed (an archived task is terminal by construction).
+ */
+export const setTaskArchived = mutation({
+  args: { secret: v.string(), taskId: v.string(), archived: v.boolean() },
+  handler: async (ctx, args): Promise<ActionResult> => {
+    if (!secretOk(args.secret)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    const task = await loadTask(ctx, args.taskId);
+    if (task === null) {
+      return { ok: false, reason: `no task with id ${args.taskId}` };
+    }
+    if (args.archived && !isTerminalTaskStatus(task.status)) {
+      return {
+        ok: false,
+        reason: `task is still ${task.status} — only finished tasks can be archived`,
+      };
+    }
+    await ctx.db.patch(task._id, { archived: args.archived });
+    return {
+      ok: true,
+      taskId: args.taskId,
+      note: args.archived ? "archived" : "unarchived",
     };
   },
 });

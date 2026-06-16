@@ -6,6 +6,7 @@ import { spaLink, taskPath, useRoute } from "./router";
 import { TaskDetailPage } from "./TaskDetailPage";
 import {
   type ActiveTask,
+  ArchiveButton,
   ArmedButton,
   calendar,
   duration,
@@ -19,6 +20,9 @@ import {
   useNowTicker,
 } from "./ui";
 
+// "archived" is a view, not a status: it shows only archived tasks, while every
+// other filter hides them (#122). It's kept in this list so it renders as just
+// another chip; the query mapping below routes it to listTasks' `archived` arg.
 const STATUS_FILTERS = [
   "all",
   "running",
@@ -27,6 +31,7 @@ const STATUS_FILTERS = [
   "completed",
   "failed",
   "stopped",
+  "archived",
 ] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
@@ -224,20 +229,27 @@ function HistoryRow({
         </span>
         <span className="row-actions">
           {TERMINAL.has(task.status) && (
-            <ArmedButton
-              label="retry"
-              armedLabel="confirm retry"
-              onFire={() => {
-                void retry({ secret, taskId: task.taskId }).then((result) => {
-                  onNote(
-                    task.taskId,
-                    result.ok
-                      ? `✓ ${result.note} → ${result.taskId}`
-                      : `✗ ${result.reason}`,
-                  );
-                });
-              }}
-            />
+            <>
+              <ArmedButton
+                label="retry"
+                armedLabel="confirm retry"
+                onFire={() => {
+                  void retry({ secret, taskId: task.taskId }).then((result) => {
+                    onNote(
+                      task.taskId,
+                      result.ok
+                        ? `✓ ${result.note} → ${result.taskId}`
+                        : `✗ ${result.reason}`,
+                    );
+                  });
+                }}
+              />
+              <ArchiveButton
+                taskId={task.taskId}
+                archived={task.archived}
+                onNote={onNote}
+              />
+            </>
           )}
         </span>
       </div>
@@ -255,7 +267,14 @@ function FleetBoard() {
   const [filter, setFilter] = useState<StatusFilter>("all");
   const history = usePaginatedQuery(
     api.dashboard.listTasks,
-    { secret, ...(filter === "all" ? {} : { status: filter }) },
+    {
+      secret,
+      ...(filter === "all"
+        ? {}
+        : filter === "archived"
+          ? { archived: true }
+          : { status: filter }),
+    },
     { initialNumItems: 25 },
   );
   const { notes, postNote } = useActionNotes();
