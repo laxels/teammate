@@ -23,6 +23,11 @@ export type TranscriptItem =
       toolUseId: string | null;
       name: string;
       input: unknown;
+      /** Result text, folded in from the matching tool_result user message so
+       * the pill can show call + result together (#113). Null until it lands. */
+      result: string | null;
+      /** A screenshot attached to the result (computer-use), as a data URL. */
+      imageUrl: string | null;
     };
 
 export type TranscriptState = {
@@ -203,6 +208,8 @@ function applyAssistantMessage(
           toolUseId,
           name,
           input: block.input,
+          result: null,
+          imageUrl: null,
         });
         seq += 1;
       }
@@ -258,11 +265,16 @@ function applyUserMessage(
   if (apiMessage === null) {
     return state;
   }
+  // A user message carries either tool results (fold them into their pills) or
+  // a steer/prompt (rendered as a bubble) — never both in practice.
+  const withResults = attachToolResults(state, apiMessage.content);
   const text = extractUserText(apiMessage.content);
   if (text === null || text.length === 0) {
-    // tool_result-only user messages and other plumbing: not rendered.
-    return state;
+    // tool_result-only user messages and other plumbing: not rendered as a row,
+    // but their results have been folded into the matching tool pills above.
+    return withResults;
   }
+  state = withResults;
   // Dedupe against our own optimistic echo.
   const pendingIndex = state.pendingLocalTexts.indexOf(text);
   if (pendingIndex >= 0) {
@@ -299,6 +311,84 @@ function extractUserText(content: unknown): string | null {
     }
   }
   return parts.length > 0 ? parts.join("\n") : null;
+}
+
+/** A tool result read off a user message, keyed back to its tool_use. */
+type ParsedToolResult = {
+  toolUseId: string;
+  text: string;
+  imageUrl: string | null;
+};
+
+/**
+ * Fold every tool_result block in a user message into the matching tool_use
+ * item (by tool_use_id), attaching its text + first screenshot. Unmatched
+ * results (no such pill in view) are simply dropped — the same graceful no-op
+ * the prior reducer had for tool_result-only messages.
+ */
+function attachToolResults(
+  state: TranscriptState,
+  content: unknown,
+): TranscriptState {
+  if (!Array.isArray(content)) {
+    return state;
+  }
+  const byId = new Map<string, ParsedToolResult>();
+  for (const rawBlock of content) {
+    const parsed = readToolResult(asRecord(rawBlock));
+    if (parsed !== null) byId.set(parsed.toolUseId, parsed);
+  }
+  if (byId.size === 0) {
+    return state;
+  }
+  let changed = false;
+  const items = state.items.map((item) => {
+    if (item.kind !== "tool_use" || item.toolUseId === null) return item;
+    const parsed = byId.get(item.toolUseId);
+    if (parsed === undefined) return item;
+    changed = true;
+    return {
+      ...item,
+      result: parsed.text !== "" ? parsed.text : item.result,
+      imageUrl: parsed.imageUrl ?? item.imageUrl,
+    };
+  });
+  return changed ? { ...state, items } : state;
+}
+
+/** Parse a single block as a tool_result; null if it isn't one. */
+function readToolResult(
+  block: Record<string, unknown> | null,
+): ParsedToolResult | null {
+  if (block === null || block.type !== "tool_result") return null;
+  if (typeof block.tool_use_id !== "string") return null;
+  const content = block.content;
+  if (typeof content === "string") {
+    return { toolUseId: block.tool_use_id, text: content, imageUrl: null };
+  }
+  if (!Array.isArray(content)) {
+    return { toolUseId: block.tool_use_id, text: "", imageUrl: null };
+  }
+  const parts: string[] = [];
+  let imageUrl: string | null = null;
+  for (const rawBlock of content) {
+    const cb = asRecord(rawBlock);
+    if (cb === null) continue;
+    if (cb.type === "text" && typeof cb.text === "string") {
+      parts.push(cb.text);
+    } else if (cb.type === "image" && imageUrl === null) {
+      const source = asRecord(cb.source);
+      if (
+        source !== null &&
+        source.type === "base64" &&
+        typeof source.media_type === "string" &&
+        typeof source.data === "string"
+      ) {
+        imageUrl = `data:${source.media_type};base64,${source.data}`;
+      }
+    }
+  }
+  return { toolUseId: block.tool_use_id, text: parts.join("\n"), imageUrl };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

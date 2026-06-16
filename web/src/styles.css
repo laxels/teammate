@@ -154,72 +154,8 @@ body {
   overflow-wrap: break-word;
 }
 
-.assistant-text {
-  font-size: 13.5px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  color: var(--ink);
-}
-
-/* ---- Tool chips ---- */
-
-.tool-chip {
-  align-self: flex-start;
-  max-width: 100%;
-}
-
-.tool-chip > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  list-style: none;
-  cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--ink-secondary);
-  background: var(--paper-raised);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 3px 9px;
-  user-select: none;
-}
-
-.tool-chip > summary::-webkit-details-marker {
-  display: none;
-}
-
-.tool-chip > summary:hover {
-  border-color: rgba(61, 58, 52, 0.25);
-  color: var(--ink);
-}
-
-.tool-chip[open] > summary {
-  border-radius: 8px 8px 0 0;
-  border-bottom-color: var(--border-faint);
-}
-
-.tool-gear {
-  font-size: 11px;
-  line-height: 1;
-}
-
-.tool-chip > pre {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--ink-secondary);
-  background: var(--paper-raised);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 8px 8px;
-  padding: 8px 10px;
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-}
+/* Assistant text + tool pills now come from the shared transcript primitives
+ * (shared/transcriptUi.css), imported via shared/transcriptUi.tsx. */
 
 /* ---- Thinking indicator ---- */
 

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { AssistantText, ToolPill } from "../../shared/transcriptUi";
 import { CommentRail, type RailComment } from "./CommentRail";
 import {
   commentEventTime,
@@ -24,6 +25,7 @@ import { buildTimeline, type TimelineRow } from "./timeline";
 import {
   ArmedButton,
   calendar,
+  clock,
   duration,
   FollowUp,
   MastClock,
@@ -114,10 +116,7 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
   const comments = detail.comments ?? [];
   const events = detail.events ?? [];
 
-  // Prompt anchors the timeline at the recording's start (so it lines up with
-  // video 0), falling back to when the task first ran, then creation.
-  const promptTs = recordingStartedAt ?? task.startedAt ?? task.createdAt;
-  const rows = buildTimeline(events, task.prompt, promptTs);
+  const rows = buildTimeline(events);
 
   const playerComments: PlayerComment[] = comments.map((c) => ({
     id: c.id,
@@ -259,8 +258,13 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
         )}
       </section>
 
+      <section className="detail-prompt-section">
+        <h3 className="detail-section-label">prompt</h3>
+        <pre className="detail-prompt">{task.prompt}</pre>
+      </section>
+
       <section className="detail-timeline-section">
-        <h3 className="detail-section-label">events &amp; comments</h3>
+        <h3 className="detail-section-label">timeline</h3>
         <TimelineGrid
           rows={rows}
           comments={railComments}
@@ -401,102 +405,53 @@ function TimelineGrid({
   );
 }
 
-const STATUS_GLYPH: Record<string, string> = {
-  started: "rocket",
-  needs_input: "needs",
-  completed: "ok",
-  failed: "fail",
-  stopped: "stop",
+const STATUS_LABEL: Record<string, string> = {
+  needs_input: "needs input",
+  failed: "failed",
+  stopped: "stopped",
 };
 
+/** One timeline entry: a left timestamp column (top-aligned, horizontally
+ * aligned across rows) and the event content. */
 function TimelineEventRow({ row }: { row: TimelineRow }) {
-  const [expanded, setExpanded] = useState(false);
-
-  if (row.kind === "prompt") {
-    return (
-      <div className="tl-row tl-row-prompt" data-anchor-ts={row.ts}>
-        <span className="tl-label tl-label-prompt">Prompt</span>
-        <pre className="tl-prompt-text">{row.text}</pre>
-      </div>
-    );
-  }
-
-  if (row.kind === "status") {
-    return (
-      <div
-        className={`tl-row tl-row-status status-ev-${row.status}`}
-        data-anchor-ts={row.ts}
-      >
-        <span
-          className={`tl-status-dot tl-status-${STATUS_GLYPH[row.status] ?? "ok"}`}
-        />
-        <span className="tl-status-label">{row.status.replace("_", " ")}</span>
-        <span className="tl-status-summary">{row.summary}</span>
-      </div>
-    );
-  }
-
-  if (row.kind === "assistant") {
-    const hasMore = row.detail !== null && row.detail !== row.summary;
-    return (
-      <div className="tl-row tl-row-assistant" data-anchor-ts={row.ts}>
-        <span className="tl-label tl-label-assistant">assistant</span>
-        <div className="tl-assistant-body">
-          <div className="tl-assistant-text">
-            {expanded && row.detail !== null ? row.detail : row.summary}
-          </div>
-          {hasMore && (
-            <button
-              type="button"
-              className="tl-expand"
-              onClick={() => setExpanded((v) => !v)}
-            >
-              {expanded ? "show less" : "show more"}
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // tool_call / tool_result — collapsed by default, expand to detail (+ image).
-  const isResult = row.kind === "tool_result";
-  const image = isResult ? row.imageUrl : null;
-  const expandable = row.detail !== null || image !== null;
   return (
-    <div
-      className={`tl-row tl-row-tool ${isResult ? "tl-row-tool-result" : "tl-row-tool-call"}`}
-      data-anchor-ts={row.ts}
-    >
-      <button
-        type="button"
-        className="tl-tool-head"
-        onClick={() => expandable && setExpanded((v) => !v)}
-        aria-expanded={expandable ? expanded : undefined}
-        disabled={!expandable}
-      >
-        <span
-          className={`tl-tool-caret${expanded ? " tl-tool-caret-open" : ""}`}
-        >
-          {expandable ? "▸" : "·"}
+    <div className={`tl-row tl-row-${row.kind}`} data-anchor-ts={row.ts}>
+      <span className="tl-time">{clock(row.ts)}</span>
+      <div className="tl-content">
+        <TimelineRowContent row={row} />
+      </div>
+    </div>
+  );
+}
+
+function TimelineRowContent({ row }: { row: TimelineRow }) {
+  if (row.kind === "assistant") {
+    return <AssistantText text={row.text} />;
+  }
+  if (row.kind === "tool") {
+    return (
+      <ToolPill
+        name={row.tool}
+        params={row.params ?? ""}
+        result={row.result}
+        imageUrl={row.imageUrl}
+      />
+    );
+  }
+  // status — a distinct, color-coded pill centered in the content column, with
+  // connector lines reaching the column's left/right edges (not the timestamp
+  // or comment areas).
+  return (
+    <div className={`tl-statusrow tl-status-${row.status}`}>
+      <div className="tl-statusbar">
+        <span className="tl-statusline" aria-hidden="true" />
+        <span className="tl-statuspill">
+          {STATUS_LABEL[row.status] ?? row.status.replace("_", " ")}
         </span>
-        <span className="tl-tool-kind">{isResult ? "result" : "call"}</span>
-        {row.tool !== null && <code className="tl-tool-name">{row.tool}</code>}
-        <span className="tl-tool-summary">{row.summary}</span>
-      </button>
-      {expanded && expandable && (
-        <div className="tl-tool-detail">
-          {row.detail !== null && (
-            <pre className="tl-tool-pre">{row.detail}</pre>
-          )}
-          {image !== null && (
-            <img
-              className="tl-tool-shot"
-              src={image}
-              alt="tool result screenshot"
-            />
-          )}
-        </div>
+        <span className="tl-statusline" aria-hidden="true" />
+      </div>
+      {row.summary !== "" && (
+        <div className="tl-statussummary">{row.summary}</div>
       )}
     </div>
   );

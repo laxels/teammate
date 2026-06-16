@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AssistantText, ToolPill } from "../../shared/transcriptUi";
 import type { TranscriptItem, TranscriptState } from "./transcript";
 
 const COMPOSER_MAX_HEIGHT_PX = 140;
@@ -136,42 +137,30 @@ function TranscriptEntry({
         </div>
       );
     case "assistant_text":
-      return <div className="assistant-text">{item.text}</div>;
+      return <AssistantText text={item.text} />;
     case "tool_use":
       return (
-        <ToolChip name={item.name} input={item.input} onToggle={onToggle} />
+        // Expanding a pill grows the transcript; onToggle re-sticks so the
+        // freshly revealed content stays in view instead of opening below the
+        // fold. The result (when it has arrived) shows below the call params.
+        <ToolPill
+          name={item.name}
+          params={stringifyToolInput(item.input)}
+          result={item.result}
+          imageUrl={item.imageUrl}
+          onToggle={onToggle}
+        />
       );
   }
 }
 
-function ToolChip({
-  name,
-  input,
-  onToggle,
-}: {
-  name: string;
-  input: unknown;
-  onToggle: () => void;
-}) {
-  let pretty: string;
+/** Pretty-print a tool's input for the pill body, tolerating non-JSON values. */
+function stringifyToolInput(input: unknown): string {
   try {
-    pretty = JSON.stringify(input, null, 2) ?? "null";
+    return JSON.stringify(input, null, 2) ?? "null";
   } catch {
-    pretty = String(input);
+    return String(input);
   }
-  return (
-    // Expanding a chip grows the transcript; re-stick so the freshly revealed
-    // content stays in view instead of opening below the fold.
-    <details className="tool-chip" onToggle={onToggle}>
-      <summary>
-        <span className="tool-gear" aria-hidden="true">
-          {"⚙"}
-        </span>
-        {name}
-      </summary>
-      <pre>{pretty}</pre>
-    </details>
-  );
 }
 
 function ThinkingIndicator() {
