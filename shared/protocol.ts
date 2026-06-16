@@ -138,8 +138,8 @@ export type GatewayHealth = {
 // devbox id + tailnet suffix) and enqueues the task's start command BEFORE
 // the VM exists — the freshly booted gateway picks it up on first
 // subscription. After the task reaches a terminal status the devbox goes to
-// "retiring" (never back to warm) and is destroyed after a short grace
-// period, so no task ever runs on a previous task's VM.
+// "retiring" (never reused) and is destroyed after a short grace period, so no
+// task ever runs on a previous task's VM.
 
 export type HostCommandKind = "provision_vm" | "destroy_vm";
 

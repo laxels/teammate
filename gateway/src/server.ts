@@ -308,8 +308,9 @@ export function createGatewayServer(
           );
         }
         // Reject a concurrent/duplicate task BEFORE any download or cleanup, so
-        // a rejected task never disturbs the running task's inbox. (A 409 here
-        // is the same signal index.ts's evict-and-retry path already handles.)
+        // a rejected task never disturbs the running task's inbox. (index.ts
+        // surfaces a 409 here as a failed task — a single-task VM should never
+        // receive a second start.)
         if (session.status().running) {
           return Response.json(
             {
@@ -399,7 +400,9 @@ export function createGatewayServer(
         // An interrupt may carry { taskId } (orchestrator stop_task): only
         // stop the session if it still belongs to that task, so a stale stop
         // never kills a later occupant. A bodyless/empty interrupt stays
-        // unconditional — that's the local eviction path (index.ts).
+        // unconditional — a defensive hard-stop fallback; its old caller
+        // (index.ts's evict-and-retry) is gone, and live stops are task-scoped
+        // (the /ws/steer Stop button interrupts over the socket, not here).
         let body: unknown = null;
         try {
           body = await request.json();

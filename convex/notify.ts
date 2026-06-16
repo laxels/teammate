@@ -171,11 +171,12 @@ export const devboxEvent = internalAction({
         task.slackUser !== undefined
           ? `<@${task.slackUser}> `
           : "";
-      // A terminal event sends an ephemeral devbox into "retiring": warn that
-      // the monitoring page is about to disappear with the VM.
+      // A terminal event sends the devbox into "retiring": warn that the
+      // monitoring page is about to disappear with the VM. Every devbox is a
+      // single-task VM now, so any terminal status retires it.
       const incomingStatus = statusForEvent(args.type);
       const retireNote =
-        devbox?.ephemeral === true &&
+        devbox !== null &&
         incomingStatus !== undefined &&
         isTerminalTaskStatus(incomingStatus)
           ? `\n_This devbox (and its monitoring page) retires in ~${RETIRE_GRACE_MIN} minutes._`

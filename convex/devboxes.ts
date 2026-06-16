@@ -5,7 +5,7 @@ import {
   shouldApplyTaskStatus,
   statusForEvent,
 } from "../shared/protocol";
-import { shouldRetireEphemeralDevbox } from "../src/hostPool";
+import { shouldRetireDevbox } from "../src/hostPool";
 import { internal } from "./_generated/api";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { devboxEventTypeValidator } from "./constants";
@@ -112,8 +112,7 @@ export const recordEvent = internalMutation({
       const eligible = devbox.status !== "retiring" && isCurrentAssignment;
       const retire =
         eligible &&
-        shouldRetireEphemeralDevbox({
-          ephemeral: devbox.ephemeral,
+        shouldRetireDevbox({
           statusApplied: applied,
           incomingStatus,
         });

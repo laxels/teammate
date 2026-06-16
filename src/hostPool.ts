@@ -129,24 +129,19 @@ export function ephemeralGatewayUrl(
   return `http://${devboxId}.${tailnetSuffix}:8787`;
 }
 
-// ---- Ephemeral retire decision ----
+// ---- Retire decision ----
 
 /**
- * Whether a recorded devbox event should push the devbox into "retiring":
- * only an APPLIED terminal task status on an EPHEMERAL devbox qualifies. The
- * ephemeral guard is defensive — every devbox is ephemeral now — and unapplied
- * events (late duplicates that didn't change task state) must not trigger a
- * second retire. A retired devbox is never reused: no task ever runs on a
- * previous task's VM.
+ * Whether a recorded devbox event should push the devbox into "retiring": an
+ * APPLIED terminal task status. Every devbox is single-task now, so any task
+ * reaching a terminal status retires its VM (the old ephemeral-vs-permanent
+ * split is gone — #107). Unapplied events (late duplicates that didn't change
+ * task state) must not trigger a second retire. A retired devbox is never
+ * reused: no task ever runs on a previous task's VM.
  */
-export function shouldRetireEphemeralDevbox(args: {
-  ephemeral: boolean | undefined;
+export function shouldRetireDevbox(args: {
   statusApplied: boolean;
   incomingStatus: TaskStatus;
 }): boolean {
-  return (
-    args.ephemeral === true &&
-    args.statusApplied &&
-    isTerminalTaskStatus(args.incomingStatus)
-  );
+  return args.statusApplied && isTerminalTaskStatus(args.incomingStatus);
 }

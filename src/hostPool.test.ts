@@ -8,7 +8,7 @@ import {
   nextHostName,
   pickHost,
   pickProvisioner,
-  shouldRetireEphemeralDevbox,
+  shouldRetireDevbox,
 } from "./hostPool";
 import { monitoringUrl } from "./orchestration";
 
@@ -143,15 +143,14 @@ describe("ephemeralGatewayUrl", () => {
   });
 });
 
-describe("shouldRetireEphemeralDevbox", () => {
+describe("shouldRetireDevbox", () => {
   const TERMINAL: TaskStatus[] = ["completed", "failed", "stopped"];
   const NON_TERMINAL: TaskStatus[] = ["queued", "running", "needs_input"];
 
-  test("applied terminal statuses retire an ephemeral devbox", () => {
+  test("applied terminal statuses retire the devbox", () => {
     for (const incomingStatus of TERMINAL) {
       expect(
-        shouldRetireEphemeralDevbox({
-          ephemeral: true,
+        shouldRetireDevbox({
           statusApplied: true,
           incomingStatus,
         }),
@@ -162,8 +161,7 @@ describe("shouldRetireEphemeralDevbox", () => {
   test("non-terminal statuses never retire", () => {
     for (const incomingStatus of NON_TERMINAL) {
       expect(
-        shouldRetireEphemeralDevbox({
-          ephemeral: true,
+        shouldRetireDevbox({
           statusApplied: true,
           incomingStatus,
         }),
@@ -171,22 +169,9 @@ describe("shouldRetireEphemeralDevbox", () => {
     }
   });
 
-  test("a devbox with ephemeral unset or false never retires (defensive guard)", () => {
-    for (const ephemeral of [false, undefined]) {
-      expect(
-        shouldRetireEphemeralDevbox({
-          ephemeral,
-          statusApplied: true,
-          incomingStatus: "completed",
-        }),
-      ).toBe(false);
-    }
-  });
-
   test("an unapplied event (late duplicate) does not retire again", () => {
     expect(
-      shouldRetireEphemeralDevbox({
-        ephemeral: true,
+      shouldRetireDevbox({
         statusApplied: false,
         incomingStatus: "completed",
       }),
