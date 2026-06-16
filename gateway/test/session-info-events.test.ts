@@ -47,10 +47,10 @@ describe("info-event streaming (#70)", () => {
     await until(() => events.some((e) => e.type === "completed"));
 
     const text = events.find((e) => e.type === "assistant_text");
-    expect(text).toMatchObject({
-      summary: "I'll click the button now.",
-      detail: "I'll click the button now.",
-    });
+    // #114: the assistant text rides in `summary` in full — no excerpt, and no
+    // longer a redundant `detail` copy.
+    expect(text?.summary).toBe("I'll click the button now.");
+    expect(text?.detail).toBeUndefined();
 
     const call = events.find((e) => e.type === "tool_call");
     // The MCP namespace is stripped; the full input rides as detail.

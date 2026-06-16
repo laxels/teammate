@@ -3,7 +3,7 @@ import type {
   SDKResultMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { DevboxEventType } from "../../shared/protocol";
+import { DETAIL_MAX_CHARS, type DevboxEventType } from "../../shared/protocol";
 
 export const SUMMARY_MAX_CHARS = 300;
 
@@ -51,7 +51,10 @@ export type TerminalEvent = {
 /** Map an SDK result message to the lifecycle event the orchestrator expects. */
 export function mapResultMessage(result: SDKResultMessage): TerminalEvent {
   if (result.subtype === "success") {
-    const summary = excerpt(result.result) || "Task finished.";
+    // #114: the assistant's final response is shown in full, never excerpted —
+    // for a retrieval task it IS the deliverable. Clip only so a giant answer
+    // stays under the per-row / Slack size limit; whitespace is preserved.
+    const summary = clip(result.result, DETAIL_MAX_CHARS) || "Task finished.";
     return result.is_error
       ? { type: "failed", summary }
       : { type: "completed", summary };
