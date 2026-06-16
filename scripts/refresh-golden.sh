@@ -201,8 +201,10 @@ host_set_status() { # <host> <active|draining>
   convex_post /fleet/host/status "{\"hostId\":\"$1\",\"status\":\"$2\"}" >/dev/null
 }
 
-# Count live ephemeral VM rows still on a host (drained == 0). A fetch/parse
-# failure prints -1 so the caller keeps waiting (never a false "drained").
+# Count live VM rows still on a host (drained == 0). Every devbox is a
+# single-task VM now (#107 retired the permanent box), so a host-owned row IS a
+# live ephemeral VM — count by hostId. A fetch/parse failure prints -1 so the
+# caller keeps waiting (never a false "drained").
 host_vm_count() { # <host> -> integer (>=0, or -1 on unknown)
   local json
   json="$(convex_get /fleet/status)"
@@ -214,7 +216,7 @@ try:
 except ValueError:
     print(-1); sys.exit(0)
 print(sum(1 for d in data.get("devboxes", [])
-          if d.get("hostId") == host and d.get("ephemeral")))
+          if d.get("hostId") == host))
 ' "$host" <<<"$json"
 }
 
