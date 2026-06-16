@@ -32,9 +32,11 @@ const RETIRE_GRACE_MIN = Math.round(EPHEMERAL_RETIRE_GRACE_MS / 60_000);
  */
 /** Status reactions on the task's anchor message: glanceable from the
  * channel scroll without opening the thread. Best-effort (needs the
- * reactions:write scope; silently skipped until the manifest is applied). */
+ * reactions:write scope; silently skipped until the manifest is applied).
+ * No `started` entry: the orchestrator's instant 🫡 (:blob_salute:) ack
+ * already marks "I'm on it" on this same message, so a 👀 on start was
+ * redundant and confusing (#110). */
 const STATUS_REACTION: Partial<Record<string, string>> = {
-  started: "eyes",
   needs_input: "raising_hand",
   completed: "white_check_mark",
   failed: "x",
@@ -190,8 +192,8 @@ export const devboxEvent = internalAction({
     }
 
     // 3. Glanceable reaction on the anchor message (usually the user's
-    // request). Reactions accumulate (👀 then ✅) — removal needs another
-    // scope round-trip and adds little.
+    // request). Reactions accumulate on top of the orchestrator's 🫡 ack
+    // (then 🙋/✅/❌/🛑) — removal needs another scope round-trip and adds little.
     const reaction = STATUS_REACTION[args.type];
     if (reaction !== undefined && threadTs !== undefined) {
       await addSlackReaction({
