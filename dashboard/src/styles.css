@@ -797,6 +797,32 @@ section[aria-label="task history"] h2 {
   overflow: hidden;
 }
 
+/* The timeline is a desktop layout: events beside a fixed-width comment rail.
+ * On narrow (mobile-width) windows that fixed rail would squeeze the events
+ * column to nothing and overflow the page, so stack the rail below the events
+ * as a plain top-to-bottom list (the anchor-aligned absolute positioning is
+ * meaningless once it's no longer beside the events). */
+@media (max-width: 760px) {
+  .timeline-grid {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .timeline-rail-col {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  /* height + per-block translateY are set inline by the rail's layout code;
+   * override them so the blocks simply flow in document order. */
+  .comment-rail {
+    height: auto !important;
+  }
+  .comment-block {
+    position: static;
+    transform: none !important;
+    margin-bottom: 10px;
+  }
+}
+
 .comment-editor-text {
   width: 100%;
   min-height: 60px;
