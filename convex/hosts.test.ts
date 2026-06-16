@@ -89,7 +89,6 @@ async function seedFullHost(t: Tester): Promise<void> {
         status: "provisioning",
         taskId,
         hostId: "host-1",
-        ephemeral: true,
         lastSeenAt: now,
       });
       // dispatchTaskToSlot enqueues the gateway `start` command before the VM
@@ -733,7 +732,6 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
       status: "busy",
       taskId: "task-x",
       hostId: "host-1",
-      ephemeral: true,
       lastSeenAt: now,
     });
     await ctx.db.insert("devboxes", {
@@ -742,7 +740,6 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
       status: "provisioning",
       taskId: "task-y",
       hostId: "host-1",
-      ephemeral: true,
       lastSeenAt: now,
     });
     // An ephemeral on a DIFFERENT host — untouched.
@@ -752,7 +749,6 @@ test("evictHostEphemerals retires + enqueues destroy_vm for a host's ephemerals 
       status: "busy",
       taskId: "task-z",
       hostId: "host-2",
-      ephemeral: true,
       lastSeenAt: now,
     });
   });
@@ -812,7 +808,6 @@ test("evictHostEphemerals terminally fails the in-flight task and drops its comm
       status: "busy",
       taskId: "task-x",
       hostId: "host-1",
-      ephemeral: true,
       lastSeenAt: now,
     });
     await ctx.db.insert("tasks", {
@@ -885,7 +880,6 @@ test("evictHostEphemerals never regresses an already-terminal task", async () =>
       status: "busy",
       taskId: "task-done",
       hostId: "host-1",
-      ephemeral: true,
       lastSeenAt: now,
     });
     await ctx.db.insert("tasks", {

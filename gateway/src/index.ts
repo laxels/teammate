@@ -56,42 +56,24 @@ const startConsumer = () =>
     secret: config.devboxSharedSecret,
     execute: async (command) => {
       if (command.kind === "start") {
-        const post = () =>
-          fetch(`${localUrl}/task`, {
-            method: "POST",
-            headers: { "content-type": "application/json", ...authHeader },
-            body: command.payload,
-          });
-        let response = await post();
-        if (response.status === 409) {
-          // A finished-but-steerable session still occupies the slot. A new
-          // start command means a new task should win: end the old session,
-          // wait for the slot to actually free (teardown is asynchronous),
-          // then retry.
-          await fetch(`${localUrl}/interrupt`, {
-            method: "POST",
-            headers: authHeader,
-            body: "{}",
-          });
-          const deadline = Date.now() + 15_000;
-          while (Date.now() < deadline) {
-            const health = (await fetch(`${localUrl}/health`).then((r) =>
-              r.json(),
-            )) as { running: boolean };
-            if (!health.running) {
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250));
-          }
-          response = await post();
-        }
+        // Every devbox is a single-task VM: it boots, receives exactly one
+        // start command, and is retired after the task. So /task should always
+        // be free (202). A 409 (a session already occupies the slot) is an
+        // anomaly — the cross-task reuse that used to evict-and-retry here only
+        // ever happened on the retired permanent devbox (#107) — so surface it
+        // as a failed task rather than fighting for the slot.
+        const response = await fetch(`${localUrl}/task`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...authHeader },
+          body: command.payload,
+        });
         if (response.status !== 202) {
           const request = JSON.parse(command.payload) as { taskId?: string };
           if (typeof request.taskId === "string") {
             await emitEvent(
               request.taskId,
               "failed",
-              `devbox rejected the task (HTTP ${response.status}) even after interrupting the previous session`,
+              `devbox rejected the task (HTTP ${response.status})`,
             );
           }
         }

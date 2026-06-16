@@ -173,10 +173,8 @@ export default defineSchema({
       v.literal("retiring"),
     ),
     taskId: v.optional(v.string()),
-    // The Mac host whose agent manages this VM (ephemeral devboxes only).
+    // The Mac host whose agent manages this VM.
     hostId: v.optional(v.string()),
-    // Ephemeral devboxes are destroyed after their single task finishes.
-    ephemeral: v.optional(v.boolean()),
     lastSeenAt: v.number(),
   }).index("by_devbox_id", ["devboxId"]),
 

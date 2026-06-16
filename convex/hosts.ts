@@ -443,7 +443,6 @@ async function allocateEphemeralSlot(
     status: "provisioning",
     taskId,
     hostId,
-    ephemeral: true,
     lastSeenAt: Date.now(),
   });
   return { devboxId, hostId, gatewayUrl };
@@ -685,7 +684,6 @@ export async function fleetSnapshotData(ctx: QueryCtx) {
     devboxes: devboxes.map((d) => ({
       devboxId: d.devboxId,
       status: d.status,
-      ephemeral: d.ephemeral === true,
       taskId: d.taskId,
       hostId: d.hostId,
     })),
@@ -797,7 +795,8 @@ export const setHostStatus = internalMutation({
  * way provisionVmFailed handles a torn-down provision. Idempotent: a re-evict
  * just re-enqueues a destroy_vm (itself idempotent — a VM already gone removes
  * its row anyway) and re-fails an already-terminal task to a no-op. Only this
- * host's ephemeral VMs are touched (the `ephemeral === true` filter).
+ * host's devboxes are touched (the `hostId` filter); every devbox is a
+ * single-task VM now.
  */
 export const evictHostEphemerals = internalMutation({
   args: { hostId: v.string() },
@@ -806,9 +805,7 @@ export const evictHostEphemerals = internalMutation({
     args,
   ): Promise<{ evicted: number; devboxIds: string[] }> => {
     const devboxes = await ctx.db.query("devboxes").collect();
-    const targets = devboxes.filter(
-      (d) => d.hostId === args.hostId && d.ephemeral === true,
-    );
+    const targets = devboxes.filter((d) => d.hostId === args.hostId);
     for (const devbox of targets) {
       // Capture the task before clearing it; a busy/provisioning ephemeral still
       // carries its (non-terminal) task, an already-retiring one does not.

@@ -228,7 +228,6 @@ test("/fleet/host/evict force-evicts a host's ephemerals", async () => {
       status: "busy",
       taskId: "task-1",
       hostId: "host-1",
-      ephemeral: true,
       lastSeenAt: now,
     });
   });
