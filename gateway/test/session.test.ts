@@ -3,6 +3,7 @@ import type {
   McpServerConfig,
   SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { DEVBOX_SYSTEM_PROMPT } from "../src/prompt";
 import { type QueryFn, SessionManager } from "../src/session";
 import {
   askUserQuestionMessage,
@@ -89,6 +90,10 @@ describe("SessionManager", () => {
     expect(options?.allowDangerouslySkipPermissions).toBe(true);
     expect(options?.cwd).toBe("/tmp/project");
     expect(options?.fallbackModel).toBeUndefined();
+    // Every devbox session carries the wait-on-external-event discipline as its
+    // system prompt — the SDK default is empty, so without this the agent has no
+    // standing guidance and hallucinates a poller (#69).
+    expect(options?.systemPrompt).toBe(DEVBOX_SYSTEM_PROMPT);
   });
 
   test("an explicit request effort overrides the xhigh default (#91)", async () => {
