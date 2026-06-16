@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   commentEventTime,
   desiredCenterForTime,
@@ -162,6 +163,7 @@ function CommentBlock({
   onDelete: (id: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   const toggleFocus = () => {
     if (!editing) onFocus(focused ? null : comment.id);
@@ -190,11 +192,21 @@ function CommentBlock({
       }}
     >
       {comment.imageUrl !== null && (
-        <img
-          className="comment-thumb"
-          src={comment.imageUrl}
-          alt={`frame at ${formatTimecode(comment.videoTimeSec)}`}
-        />
+        <button
+          type="button"
+          className="comment-thumb-btn"
+          title="View full image"
+          onClick={(e) => {
+            e.stopPropagation();
+            setDialogOpen(true);
+          }}
+        >
+          <img
+            className="comment-thumb"
+            src={comment.imageUrl}
+            alt={`frame at ${formatTimecode(comment.videoTimeSec)}`}
+          />
+        </button>
       )}
       <div className="comment-body">
         <div className="comment-meta">
@@ -254,7 +266,129 @@ function CommentBlock({
           </div>
         )}
       </div>
+      {dialogOpen && comment.imageUrl !== null && (
+        <CommentDialog
+          comment={comment}
+          onClose={() => setDialogOpen(false)}
+          onSeek={onSeek}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Full-quality view of a comment's frame (#118): the thumbnail is tiny, so
+ * clicking it opens this overlay with the image at full size beside the comment
+ * text, timestamp, and edit/delete controls. Rendered through a portal because
+ * the parent `.comment-block` is `transform`ed — a `position: fixed` child of a
+ * transformed ancestor anchors to that ancestor, not the viewport.
+ */
+function CommentDialog({
+  comment,
+  onClose,
+  onSeek,
+  onEdit,
+  onDelete,
+}: {
+  comment: RailComment;
+  onClose: () => void;
+  onSeek: (videoTimeSec: number) => void;
+  onEdit: (id: string, text: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+
+  // Escape closes — the standard dialog affordance alongside click-outside.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const timecode = formatTimecode(comment.videoTimeSec);
+
+  return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: backdrop is a click-to-dismiss surface, not a control; keyboard users dismiss via the Escape listener above
+    // biome-ignore lint/a11y/useKeyWithClickEvents: see above — Escape handles keyboard dismissal
+    <div
+      className="comment-dialog-backdrop"
+      onClick={(e) => {
+        // Only a click on the backdrop itself dismisses; clicks that bubble up
+        // from the dialog card are ignored.
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="comment-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`comment at ${timecode}`}
+      >
+        <div className="comment-dialog-figure">
+          <img
+            className="comment-dialog-img"
+            src={comment.imageUrl ?? ""}
+            alt={`frame at ${timecode}`}
+          />
+        </div>
+        <div className="comment-dialog-body">
+          <div className="comment-dialog-meta">
+            <button
+              type="button"
+              className="comment-ts"
+              title="Jump the recording here"
+              onClick={() => {
+                onSeek(comment.videoTimeSec);
+                onClose();
+              }}
+            >
+              {timecode}
+            </button>
+            {!editing && (
+              <span className="comment-actions">
+                <button
+                  type="button"
+                  className="comment-act"
+                  title="Edit"
+                  onClick={() => setEditing(true)}
+                >
+                  edit
+                </button>
+                <button
+                  type="button"
+                  className="comment-act comment-act-danger"
+                  title="Delete"
+                  onClick={() => {
+                    onClose();
+                    void onDelete(comment.id);
+                  }}
+                >
+                  delete
+                </button>
+              </span>
+            )}
+          </div>
+          {editing ? (
+            <CommentEditor
+              initial={comment.text}
+              onCancel={() => setEditing(false)}
+              onSave={async (text) => {
+                await onEdit(comment.id, text);
+                setEditing(false);
+              }}
+            />
+          ) : (
+            <div className="comment-dialog-text">{comment.text}</div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
