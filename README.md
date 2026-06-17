@@ -12,9 +12,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for components, infrastructure, and task 
 ## Setup
 
 ```sh
+cp .env.example .env   # then fill in real values (see comments in the file)
 bun install
 bun run dev   # starts Convex dev deployment (prompts for login on first run)
 ```
+
+`.env` and `.env.local` are gitignored and must never be committed. CI runs
+[gitleaks](https://github.com/gitleaks/gitleaks) over the full git history on
+every push and PR to catch any secret that slips through.
 
 ## Checks
 
