@@ -65,12 +65,23 @@ export function bannedAppReason(identifier: string): string | null {
   return null;
 }
 
-/** cua-driver tools whose pid argument targets an app (everything that
- * perceives or acts on a window/process). Tools without a pid — list_apps,
- * get_screen_size, config/session/cursor management, recording — pass. */
-const PID_TARGETED_TOOLS: ReadonlySet<string> = new Set([
+/** cua-driver PERCEPTION tools: pid-targeted reads (AX trees, window lists,
+ * region screenshots). A banned pid is still refused, but a pid-less call is
+ * harmless — reading is not driving. */
+const READ_TOOLS: ReadonlySet<string> = new Set([
   "get_window_state",
   "list_windows",
+  "zoom",
+]);
+
+/** cua-driver SIDE-EFFECTING tools. These must be tied to an IDENTIFIED,
+ * permitted process: in the pinned driver most of them also accept
+ * targetless/desktop-scope forms (e.g. click({ x, y, scope: "desktop" }))
+ * that land on whatever window sits under the point — which would let a
+ * prompt-injected agent drive a terminal or an OS security prompt without
+ * ever naming it. A call with no resolvable pid (or, for `page`, bundle_id)
+ * therefore fails CLOSED. */
+const ACTION_TOOLS: ReadonlySet<string> = new Set([
   "bring_to_front",
   "kill_app",
   "click",
@@ -82,7 +93,6 @@ const PID_TARGETED_TOOLS: ReadonlySet<string> = new Set([
   "hotkey",
   "set_value",
   "scroll",
-  "zoom",
   "page",
 ]);
 
@@ -158,18 +168,27 @@ export function createHardBanGate(
       return null;
     }
 
-    if (!PID_TARGETED_TOOLS.has(action)) {
+    const isRead = READ_TOOLS.has(action);
+    const isAction = ACTION_TOOLS.has(action);
+    if (!isRead && !isAction) {
       return null;
     }
     const pid = input.pid;
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
-      // No pid: list_windows without args, page targeting by bundle_id, etc.
+      // No pid. Reads are harmless (list_windows without args); an action can
+      // still be permitted when it names an identifiable, clean bundle id
+      // (`page` targets browsers that way). Anything ELSE side-effecting is
+      // targetless — a desktop-scope click/type lands on whatever window sits
+      // under the point, which defeats the ban list — so it fails closed.
       const bundleId = input.bundle_id;
       if (typeof bundleId === "string") {
         const reason = bannedAppReason(bundleId);
-        if (reason !== null) {
-          return deny(`${action} refused: ${reason}`);
-        }
+        return reason === null ? null : deny(`${action} refused: ${reason}`);
+      }
+      if (isAction) {
+        return deny(
+          `${action} refused: targetless (desktop-scope / point-only) actions cannot be tied to an identified app, so the hard-ban list cannot vet them. Target a specific pid (from list_apps/list_windows) or, for page, a bundle_id.`,
+        );
       }
       return null;
     }

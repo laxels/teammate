@@ -132,16 +132,25 @@ log "Writing ~/.localagent.env"
 MACHINE_NAME="$(scutil --get ComputerName 2>/dev/null || hostname -s)"
 MACHINE_SLUG="$(printf '%s' "$MACHINE_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 umask 077
-cat > "$HOME/.localagent.env" <<EOF
-LOCAL_MACHINE_ID=local-${MACHINE_SLUG:-mac}
-LOCAL_DISPLAY_NAME=$MACHINE_NAME
-CONVEX_URL=$CONVEX_URL
-CONVEX_SITE_URL=$CONVEX_SITE_URL
-LOCAL_MACHINE_SECRET=$LOCAL_MACHINE_SECRET
-LOCALAGENT_DIR=$REPO_ROOT
-CUA_DRIVER_BIN=$CUA_BIN
-${OWNER_SLACK_USER:+LOCAL_OWNER_SLACK_USER=$OWNER_SLACK_USER}
-EOF
+# The LaunchAgent `source`s this file under `set -a`, so every value must be
+# shell-quoted (printf %q): a display name with spaces ("Axel MacBook Pro"),
+# a repo path with spaces, or a secret containing $ would otherwise be parsed
+# as commands / expanded on load, leaving the daemon with broken config.
+env_line() { # <KEY> <VALUE>
+  printf '%s=%q\n' "$1" "$2"
+}
+{
+  env_line LOCAL_MACHINE_ID "local-${MACHINE_SLUG:-mac}"
+  env_line LOCAL_DISPLAY_NAME "$MACHINE_NAME"
+  env_line CONVEX_URL "$CONVEX_URL"
+  env_line CONVEX_SITE_URL "$CONVEX_SITE_URL"
+  env_line LOCAL_MACHINE_SECRET "$LOCAL_MACHINE_SECRET"
+  env_line LOCALAGENT_DIR "$REPO_ROOT"
+  env_line CUA_DRIVER_BIN "$CUA_BIN"
+  if [[ -n "$OWNER_SLACK_USER" ]]; then
+    env_line LOCAL_OWNER_SLACK_USER "$OWNER_SLACK_USER"
+  fi
+} > "$HOME/.localagent.env"
 chmod 600 "$HOME/.localagent.env"
 
 # ------------------------------------------------------ localagent daemon

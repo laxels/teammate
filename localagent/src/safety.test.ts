@@ -157,6 +157,48 @@ describe("createHardBanGate", () => {
     expect(calls).toEqual([3, 3]);
   });
 
+  test("targetless side-effecting actions fail closed (desktop-scope bypass, review finding)", async () => {
+    // The reviewer's exact repro: a desktop-scope click carries no pid and no
+    // bundle_id, so nothing ties it to an identified app — it must be denied
+    // WITHOUT any pid resolution, not silently allowed onto whatever window
+    // sits under the point (which could be Terminal or an OS auth prompt).
+    const gate = createHardBanGate(async () => {
+      throw new Error("should not resolve");
+    });
+    const click = await gate("mcp__cua-driver__click", {
+      x: 100,
+      y: 100,
+      scope: "desktop",
+    });
+    expect(click).toMatchObject({ behavior: "deny" });
+    for (const action of ["type_text", "press_key", "scroll", "drag"]) {
+      expect(await gate(`mcp__cua-driver__${action}`, { x: 1, y: 1 })).toMatchObject(
+        { behavior: "deny" },
+      );
+    }
+  });
+
+  test("pid-less perception tools still pass (reading is not driving)", async () => {
+    const gate = createHardBanGate(async () => {
+      throw new Error("should not resolve");
+    });
+    expect(await gate("mcp__cua-driver__list_windows", {})).toBeNull();
+    expect(await gate("mcp__cua-driver__list_apps", {})).toBeNull();
+    expect(await gate("mcp__cua-driver__get_screen_size", {})).toBeNull();
+  });
+
+  test("page with a clean bundle_id and no pid stays allowed", async () => {
+    const gate = createHardBanGate(async () => {
+      throw new Error("should not resolve");
+    });
+    expect(
+      await gate("mcp__cua-driver__page", {
+        bundle_id: "com.google.Chrome",
+        action: "get_text",
+      }),
+    ).toBeNull();
+  });
+
   test("page targeting a banned bundle_id without a pid is denied", async () => {
     const { resolvePid, calls } = stubResolver(() => "");
     const gate = createHardBanGate(resolvePid);

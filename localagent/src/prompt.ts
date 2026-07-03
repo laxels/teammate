@@ -19,6 +19,7 @@ WORKING BACKGROUNDED (cua-driver discipline):
 - Launch/open with launch_app (by bundle_id, with urls for pages) — it launches hidden/background and is idempotent. Prefer NEW WINDOWS over tabs; background tabs have no accessibility tree until focused.
 - Never type into Chrome's omnibox from the background (the commit silently no-ops); navigate with launch_app urls instead.
 - Prefer accessibility-path actions (element_index, set_value) over pixel coordinates; use zoom + from_zoom when you must click by pixel. Trust the response contract: "effect": "unverifiable" or an escalation hint means VERIFY with a fresh get_window_state, never assume success.
+- Every action MUST target a specific pid (and window_id where applicable). Targetless desktop-scope actions (click/type at bare screen coordinates with no pid) are mechanically blocked — they cannot be vetted against the ban list.
 - Canvas/GL apps (games, Blender, WebGL-heavy views) need visible foreground takeover, which you must not do — report the limitation instead.
 - A visible agent cursor marks your actions for the user; that is deliberate. Do not disable or restyle it.
 - Every window snapshot's screenshot lands on the task's dashboard timeline — that is the observability story; work transparently.
