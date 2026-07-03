@@ -216,23 +216,33 @@ export const devboxEvent = internalAction({
       }
     }
 
-    // Self-heal a stale overwrite: if the task moved on (e.g. the terminal
-    // event applied while this delayed progress action was mid-flight), our
-    // edit just painted outdated state — re-render once from the fresh row.
-    const fresh = await ctx.runQuery(internal.tasks.getByTaskId, {
-      taskId: args.taskId,
-    });
-    if (
-      fresh !== null &&
-      cardTs !== undefined &&
-      fresh.status !== task.status
-    ) {
+    // Self-heal a stale overwrite: if the task moved on while this action was
+    // mid-flight (e.g. the terminal event applied during a delayed progress
+    // action — or, now that painting waits on a model call, a same-status
+    // progress event stamped a newer lastSummary), our edit just painted
+    // outdated state — re-render from the fresh row. Loops because each
+    // repaint's own model call reopens the window; bounded so a hot task
+    // can't pin this action, and any drift past the bound is repaired by the
+    // next event's action running the same check.
+    let painted = task;
+    for (let repaint = 0; repaint < 3 && cardTs !== undefined; repaint++) {
+      const fresh = await ctx.runQuery(internal.tasks.getByTaskId, {
+        taskId: args.taskId,
+      });
+      if (
+        fresh === null ||
+        (fresh.status === painted.status &&
+          fresh.lastSummary === painted.lastSummary)
+      ) {
+        break;
+      }
       await updateSlackMessage({
         botToken,
         channel: task.slackChannel,
         ts: cardTs,
         text: renderCard(fresh, await latestLineFor(fresh)),
       }).catch(() => undefined);
+      painted = fresh;
     }
 
     // 2. Detail thread replies for transitions worth a notification ping
