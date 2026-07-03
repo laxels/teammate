@@ -300,6 +300,9 @@ export type DevboxEvent = {
   // FULL response, never excerpted (#114): a retrieval task's answer is the
   // deliverable, so it is shown whole. For tool_call / tool_result info events it
   // is a one-line preview of `detail`. Always clipped to DETAIL_MAX_CHARS.
+  // One display exception (#145): the Slack status card's `_Latest:_` line
+  // renders a concise model-written summary of this text (convex/notify.ts) —
+  // the wire always carries the full body.
   summary: string;
   ts: number;
   // ---- Info-event enrichment (set only on info events) ----

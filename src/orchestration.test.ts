@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildCapabilitiesSection,
+  buildCardSummaryPrompt,
   buildDevboxEventMessage,
   buildLocalAccessRequestMessage,
   buildLocalHelperPrompt,
   buildLocalMachinesSection,
   buildOrchestratorUserMessage,
   buildStatusCard,
+  type CardSummarizer,
+  cardLatestLine,
   classifySlackEvent,
   formatPeerRequestMessage,
   isNoReplySignal,
@@ -843,6 +846,71 @@ describe("buildStatusCard", () => {
   test("needs_input renders without underscore", () => {
     const card = buildStatusCard({ ...base, status: "needs_input" });
     expect(card).toContain("needs input");
+  });
+});
+
+describe("cardLatestLine", () => {
+  const LONG = `First paragraph of a long assistant turn.\n\n${"detail ".repeat(100)}`;
+  const never: CardSummarizer = () => {
+    throw new Error("summarizer must not be called for short summaries");
+  };
+
+  test("short summaries pass through verbatim, whitespace collapsed, no model call", async () => {
+    expect(await cardLatestLine("Started task: fix the build", never)).toBe(
+      "Started task: fix the build",
+    );
+    expect(await cardLatestLine("line one\n  line two", never)).toBe(
+      "line one line two",
+    );
+    // Exactly at the cap (after collapsing) still needs no model call.
+    expect(await cardLatestLine(`${"x".repeat(300)}\n`, never)).toBe(
+      "x".repeat(300),
+    );
+  });
+
+  test("long summaries use the model's line", async () => {
+    const line = await cardLatestLine(LONG, async () => {
+      return "Wrapped up the refactor; tests are green.";
+    });
+    expect(line).toBe("Wrapped up the refactor; tests are green.");
+  });
+
+  test("the summarizer is called once, with the original uncollapsed text", async () => {
+    const calls: string[] = [];
+    await cardLatestLine(LONG, async (text) => {
+      calls.push(text);
+      return "ok";
+    });
+    expect(calls).toEqual([LONG]);
+  });
+
+  test("a model line over the cap is excerpted as a guard", async () => {
+    const line = await cardLatestLine(LONG, async () => "y".repeat(400));
+    expect(line).toBe(`${"y".repeat(299)}…`);
+  });
+
+  test("summarizer failure, refusal, or empty output degrades to an excerpt", async () => {
+    const summarizers: CardSummarizer[] = [
+      async () => null, // refusal / missing key
+      async () => "   ", // empty output
+      async () => {
+        throw new Error("api down");
+      },
+    ];
+    for (const summarize of summarizers) {
+      const line = await cardLatestLine(LONG, summarize);
+      expect(line.startsWith("First paragraph")).toBe(true);
+      expect(line.length).toBe(300);
+      expect(line.endsWith("…")).toBe(true);
+    }
+  });
+});
+
+describe("buildCardSummaryPrompt", () => {
+  test("delimits the report with XML and asks for one short line", () => {
+    const prompt = buildCardSummaryPrompt("agent said things");
+    expect(prompt).toContain("<report>\nagent said things\n</report>");
+    expect(prompt.toLowerCase()).toContain("one");
   });
 });
 
