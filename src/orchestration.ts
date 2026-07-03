@@ -1,11 +1,14 @@
 // Pure orchestration helpers shared by the Convex functions (convex/) and
 // covered by `bun test`. No Convex runtime dependencies here.
 
+import { excerpt } from "../shared/agentSummary";
 import {
   DEVBOX_EVENT_TYPES,
   type DevboxEvent,
   type DevboxEventType,
   isTerminalTaskStatus,
+  type LocalAccessStatus,
+  type LocalAgentEvent,
   type TaskStatus,
 } from "../shared/protocol";
 
@@ -219,13 +222,12 @@ const DEVBOX_EVENT_TYPES_SET: ReadonlySet<string> = new Set(DEVBOX_EVENT_TYPES);
  * through only when present and well-typed; a malformed one is dropped, never a
  * rejection (the core event still records).
  */
-export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-  const body = payload as Record<string, unknown>;
+/** The identity-agnostic core of the two agent-event wire validators: the
+ * event body minus the devboxId/machineId key, or null when malformed. */
+function parseAgentEventCore(
+  body: Record<string, unknown>,
+): Omit<DevboxEvent, "devboxId"> | null {
   if (
-    typeof body.devboxId !== "string" ||
     typeof body.taskId !== "string" ||
     typeof body.type !== "string" ||
     !DEVBOX_EVENT_TYPES_SET.has(body.type) ||
@@ -235,7 +237,6 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
     return null;
   }
   return {
-    devboxId: body.devboxId,
     taskId: body.taskId,
     type: body.type as DevboxEventType,
     summary: body.summary,
@@ -246,6 +247,112 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
       ? { imageStorageId: body.imageStorageId }
       : {}),
   };
+}
+
+export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  if (typeof body.devboxId !== "string") {
+    return null;
+  }
+  const core = parseAgentEventCore(body);
+  return core === null ? null : { devboxId: body.devboxId, ...core };
+}
+
+// ---- LocalAgentEvent (local daemon -> /local/events) body validation ----
+
+/**
+ * Validates an already-JSON-parsed request body against the LocalAgentEvent
+ * wire contract (shared/protocol.ts) — parseDevboxEvent's sibling with
+ * machineId in place of devboxId. Returns null when the body doesn't conform.
+ */
+export function parseLocalAgentEvent(payload: unknown): LocalAgentEvent | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  if (typeof body.machineId !== "string") {
+    return null;
+  }
+  const core = parseAgentEventCore(body);
+  return core === null ? null : { machineId: body.machineId, ...core };
+}
+
+// ---- Peer channel formatting (#138) ----
+
+/** One-line preview for timeline summaries and Slack asks — the shared
+ * agent-summary `excerpt` helper under the name convex/ modules import
+ * (whitespace collapsed, ellipsis-in-budget, 300-char default). */
+export const excerptLine = excerpt;
+
+/** Peer request bodies originate from a cloud agent that has read untrusted
+ * web content (the prompt-injection path #138 mitigates with hard bans and
+ * re-asks); at minimum a crafted body must not forge or terminate the
+ * <peer_request> wrapper the local session's protocol trusts. */
+function neutralizePeerTags(text: string): string {
+  return text.replace(/<(\/?)(peer_request)/gi, "&lt;$1$2");
+}
+
+/**
+ * How a peer request is delivered into a live local session (a user_message
+ * localCommand). The requestId rides inside so the agent can pair its
+ * reply_to_cloud call.
+ */
+export function formatPeerRequestMessage(
+  requestId: string,
+  body: string,
+): string {
+  return [
+    `<peer_request id="${requestId}">`,
+    neutralizePeerTags(body),
+    `</peer_request>`,
+    `Handle this request, answer with the reply_to_cloud tool (requestId "${requestId}"), then end your turn and wait for the next request.`,
+  ].join("\n");
+}
+
+/**
+ * The start prompt for a split task's local helper agent, built mechanically
+ * (the orchestrator LLM is out of the loop once permission is granted). The
+ * standing rules — safety bans, backgrounding discipline, reply protocol —
+ * live in the daemon's system prompt; this carries task context plus every
+ * request that queued while permission was pending.
+ */
+export function buildLocalHelperPrompt(args: {
+  taskId: string;
+  title: string;
+  requests: { requestId: string; body: string }[];
+}): string {
+  const intro = `You are the LOCAL agent for task "${args.title}" (${args.taskId}), running on the task owner's own Mac with background computer use. A cloud agent doing the main work sends you requests for things only this machine can do (local files, installed apps, signed-in sessions). Handle each <peer_request> and answer it with the reply_to_cloud tool, quoting its requestId, then end your turn — the next request arrives as a new message.`;
+  if (args.requests.length === 0) {
+    return `${intro}\n\nNo request is pending yet; requests will arrive as messages.`;
+  }
+  const blocks = args.requests.map((r) =>
+    formatPeerRequestMessage(r.requestId, r.body),
+  );
+  return [intro, ...blocks].join("\n\n");
+}
+
+/**
+ * The Slack ask posted (threaded, tagging the requester) when a cloud agent
+ * first requests local work on an ungranted task. Mechanical — no LLM
+ * involved; the user's reply flows through the orchestrator, which records
+ * the decision via resolve_local_access.
+ */
+export function buildLocalAccessRequestMessage(args: {
+  taskId: string;
+  title: string;
+  slackUser: string | undefined;
+  machineName: string;
+  reason: string;
+}): string {
+  const mention = args.slackUser === undefined ? "" : `<@${args.slackUser}> `;
+  return (
+    `${mention}:lock: *${args.title}* (\`${args.taskId}\`) wants to use your Mac (*${args.machineName}*) with background computer use for: _${excerptLine(args.reason, 400)}_\n` +
+    `Reply *yes* to allow it for this task (whole machine, this task only — no standing access), or *no* to keep it cloud-only. ` +
+    `A visible agent cursor shows whenever it drives your machine; it never touches terminals, admin prompts, or OS security dialogs, and it asks here first before anything sensitive.`
+  );
 }
 
 // ---- Thread-target resolution ----
@@ -275,6 +382,13 @@ export type ThreadTaskContext = {
   taskId: string;
   title: string;
   status: TaskStatus;
+  /** Per-task local-machine grant state (#138); undefined = never requested.
+   * "requested" is the cue that a bare yes/no reply is answering the
+   * permission ask (resolve_local_access). */
+  localAccess?: LocalAccessStatus | undefined;
+  /** True when a local agent serves this task (primary or split helper) —
+   * the cue for steer_task's agent="local" routing. */
+  hasLocalAgent?: boolean | undefined;
 };
 
 /**
@@ -361,8 +475,19 @@ export function buildOrchestratorUserMessage(args: {
     parts.push(lines.join("\n"));
   }
   if (threadTasks.length > 0) {
-    const lines = threadTasks.map(
-      (t) => `- ${t.taskId} "${t.title}" — status: ${t.status}`,
+    const lines = threadTasks.map((t) => {
+      const extras: string[] = [];
+      if (t.localAccess !== undefined) {
+        extras.push(`local access: ${t.localAccess}`);
+      }
+      if (t.hasLocalAgent === true) {
+        extras.push("local agent active");
+      }
+      const suffix = extras.length > 0 ? ` · ${extras.join(" · ")}` : "";
+      return `- ${t.taskId} "${t.title}" — status: ${t.status}${suffix}`;
+    });
+    const anyPendingAccess = threadTasks.some(
+      (t) => t.localAccess === "requested",
     );
     parts.push(
       [
@@ -371,6 +496,11 @@ export function buildOrchestratorUserMessage(args: {
         ...lines,
         "With one non-terminal task, treat the message as being about it. With several, prefer the one the message names, otherwise the newest non-terminal one — but ask before a stop_task that is ambiguous between running tasks.",
         "Relay mid-task guidance with steer_task, answer progress questions with get_task, stop with stop_task.",
+        ...(anyPendingAccess
+          ? [
+              'A task above has a PENDING local-machine permission ask. If this message answers it (a yes/no or equivalent), record the decision with resolve_local_access — "granted" only on a clear yes from the user.',
+            ]
+          : []),
         "</thread_context>",
       ].join("\n"),
     );
@@ -460,6 +590,75 @@ export function steerRejection(
   }
   if (devbox.taskId !== task.taskId) {
     return `devbox ${devbox.devboxId} is no longer running task ${task.taskId} — refusing to message another task's session`;
+  }
+  return null;
+}
+
+/**
+ * Which registered local machine may serve a task (#138): recently
+ * heartbeated, and either owned by the task's requester or unowned (another
+ * user's machine is never picked — its owner hasn't consented). Owner match
+ * wins over unowned; most recently seen breaks ties. Busy-ness is the
+ * caller's concern (a busy machine can still be the target of a permission
+ * grant). Follows src/hostPool.ts pickHost's shape: freshness injected, no
+ * Convex imports.
+ */
+export function pickLocalMachine<
+  M extends {
+    ownerSlackUser?: string | undefined;
+    lastSeenAt: number;
+  },
+>(
+  machines: M[],
+  opts: { preferOwner?: string | undefined; now: number; freshnessMs: number },
+): M | null {
+  const candidates = machines.filter(
+    (m) =>
+      opts.now - m.lastSeenAt <= opts.freshnessMs &&
+      (m.ownerSlackUser === undefined || m.ownerSlackUser === opts.preferOwner),
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+  candidates.sort((a, b) => {
+    const aOwned = a.ownerSlackUser === opts.preferOwner ? 1 : 0;
+    const bOwned = b.ownerSlackUser === opts.preferOwner ? 1 : 0;
+    if (aOwned !== bOwned) {
+      return bOwned - aOwned;
+    }
+    return b.lastSeenAt - a.lastSeenAt;
+  });
+  // biome-ignore lint/style/noNonNullAssertion: length checked above
+  return candidates[0]!;
+}
+
+/**
+ * Why a steering message cannot be delivered to this task's LOCAL agent, or
+ * null when it can (#138). The machine.taskId check mirrors the devbox
+ * crosstalk guard: a machine that moved on (task released, another task
+ * spawned) must never receive messages aimed at its previous occupant.
+ * Delivery while the start command is still queued is allowed, like the
+ * devbox provisioning window.
+ */
+export function localSteerRejection(
+  task: {
+    taskId: string;
+    status: TaskStatus;
+    localMachineId?: string | undefined;
+  },
+  machine: { machineId: string; taskId?: string | undefined } | null,
+): string | null {
+  if (isTerminalTaskStatus(task.status)) {
+    return `task ${task.taskId} is already ${task.status} — there is no live session to steer. Start a follow-up task instead (fold the new guidance into its prompt).`;
+  }
+  if (task.localMachineId === undefined) {
+    return `task ${task.taskId} has no local agent — nothing local to steer (use the default cloud routing, or request local access first)`;
+  }
+  if (machine === null) {
+    return `local machine ${task.localMachineId} is not registered`;
+  }
+  if (machine.taskId !== task.taskId) {
+    return `local machine ${machine.machineId} is no longer serving task ${task.taskId} — refusing to message another task's session`;
   }
   return null;
 }
@@ -597,10 +796,12 @@ export function buildStatusCard(args: {
   startedAt?: number | undefined;
   finishedAt?: number | undefined;
   replyHint: ReplyHint;
+  /** #138: the task's primary agent runs on the user's own Mac. */
+  localAgent?: boolean | undefined;
 }): string {
   const { taskId, title, status, summary, monitorUrl, replyHint } = args;
   const lines = [
-    `${STATUS_EMOJI[status]} *${title}* (\`${taskId}\`) — ${status.replace("_", " ")}`,
+    `${STATUS_EMOJI[status]} *${title}* (\`${taskId}\`) — ${status.replace("_", " ")}${args.localAgent === true ? " · :computer: on your Mac" : ""}`,
     `_Latest:_ ${summary}`,
   ];
   if (
@@ -687,4 +888,95 @@ export function buildDevboxEventMessage(args: {
       // status events), but keep this total over the widened DevboxEventType.
       return `*${title}*: ${summary}`;
   }
+}
+
+// ---- Orchestrator system-prompt sections (#138) ----
+// The base identity/tool prompt is a constant in convex/orchestrator.ts;
+// these dynamic sections are appended per turn so routing decisions see the
+// current capability manifest and local-machine fleet.
+
+/** The slice of a capability manifest the system prompt renders. */
+export type CapabilityManifestContext = {
+  goldenTag: string;
+  generated: string;
+  curated: string;
+  updatedAt: number;
+};
+
+/**
+ * What cloud devboxes are and are not capable of (installed apps, authed
+ * accounts, tooling), keyed by golden image tag. Injected so the orchestrator
+ * can route work the cloud can't do (local files, local-only apps, sessions
+ * that can't transfer) to the local machine instead of watching a devbox
+ * fail. Only a new bake updates it — devbox changes don't otherwise persist.
+ */
+export function buildCapabilitiesSection(
+  manifest: CapabilityManifestContext | null,
+): string {
+  if (manifest === null) {
+    return [
+      "<devbox_capabilities>",
+      "No capability manifest is recorded for the current golden image. Assume the static description above; when a task needs an authed account or app you cannot confirm exists on devboxes, say so and consider local-machine routing.",
+      "</devbox_capabilities>",
+    ].join("\n");
+  }
+  return [
+    "<devbox_capabilities>",
+    `Golden image: ${manifest.goldenTag} (manifest updated ${new Date(manifest.updatedAt).toISOString()}). What every devbox has — anything NOT listed here is NOT on a devbox (fresh VMs carry no state between tasks):`,
+    manifest.curated.trim(),
+    manifest.generated.trim(),
+    "</devbox_capabilities>",
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
+}
+
+/** The slice of a localMachines row the system prompt renders. */
+export type LocalMachineContext = {
+  machineId: string;
+  displayName?: string | undefined;
+  ownerSlackUser?: string | undefined;
+  taskId?: string | undefined;
+  online: boolean;
+};
+
+/**
+ * The local-machine fleet plus the standing rules for using it: routing
+ * (cloud default / local / split), the per-task permission model, and the
+ * denial fallback. Rendered even when no machine is registered so the model
+ * knows the mode exists and why it is unavailable.
+ */
+export function buildLocalMachinesSection(
+  machines: LocalMachineContext[],
+): string {
+  const lines =
+    machines.length === 0
+      ? [
+          "No local machine is registered (nobody is running the localagent daemon). Local-machine routing is unavailable — do not offer it.",
+        ]
+      : machines.map((m) => {
+          const bits = [
+            m.online ? "online" : "OFFLINE (daemon heartbeat stale)",
+            m.taskId === undefined ? "free" : `busy with ${m.taskId}`,
+          ];
+          if (m.ownerSlackUser !== undefined) {
+            bits.push(`owner <@${m.ownerSlackUser}>`);
+          }
+          const name =
+            m.displayName === undefined ? "" : ` ("${m.displayName}")`;
+          return `- ${m.machineId}${name}: ${bits.join(", ")}`;
+        });
+  return [
+    "<local_machines>",
+    ...lines,
+    ...(machines.length === 0
+      ? []
+      : [
+          "Local machines are the users' OWN Macs, driven with background computer use (no focus stealing; a visible agent cursor is the tell). They cover what devboxes cannot: the user's local files, apps installed only there, and signed-in sessions that don't transfer to cloud VMs.",
+          'Routing: default to a cloud devbox. Route FULLY local (start_task target="local") only when the work inherently needs that machine AND the user has clearly consented in conversation — starting a local task IS a grant, so never do it on your own initiative. For mixed work, start the task on a devbox as usual: the cloud agent requests local help itself mid-task (a split task), which triggers the permission ask in the thread automatically — you don\'t pre-arrange it.',
+          "Permission is per-task and whole-machine; there is NO standing allow. When a permission ask is pending, a clear user yes/no in the thread is recorded with resolve_local_access (\"granted\" only on an unambiguous yes from the machine's owner; anyone else's yes does not count). A user can also preempt — \"use my machine for this\" before being asked — which you record the same way. If access is denied or the user doesn't answer, the task continues cloud-only best-effort and its updates say so; don't re-ask.",
+          "Local machines run ONE task at a time, are never queued for, and have no monitoring page or screen recording (privacy) — per-window screenshots appear in the dashboard timeline instead.",
+        ]),
+    "</local_machines>",
+  ].join("\n");
 }

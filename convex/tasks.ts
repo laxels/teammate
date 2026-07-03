@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import {
   type InterruptPayload,
   isTerminalTaskStatus,
+  type LocalAccessStatus,
   type TaskEffort,
   type TaskStatus,
 } from "../shared/protocol";
@@ -15,10 +16,13 @@ import {
   query,
 } from "./_generated/server";
 import { devboxSecretOk, enqueueCommandRow } from "./commands";
+import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 import { devboxByDevboxId } from "./devboxes";
 import type { StoredFile } from "./files";
+import { machineByMachineId, releaseLocalAgentForTask } from "./local";
 import {
   effortValidator,
+  localAccessValidator,
   taskFileValidator,
   taskStatusValidator,
 } from "./schema";
@@ -81,6 +85,10 @@ export const findByChannelThread = internalQuery({
         taskId: task.taskId,
         title: task.title,
         status: task.status,
+        // #138: lets the orchestrator spot a pending permission ask (a bare
+        // "yes" in the thread answers it) and route steers to local agents.
+        localAccess: task.localAccess?.status,
+        hasLocalAgent: task.localMachineId !== undefined,
       }));
   },
 });
@@ -108,7 +116,7 @@ export type NewTaskArgs = {
   /** Absent for ephemeral tasks: hosts.placeEphemeralTask assigns the devbox
    * (immediately when a slot is free, or after a scale-up when not). */
   devboxId?: string;
-  placement?: "ephemeral" | "permanent";
+  placement?: "ephemeral" | "permanent" | "local";
   slackChannel: string;
   slackThreadTs?: string;
   slackUser?: string;
@@ -119,6 +127,9 @@ export type NewTaskArgs = {
   /** Slack attachments staged in Convex storage (see schema.taskFileValidator).
    * Resolved to URLs and handed to the devbox at start. */
   files?: StoredFile[];
+  /** #138: local-primary tasks are created with the grant already recorded —
+   * starting one requires explicit user consent in conversation. */
+  localAccess?: { status: LocalAccessStatus; resolvedAt?: number };
 };
 
 /** Plain-function form so other mutations (dashboard retry) can insert a
@@ -147,6 +158,9 @@ export async function insertTaskRow(
     ...(args.files === undefined || args.files.length === 0
       ? {}
       : { files: args.files }),
+    ...(args.localAccess === undefined
+      ? {}
+      : { localAccess: args.localAccess }),
     createdAt: now,
     updatedAt: now,
   });
@@ -159,7 +173,11 @@ export const create = internalMutation({
     prompt: v.string(),
     devboxId: v.optional(v.string()),
     placement: v.optional(
-      v.union(v.literal("ephemeral"), v.literal("permanent")),
+      v.union(
+        v.literal("ephemeral"),
+        v.literal("permanent"),
+        v.literal("local"),
+      ),
     ),
     slackChannel: v.string(),
     slackThreadTs: v.optional(v.string()),
@@ -167,6 +185,7 @@ export const create = internalMutation({
     slackPermalink: v.optional(v.string()),
     effort: v.optional(effortValidator),
     files: v.optional(v.array(taskFileValidator)),
+    localAccess: v.optional(localAccessValidator),
   },
   handler: async (ctx, args) => {
     await insertTaskRow(ctx, args);
@@ -247,6 +266,56 @@ export async function stopTaskCore(
     return { kind: "already_terminal", status: task.status };
   }
   if (task.devboxId === undefined) {
+    // #138: a local-primary task has no devbox but IS dispatched — its stop
+    // is a taskId-guarded interrupt to the machine's daemon, not a queue
+    // cancellation. (Local tasks are never queued: placement requires a
+    // free, online machine.)
+    if (task.localMachineId !== undefined) {
+      const machine = await machineByMachineId(ctx, task.localMachineId);
+      if (machine === null || machine.taskId !== task.taskId) {
+        return {
+          kind: "rejected",
+          reason: `local machine ${task.localMachineId} is no longer serving task ${taskId} — nothing to interrupt`,
+        };
+      }
+      // An OFFLINE daemon will never post the "stopped" event this stop
+      // otherwise waits for — and once the machine is released, a later
+      // daemon reboot's reconcile pass has nothing to key off. Stop the task
+      // terminally in place instead (the queued interrupt still cleans up a
+      // session that unexpectedly resurfaces).
+      const offline = Date.now() - machine.lastSeenAt > HEARTBEAT_FRESHNESS_MS;
+      await releaseLocalAgentForTask(
+        ctx,
+        task,
+        "The task was stopped before this request was answered.",
+        { freeMachine: offline },
+      );
+      if (offline) {
+        const now = Date.now();
+        const summary =
+          "Stopped while the machine's daemon was offline (no live session to interrupt).";
+        await ctx.db.patch(task._id, {
+          status: "stopped",
+          lastSummary: summary,
+          updatedAt: now,
+          finishedAt: now,
+        });
+        await ctx.db.insert("taskEvents", {
+          taskId: task.taskId,
+          machineId: task.localMachineId,
+          type: "stopped",
+          summary,
+          ts: now,
+        });
+      }
+      if (notes.interruptRequestedText !== undefined) {
+        await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+          taskId,
+          text: notes.interruptRequestedText,
+        });
+      }
+      return { kind: "interrupted" };
+    }
     if (await cancelQueuedRow(ctx, taskId)) {
       await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
         taskId,
@@ -272,6 +341,16 @@ export async function stopTaskCore(
     kind: "interrupt",
     payload: JSON.stringify(payload),
   });
+  // #138: a split task's local helper is released alongside the cloud
+  // interrupt (stops the helper session, unblocks any awaited peer requests;
+  // the machine's busy marker frees via the daemon's own signals).
+  if (task.localMachineId !== undefined) {
+    await releaseLocalAgentForTask(
+      ctx,
+      task,
+      "The task was stopped before this request was answered.",
+    );
+  }
   if (notes.interruptRequestedText !== undefined) {
     await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
       taskId,
@@ -387,6 +466,9 @@ export const activeWithLatestEvent = internalQuery({
           taskId: task.taskId,
           title: task.title,
           devboxId: task.devboxId,
+          // #138: local-primary tasks derive their staleness status line from
+          // the machine's daemon heartbeat instead of a devbox.
+          localMachineId: task.localMachineId,
           slackChannel: task.slackChannel,
           slackThreadTs: task.slackThreadTs,
           lastNudgedAt: task.lastNudgedAt,

@@ -10,7 +10,11 @@ import {
   isTerminalTaskStatus,
   type UserMessagePayload,
 } from "../shared/protocol";
-import { monitoringUrl, steerRejection } from "../src/orchestration";
+import {
+  localSteerRejection,
+  monitoringUrl,
+  steerRejection,
+} from "../src/orchestration";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
@@ -22,8 +26,18 @@ import {
 import { enqueueCommandRow, secretMatches } from "./commands";
 import { devboxByDevboxId } from "./devboxes";
 import { fleetSnapshotData, placeEphemeralTaskRow } from "./hosts";
+import {
+  enqueueLocalCommandRow,
+  machineByMachineId,
+  placeLocalTaskRow,
+} from "./local";
 import { taskStatusValidator } from "./schema";
-import { insertTaskRow, stopTaskCore, taskByTaskId } from "./tasks";
+import {
+  cancelQueuedRow,
+  insertTaskRow,
+  stopTaskCore,
+  taskByTaskId,
+} from "./tasks";
 
 function secretOk(secret: string): boolean {
   return secretMatches(
@@ -46,6 +60,10 @@ function publicTask(task: Doc<"tasks">) {
     status: task.status,
     placement: task.placement,
     devboxId: task.devboxId,
+    // #138: the local agent serving this task (primary for placement
+    // "local"; a split task's helper otherwise) + the per-task grant state.
+    localMachineId: task.localMachineId,
+    localAccess: task.localAccess?.status,
     slackChannel: task.slackChannel,
     slackThreadTs: task.slackThreadTs,
     slackUser: task.slackUser,
@@ -164,6 +182,11 @@ export const taskDetail = query({
         ts: e.ts,
         detail: e.detail ?? null,
         tool: e.tool ?? null,
+        // #138: which agent produced the row, so a split task's timeline can
+        // attribute local-agent work.
+        source: (e.machineId !== undefined ? "local" : "cloud") as
+          | "local"
+          | "cloud",
         imageUrl:
           e.imageStorageId === undefined
             ? null
@@ -311,23 +334,42 @@ export const steerTask = mutation({
     if (task === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }
-    const devbox = await loadDevbox(ctx, task.devboxId);
-    const rejection = steerRejection(task, devbox);
-    if (rejection !== null || devbox === null) {
-      return {
-        ok: false,
-        reason: rejection ?? `devbox ${task.devboxId} is missing`,
-      };
-    }
     const payload: UserMessagePayload = {
       taskId: args.taskId,
       text: args.text,
     };
-    await enqueueCommandRow(ctx, {
-      devboxId: devbox.devboxId,
-      kind: "user_message",
-      payload: JSON.stringify(payload),
-    });
+    // #138: a local-primary task's follow-up goes to its machine's daemon.
+    // (Split tasks steer their cloud primary here; the local helper is
+    // steered from Slack via steer_task agent="local".)
+    if (task.devboxId === undefined && task.localMachineId !== undefined) {
+      const machine = await machineByMachineId(ctx, task.localMachineId);
+      const rejection = localSteerRejection(task, machine);
+      if (rejection !== null || machine === null) {
+        return {
+          ok: false,
+          reason: rejection ?? `machine ${task.localMachineId} is missing`,
+        };
+      }
+      await enqueueLocalCommandRow(ctx, {
+        machineId: machine.machineId,
+        kind: "user_message",
+        payload: JSON.stringify(payload),
+      });
+    } else {
+      const devbox = await loadDevbox(ctx, task.devboxId);
+      const rejection = steerRejection(task, devbox);
+      if (rejection !== null || devbox === null) {
+        return {
+          ok: false,
+          reason: rejection ?? `devbox ${task.devboxId} is missing`,
+        };
+      }
+      await enqueueCommandRow(ctx, {
+        devboxId: devbox.devboxId,
+        kind: "user_message",
+        payload: JSON.stringify(payload),
+      });
+    }
     // Keep the Slack thread the durable narrative: dashboard steers must
     // leave the same trace a thread-reply steer would.
     await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
@@ -374,11 +416,39 @@ export const retryTask = mutation({
       };
     }
     const retryTaskId = `task-${crypto.randomUUID().slice(0, 8)}`;
+    // #138: a local-primary task retries on its machine. The dashboard is
+    // operator-only (one shared DASHBOARD_SECRET, like anonymous comments),
+    // so clicking retry IS the consent and the new per-task grant is recorded
+    // at creation — deliberately WITHOUT the Slack flow's machine-owner
+    // check, which exists to keep OTHER Slack users from granting someone
+    // else's machine; the dashboard has no such second party. No queueing: a busy/offline machine
+    // refuses the retry BEFORE the row is inserted (a mutation's writes
+    // commit even when it returns ok:false, so a post-insert refusal would
+    // strand a queued-forever row).
+    const retryLocal = source.placement === "local";
+    if (retryLocal) {
+      if (source.localMachineId === undefined) {
+        return { ok: false, reason: "local task has no machine recorded" };
+      }
+      const machine = await machineByMachineId(ctx, source.localMachineId);
+      if (machine === null) {
+        return {
+          ok: false,
+          reason: `machine ${source.localMachineId} is not registered`,
+        };
+      }
+      if (machine.taskId !== undefined) {
+        return {
+          ok: false,
+          reason: `machine ${machine.machineId} is busy with ${machine.taskId}`,
+        };
+      }
+    }
     await insertTaskRow(ctx, {
       taskId: retryTaskId,
       title: source.title,
       prompt: source.prompt,
-      placement: "ephemeral",
+      placement: retryLocal ? "local" : "ephemeral",
       slackChannel: source.slackChannel,
       // Known-defined: the legacy-no-thread guard above returned already.
       slackThreadTs: source.slackThreadTs,
@@ -395,7 +465,33 @@ export const retryTask = mutation({
       // if a blob was pruned since: the gateway's /devbox/file fetch 404s and
       // it tells the session the file couldn't be downloaded (no silent drop).
       ...(source.files === undefined ? {} : { files: source.files }),
+      ...(retryLocal
+        ? {
+            localAccess: { status: "granted" as const, resolvedAt: Date.now() },
+          }
+        : {}),
     });
+    if (retryLocal && source.localMachineId !== undefined) {
+      const placed = await placeLocalTaskRow(
+        ctx,
+        retryTaskId,
+        source.localMachineId,
+      );
+      if (!placed.ok) {
+        // Pre-checked above; a race lost here still must not strand the row.
+        await cancelQueuedRow(ctx, retryTaskId);
+        return { ok: false, reason: placed.reason ?? "placement failed" };
+      }
+      await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+        taskId: args.taskId,
+        text: `:repeat: *${source.title}* (\`${args.taskId}\`) is being retried from the dashboard as \`${retryTaskId}\` — same machine, same prompt. Status updates will follow in this thread.`,
+      });
+      return {
+        ok: true,
+        taskId: retryTaskId,
+        note: "retry starting on the local machine",
+      };
+    }
     const placement = await placeEphemeralTaskRow(ctx, retryTaskId);
     await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
       taskId: args.taskId,

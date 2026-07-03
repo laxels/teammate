@@ -8,16 +8,18 @@
     "deploy:convex": "scripts/singleton-lock.sh convex convex dev --once",
     "worktree-setup": "scripts/worktree-setup.sh",
     "validate": "concurrently --group --prefix-colors auto --names typecheck,lint,test \"bun run --no-env-file typecheck\" \"bun run --no-env-file lint\" \"bun run --no-env-file test\"",
-    "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p convex/tsconfig.test.json --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p web --noEmit && tsc -p dashboard --noEmit && tsc -p scripts --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p convex/tsconfig.test.json --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p localagent --noEmit && tsc -p web --noEmit && tsc -p dashboard --noEmit && tsc -p scripts --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "bun test --no-env-file"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.172",
     "@anthropic-ai/sdk": "0.104.1",
     "convex": "1.41.0",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
@@ -32,6 +34,7 @@
     "dashboard",
     "gateway",
     "hostagent",
+    "localagent",
     "web"
   ]
 }

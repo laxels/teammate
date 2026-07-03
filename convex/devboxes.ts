@@ -13,6 +13,7 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { devboxEventTypeValidator } from "./constants";
+import { releaseLocalAgentForTask } from "./local";
 import { taskByTaskId } from "./tasks";
 
 /** Devbox event types that mean the devbox is occupied by a task. */
@@ -105,6 +106,17 @@ export const recordEvent = internalMutation({
           ? { finishedAt: args.ts }
           : {}),
       });
+      // #138: a split task's local helper is released when the cloud (primary)
+      // agent finishes — stops the idle helper session and synthesizes replies
+      // for anything the helper never answered. The machine's busy marker
+      // frees via the daemon's own signals (terminal event / heartbeat).
+      if (isTerminalTaskStatus(incomingStatus)) {
+        await releaseLocalAgentForTask(
+          ctx,
+          task,
+          `The task ended (${incomingStatus}) before this request was answered.`,
+        );
+      }
     }
 
     const devbox = await devboxByDevboxId(ctx, args.devboxId);

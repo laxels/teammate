@@ -2,6 +2,7 @@ import { defineSchema, defineTable } from "convex/server";
 import { type Infer, v } from "convex/values";
 import type {
   HostCommandKind,
+  LocalAccessStatus,
   RecordingStatus,
   TaskEffort,
   TaskStatus,
@@ -45,12 +46,35 @@ type _TaskEffortMatchesProtocol = [
 const _taskEffortMatchesProtocol: _TaskEffortMatchesProtocol = true;
 void _taskEffortMatchesProtocol;
 
-/** Devbox gateway command kinds (the `commands` queue — see commands.ts). */
+/** Devbox gateway command kinds (the `commands` queue — see commands.ts).
+ * The local daemon's `localCommands` queue reuses the same kinds and payloads
+ * (see local.ts). */
 export const commandKindValidator = v.union(
   v.literal("start"),
   v.literal("user_message"),
   v.literal("interrupt"),
 );
+
+/** Per-task local-machine grant (#138) — see shared/protocol.ts
+ * LocalAccessStatus. Absent on the task = never requested. */
+export const localAccessValidator = v.object({
+  status: v.union(
+    v.literal("requested"),
+    v.literal("granted"),
+    v.literal("denied"),
+  ),
+  requestedAt: v.optional(v.number()),
+  resolvedAt: v.optional(v.number()),
+});
+
+type _LocalAccessStatusMatchesProtocol = [
+  Infer<typeof localAccessValidator>["status"],
+  LocalAccessStatus,
+] extends [LocalAccessStatus, Infer<typeof localAccessValidator>["status"]]
+  ? true
+  : never;
+const _localAccessStatusMatchesProtocol: _LocalAccessStatusMatchesProtocol = true;
+void _localAccessStatusMatchesProtocol;
 
 /** Host-agent command kinds (the `hostCommands` queue — see hosts.ts). */
 export const hostCommandKindValidator = v.union(
@@ -136,14 +160,21 @@ export default defineSchema({
     prompt: v.string(),
     status: taskStatusValidator,
     devboxId: v.optional(v.string()),
-    // Requested placement — always "ephemeral" now (the only path). An
-    // "ephemeral" task with no devboxId is waiting for a VM slot (placed by
+    // Requested placement. "ephemeral" is the cloud default; an "ephemeral"
+    // task with no devboxId is waiting for a VM slot (placed by
     // hosts.placeQueuedEphemeralTasks when one frees up or a new host comes
-    // online). The "permanent" literal is retained ONLY so historical rows
-    // from the retired always-on devbox-1 (#107) still validate; no code path
-    // writes it. Absent on pre-placement-era rows.
+    // online). "local" (#138) runs the task's PRIMARY agent on the user's own
+    // Mac via the localagent daemon — never queued: it is only created when a
+    // registered machine is online and free. The "permanent" literal is
+    // retained ONLY so historical rows from the retired always-on devbox-1
+    // (#107) still validate; no code path writes it. Absent on
+    // pre-placement-era rows.
     placement: v.optional(
-      v.union(v.literal("ephemeral"), v.literal("permanent")),
+      v.union(
+        v.literal("ephemeral"),
+        v.literal("permanent"),
+        v.literal("local"),
+      ),
     ),
     slackChannel: v.string(),
     // The task's home thread: every task anchors to the thread of the request
@@ -190,6 +221,16 @@ export default defineSchema({
     // filter. Purely cosmetic — it never touches `status` or the task's
     // execution. Absent/false => not archived (the default for every row).
     archived: v.optional(v.boolean()),
+    // ---- Local machine mode (#138) ----
+    // The machine whose local agent serves this task. Set together with
+    // `placement: "local"` for local-primary tasks, or when a split task's
+    // helper agent is spawned. A task can have BOTH devboxId and
+    // localMachineId (split task: cloud primary + local helper) — the model
+    // is at most one agent of each kind per task.
+    localMachineId: v.optional(v.string()),
+    // Per-task, whole-machine grant to drive the user's local Mac. Absent =
+    // never requested; see local.ts peerRequest / resolveAccess.
+    localAccess: v.optional(localAccessValidator),
   })
     .index("by_task_id", ["taskId"])
     .index("by_status", ["status"])
@@ -364,15 +405,21 @@ export default defineSchema({
     createdAt: v.number(),
   }),
 
-  // Lifecycle events posted by devbox gateways to /devbox/events, plus
-  // orchestrator-recorded events for tasks that never reached a devbox
-  // (queue cancellations) — those have no devboxId. Status events drive task
-  // status; info events (#70: assistant_text/tool_call/tool_result) only
-  // populate the task-details retro timeline and carry the optional fields
-  // below. High volume is expected for info events (a screenshot ~every step).
+  // Lifecycle events posted by devbox gateways to /devbox/events and local
+  // agents to /local/events (#138: those carry machineId instead of devboxId),
+  // plus orchestrator-recorded events for tasks that never reached an agent
+  // (queue cancellations) — those have neither. Peer-channel traffic is also
+  // recorded here as timeline-only rows (type "peer_request"/"peer_reply",
+  // inserted by local.ts). Status events drive task status; info events
+  // (#70: assistant_text/tool_call/tool_result) only populate the
+  // task-details retro timeline and carry the optional fields below. High
+  // volume is expected for info events (a screenshot ~every step).
   taskEvents: defineTable({
     taskId: v.string(),
     devboxId: v.optional(v.string()),
+    // The local machine whose agent produced this event (#138); lets the
+    // dashboard attribute split-task timeline rows to the cloud/local agent.
+    machineId: v.optional(v.string()),
     type: v.string(),
     summary: v.string(),
     ts: v.number(),
@@ -385,4 +432,83 @@ export default defineSchema({
     // taskDetail.
     imageStorageId: v.optional(v.id("_storage")),
   }).index("by_task_id", ["taskId"]),
+
+  // ---- Local machine mode (#138) ----
+
+  // The user's own Macs running the localagent daemon (self-registered on
+  // first heartbeat, like `hosts`). Rows are permanent — a machine is a
+  // standing surface, not an ephemeral resource. `taskId` marks the machine
+  // busy: one local agent session per machine at a time; it is set when a
+  // local agent is spawned and cleared when the task releases the machine.
+  localMachines: defineTable({
+    machineId: v.string(),
+    // Human-readable label for Slack asks / the dashboard (heartbeat-reported).
+    displayName: v.optional(v.string()),
+    // Slack user id of the machine's owner (heartbeat-reported). When set,
+    // only this user's say-so may grant local access, and permission asks tag
+    // them; unset machines (single-user setups) accept any grant.
+    ownerSlackUser: v.optional(v.string()),
+    taskId: v.optional(v.string()),
+    lastSeenAt: v.number(),
+  }).index("by_machine_id", ["machineId"]),
+
+  // Control-plane command queue for local daemons, mirroring `commands`:
+  // the orchestrator enqueues, daemons subscribe and ack (outbound-only —
+  // the cloud never dials a user's machine). Same claim lifecycle and
+  // payload kinds as the devbox queue; auth is LOCAL_MACHINE_SECRET.
+  localCommands: defineTable({
+    commandId: v.string(),
+    machineId: v.string(),
+    kind: commandKindValidator,
+    // JSON payload: StartTaskRequest for "start", UserMessagePayload for
+    // "user_message", InterruptPayload for "interrupt".
+    payload: v.string(),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("running"),
+      v.literal("acked"),
+    ),
+    claimedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_machine_status", ["machineId", "status"])
+    .index("by_command_id", ["commandId"]),
+
+  // The Convex-relayed agent<->agent peer channel (#138): cloud agents file
+  // "request" rows (POST /devbox/peer/request) and poll for the matching
+  // "reply" (GET /devbox/peer/reply); local agents answer via
+  // POST /local/peer/reply. The orchestrator LLM never touches these — only
+  // the permission ask (first request against an ungranted task) involves the
+  // user. Replies pair to requests by requestId; a request with no reply row
+  // is still unanswered. Denials and local-agent death insert synthetic
+  // replies so a blocked cloud agent always unblocks.
+  peerMessages: defineTable({
+    messageId: v.string(),
+    taskId: v.string(),
+    requestId: v.string(),
+    kind: v.union(v.literal("request"), v.literal("reply")),
+    // Free text, truncated to PEER_BODY_MAX_CHARS server-side.
+    body: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_task", ["taskId"])
+    .index("by_request", ["requestId", "kind"]),
+
+  // Capability manifests for golden devbox images (#138): what cloud agents
+  // can and cannot do (installed apps, authed accounts, tooling), keyed by
+  // golden tag. `generated` is auto-enumerated at bake time; `curated` is the
+  // hand-maintained section (scripts/golden-capabilities.md). The latest row
+  // is injected into the orchestrator's system prompt so routing (cloud vs
+  // local vs split) is informed; it only changes on a new bake, matching how
+  // cloud environment changes actually persist.
+  capabilityManifests: defineTable({
+    goldenTag: v.string(),
+    generated: v.string(),
+    curated: v.string(),
+    updatedAt: v.number(),
+  })
+    .index("by_tag", ["goldenTag"])
+    // capabilities.current runs on every orchestrator turn: newest row via
+    // index, never a whole-table scan of multi-KB manifest bodies.
+    .index("by_updated", ["updatedAt"]),
 });

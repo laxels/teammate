@@ -12,10 +12,15 @@ import {
 } from "../shared/protocol";
 import {
   type AttachmentInfo,
+  buildCapabilitiesSection,
+  buildLocalMachinesSection,
   buildOrchestratorUserMessage,
   classifySlackEvent,
   isNoReplySignal,
+  type LocalMachineContext,
+  localSteerRejection,
   monitoringUrl,
+  pickLocalMachine,
   resolveThreadTarget,
   type SlackFileRef,
   steerRejection,
@@ -30,6 +35,7 @@ import {
 } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { type ActionCtx, internalAction } from "./_generated/server";
+import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 import { resolveDeliverableFiles, type StoredFile } from "./files";
 
 // Model policy (ARCHITECTURE.md): claude-fable-5 at xhigh everywhere, no
@@ -46,6 +52,10 @@ const MAX_TOOL_ITERATIONS = 12;
 // swallows that, so a missing emoji degrades to no ack, never an error.
 const ACK_REACTION = "blob_salute";
 
+// The static base of the system prompt. Per-turn dynamic sections —
+// <devbox_capabilities> (the golden image's capability manifest) and
+// <local_machines> (#138: registered user Macs + the local-routing rules) —
+// are appended by processSlackEvent, so keep everything time-invariant here.
 const SYSTEM_PROMPT = `You are Ultraclaude, a virtual teammate who orchestrates Claude Code devboxes for your team.
 
 Each devbox is a FULL macOS desktop, not a headless sandbox: Claude Code with terminal/file access, fast Playwright-based browser automation (accessibility-tree snapshots and element-targeted actions in a dedicated Chrome), plus complete GUI control of the desktop (screenshots, mouse, keyboard) via built-in computer-use tools. Every task can drive the browser and native apps — web apps, sites without APIs, web games, anything a person could do at a Mac — with no special flag; and for the rare site that blocks automated browsers (e.g. Google account sign-in, LinkedIn), a devbox falls back to a non-automated browser on the same logged-in profile that it drives by hand. Never claim you cannot use a browser or a GUI: you personally cannot, but your devboxes can, so delegate.
@@ -55,8 +65,9 @@ You receive Slack messages (DMs and @mentions). Either answer directly or use yo
 - When all VM slots are full, start_task queues the task and it starts automatically the moment a slot frees (a running task finishing). On-demand auto-scaling is OFF — a new Mac host is NOT bootstrapped just for a queued task — so don't promise a host is "spinning up" or give a bootstrap ETA; the standing warm fleet is grown separately, out of band. Relay the wait honestly.
 - get_fleet shows the Mac hosts, VM slots, queued tasks, and recent fleet events. Use it when the user asks about capacity/infrastructure or when debugging why a task hasn't started.
 - get_task / list_tasks answer questions about ongoing work.
-- steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts).
-- stop_task interrupts a running task (it also cancels a task still waiting in the queue).
+- steer_task relays mid-task guidance (corrections, extra context, answers to a task's questions) into the running Claude Code session — the same effect as typing into the monitoring page's steering box. Pass the user's guidance through faithfully. It works any time before the task finishes, including while its devbox is still provisioning (delivery is queued until the session starts). For a split task (cloud agent + local helper), pass agent="local" when the message answers something the LOCAL agent asked.
+- stop_task interrupts a running task (it also cancels a task still waiting in the queue, and releases a task's local agent).
+- Local-machine mode (#138): start_task target="local" runs a task's primary agent on the user's own Mac, and running cloud tasks can request local help mid-task (which posts a permission ask in the thread on its own). resolve_local_access records the user's yes/no on such an ask (or a preemptive "use my machine"). The <local_machines> block below carries the standing rules — consent, routing, and limits.
 
 Each task's home is the Slack thread of the request that started it; follow-up tasks started from that thread share it. Messages arriving in a task's thread include a <thread_context> block listing the task(s) anchored there — treat them as being about that work: steer with steer_task, report with get_task, stop with stop_task. With several tasks listed, prefer the one the message names, otherwise the newest non-terminal one; ask before a stop that is ambiguous between running tasks. A plain question ("how's it going?") deserves a status answer, not a steer. In channel threads you also see replies that aren't addressed to you (people talking to each other): when no action or answer is genuinely needed from you, respond with exactly NO_REPLY and nothing else. Steering/stopping via Slack is restricted to the task's owner or replies in its own thread — relay the tool's error honestly if it refuses. (The operator's tailnet dashboard can also steer/stop tasks; those actions announce themselves in the thread.)
 
@@ -107,8 +118,32 @@ const TOOLS: Anthropic.Tool[] = [
           description:
             'Reasoning-effort level for the task agent. OMIT THIS unless the user explicitly and unambiguously asks for a specific level (e.g. "use low effort", "run this at max effort"). When omitted the task runs at the xhigh default (highest accuracy, but slower). NEVER infer effort from urgency, tone, deadlines, or task size — set it only on a direct, literal request, and pass exactly the level the user named.',
         },
+        target: {
+          type: "string",
+          enum: ["cloud", "local"],
+          description:
+            'Where the task\'s primary agent runs. OMIT for the default ("cloud": a fresh ephemeral devbox VM). Pass "local" ONLY when the work inherently needs the user\'s own machine (their local files, apps installed only there, signed-in sessions that can\'t transfer) AND the user clearly consented to local execution in this conversation — starting a local task records that consent as the per-task grant, so never pass it on your own initiative. Local tasks run via background computer use with a visible agent cursor, one at a time per machine, with no queueing, no monitoring page, and no screen recording.',
+        },
       },
       required: ["title", "prompt"],
+    },
+  },
+  {
+    name: "resolve_local_access",
+    description:
+      "Record the user's decision on a task's pending local-machine permission ask, or a preemptive offer (\"you can use my machine for this\"). Pass decision=\"granted\" ONLY on a clear, unambiguous yes from the machine's owner — anyone else's yes does not count, and ambiguity is a no for now (they can grant later). Granting spawns the task's local agent and delivers any local-work requests that queued while permission was pending; denying records the denial and immediately unblocks the waiting cloud agent with it. Never re-ask after a denial.",
+    input_schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task id the decision is for" },
+        decision: {
+          type: "string",
+          enum: ["granted", "denied"],
+          description:
+            "granted = clear yes from the machine owner; denied = no, or an explicit refusal",
+        },
+      },
+      required: ["taskId", "decision"],
     },
   },
   {
@@ -129,6 +164,12 @@ const TOOLS: Anthropic.Tool[] = [
           type: "string",
           description:
             "The guidance to deliver to the session, written as if speaking to the Claude Code instance doing the work. Preserve the user's intent and constraints faithfully.",
+        },
+        agent: {
+          type: "string",
+          enum: ["cloud", "local"],
+          description:
+            "Which of the task's agents receives the message. OMIT for the primary agent (the devbox session for cloud/split tasks, the local agent for local tasks). Pass \"local\" only to reach a split task's local helper — e.g. to answer a question the LOCAL agent asked in the thread.",
         },
       },
       required: ["taskId", "message"],
@@ -298,6 +339,8 @@ async function executeTool(
           prompt: task.prompt,
           status: task.status,
           devboxId: task.devboxId,
+          localMachineId: task.localMachineId,
+          localAccess: task.localAccess?.status,
           createdAt: task.createdAt,
           updatedAt: task.updatedAt,
         },
@@ -333,6 +376,67 @@ async function executeTool(
       // level. Unknown values degrade to undefined (gateway xhigh default).
       const effort = parseTaskEffort(input.effort);
       const effortArgs = effort === undefined ? {} : { effort };
+
+      // #138: a local-primary task runs on the user's own Mac. The tool
+      // contract makes passing target="local" itself the record of user
+      // consent, so the grant is written at creation. No queueing: placement
+      // requires a free, online machine right now.
+      if (input.target === "local") {
+        const machines = await ctx.runQuery(internal.local.listMachines, {});
+        const machine = pickLocalMachine(
+          machines.filter((m) => m.taskId === undefined),
+          {
+            preferOwner: requester,
+            now: Date.now(),
+            freshnessMs: HEARTBEAT_FRESHNESS_MS,
+          },
+        );
+        if (machine === null) {
+          const anyRegistered = machines.length > 0;
+          return toolError(
+            anyRegistered
+              ? "no local machine is available: the requester's machine is offline (daemon heartbeat stale), busy with another task, or owned by someone else. Local machines run one task at a time and tasks are not queued for them — offer cloud, or suggest retrying when the machine frees."
+              : "no local machine is registered (the localagent daemon isn't running anywhere) — local execution is unavailable.",
+          );
+        }
+        await ctx.runMutation(internal.tasks.create, {
+          taskId,
+          title,
+          prompt,
+          placement: "local",
+          slackChannel: target.channel,
+          slackThreadTs: target.threadTs,
+          slackUser: requester,
+          localAccess: { status: "granted", resolvedAt: Date.now() },
+          ...permalinkArgs,
+          ...effortArgs,
+          ...fileArgs,
+        });
+        const placed = await ctx.runMutation(internal.local.placeLocalTask, {
+          taskId,
+          machineId: machine.machineId,
+        });
+        if (!placed.ok) {
+          // The machine was taken between the pick and the place (or went
+          // offline). The row is still an unplaced "queued" task at this
+          // point, so the queued-cancel path retires it properly (terminal
+          // status + finishedAt + a taskEvents row + the thread note) instead
+          // of a bare status flip.
+          await ctx.runMutation(internal.tasks.stop, {
+            taskId,
+            queuedCancelText: `:octagonal_sign: *${title}* (\`${taskId}\`) could not start on the local machine: ${placed.reason ?? "placement failed"}.`,
+          });
+          return toolError(
+            `could not place the local task: ${placed.reason ?? "unknown"}`,
+          );
+        }
+        return JSON.stringify({
+          ok: true,
+          taskId,
+          machineId: machine.machineId,
+          note: "The task is starting on the user's own Mac via background computer use (visible agent cursor; no focus stealing; no monitoring page or screen recording — per-window screenshots appear on the dashboard timeline). Status updates post to this thread automatically.",
+        });
+      }
 
       // Every task runs on a fresh ephemeral devbox. The task row is created
       // first so it can wait in the queue when every VM slot is taken; placement
@@ -395,6 +499,48 @@ async function executeTool(
       if (unauthorized !== null) {
         return toolError(unauthorized);
       }
+      const deliverable = resolveDeliverableFiles(inboundFiles);
+      const payload: UserMessagePayload = {
+        taskId,
+        text: message,
+        ...(deliverable.length > 0 ? { files: deliverable } : {}),
+      };
+      // #138: route to the requested agent, defaulting to the primary one —
+      // the devbox session for cloud/split tasks, the local agent for
+      // local-primary tasks.
+      const agent =
+        input.agent === "local" || input.agent === "cloud"
+          ? input.agent
+          : task.devboxId !== undefined
+            ? "cloud"
+            : task.localMachineId !== undefined
+              ? "local"
+              : "cloud";
+      if (agent === "local") {
+        const machine =
+          task.localMachineId === undefined
+            ? null
+            : await ctx.runQuery(internal.local.getMachine, {
+                machineId: task.localMachineId,
+              });
+        const localRejection = localSteerRejection(task, machine);
+        if (localRejection !== null || machine === null) {
+          return toolError(
+            localRejection ?? `local machine ${task.localMachineId} is missing`,
+          );
+        }
+        await ctx.runMutation(internal.local.enqueue, {
+          machineId: machine.machineId,
+          kind: "user_message",
+          payload: JSON.stringify(payload),
+        });
+        return JSON.stringify({
+          ok: true,
+          taskId,
+          agent: "local",
+          note: "message queued for the local agent's session. If the task finishes before delivery it is dropped — the thread's latest status update is authoritative.",
+        });
+      }
       const devbox =
         task.devboxId === undefined
           ? null
@@ -405,12 +551,6 @@ async function executeTool(
       if (rejection !== null || devbox === null) {
         return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
       }
-      const deliverable = resolveDeliverableFiles(inboundFiles);
-      const payload: UserMessagePayload = {
-        taskId,
-        text: message,
-        ...(deliverable.length > 0 ? { files: deliverable } : {}),
-      };
       await ctx.runMutation(internal.commands.enqueue, {
         devboxId: devbox.devboxId,
         kind: "user_message",
@@ -421,6 +561,38 @@ async function executeTool(
         taskId,
         note: "message queued for the live session. If the task finishes before delivery it is dropped — the thread's latest status update is authoritative.",
       });
+    }
+
+    case "resolve_local_access": {
+      const { taskId, decision } = input;
+      if (
+        typeof taskId !== "string" ||
+        (decision !== "granted" && decision !== "denied")
+      ) {
+        return toolError(
+          'taskId (string) and decision ("granted" | "denied") are required',
+        );
+      }
+      const task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
+      if (task === null) {
+        return toolError(`no task with id ${taskId}`);
+      }
+      // Same steer/stop hygiene: the decision must come from the task's owner
+      // or from inside its thread. The machine-owner check (only the owner
+      // may grant THEIR machine) lives in the mutation.
+      const unauthorized = taskActionAuthorization({ task, requester, target });
+      if (unauthorized !== null) {
+        return toolError(unauthorized);
+      }
+      const outcome = await ctx.runMutation(internal.local.resolveAccess, {
+        taskId,
+        decision,
+        requester,
+      });
+      if (!outcome.ok) {
+        return toolError(outcome.reason);
+      }
+      return JSON.stringify(outcome);
     }
 
     case "stop_task": {
@@ -587,6 +759,19 @@ export const processSlackEvent = internalAction({
       trigger.files.length > 0
         ? await stageInboundFiles(ctx, botToken, args.eventId, trigger.files)
         : { stored: [], imageBlocks: [], attachments: [] };
+    // #138: per-turn dynamic system-prompt sections. The capability manifest
+    // changes only on a golden bake and the machine list on daemon
+    // heartbeats, so the prefix is stable enough across a tool loop to cache.
+    const [manifest, localMachines] = await Promise.all([
+      ctx.runQuery(internal.capabilities.current, {}),
+      ctx.runQuery(internal.local.listMachines, {}),
+    ]);
+    const systemPrompt = [
+      SYSTEM_PROMPT,
+      buildCapabilitiesSection(manifest),
+      buildLocalMachinesSection(localMachines satisfies LocalMachineContext[]),
+    ].join("\n\n");
+
     const userText = buildOrchestratorUserMessage({
       trigger,
       threadTasks,
@@ -620,7 +805,7 @@ export const processSlackEvent = internalAction({
           // line, zero correctness risk; kept for that free future win — do
           // not remove as "useless." (#85)
           cache_control: { type: "ephemeral" },
-          system: SYSTEM_PROMPT,
+          system: systemPrompt,
           tools: TOOLS,
           messages,
         });

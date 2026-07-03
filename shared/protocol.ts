@@ -1,9 +1,12 @@
-// Wire contracts between the three Ultraclaude components:
-// monitoring page (web/) <-> devbox gateway (gateway/) <-> orchestrator (convex/).
+// Wire contracts between the Ultraclaude components:
+// monitoring page (web/) <-> devbox gateway (gateway/) <-> orchestrator
+// (convex/) <-> localagent daemon (localagent/, #138).
 //
 // The gateway runs INSIDE each devbox VM and is reachable only over the
 // tailnet. The monitoring page is served statically by the gateway, so all
-// page connections are same-origin.
+// page connections are same-origin. The localagent daemon runs on the user's
+// own Mac and is fully outbound (its contracts are in the "Local machine
+// mode" section below).
 
 // ---- Monitoring page <-> gateway: WebSocket at /ws/steer ----
 
@@ -305,6 +308,100 @@ export type DevboxEvent = {
  * Generous enough for full assistant turns and tool I/O, small enough that even
  * a burst of info events can't approach Convex's per-document size cap. */
 export const DETAIL_MAX_CHARS = 16_000;
+
+// ---- Local machine mode (#138) ----
+// An always-on daemon (localagent/) on the user's own Mac mirrors the gateway's
+// outbound-only pattern against its own control plane: it self-registers via
+// heartbeat (`local:heartbeat` -> localMachines row), subscribes to the
+// `localCommands` queue (same "start" | "user_message" | "interrupt" kinds and
+// payloads as the devbox queue), and posts LocalAgentEvents to /local/events.
+// It authenticates with LOCAL_MACHINE_SECRET — its own trust tier, NEVER the
+// fleet-wide devbox secret — via the `x-local-secret` header on HTTP endpoints
+// and a `secret` function argument on Convex client calls.
+//
+// ---- Local daemon HTTP surface (orchestrator side, {CONVEX_SITE_URL}) ----
+// POST /local/events       LocalAgentEvent          (x-local-secret)
+// POST /local/upload-url   -> { url }               (x-local-secret; the
+//                          generateUploadUrl flow for tool-result screenshots)
+// GET  /local/file?storageId=...                    (x-local-secret; staged
+//                          Slack attachments, mirrors /devbox/file)
+// POST /local/artifact     multipart, same fields as /devbox/artifact
+// POST /local/peer/reply   PeerReplyPayload         (x-local-secret)
+//
+// ---- Cloud-agent peer surface (gateway side, {CONVEX_SITE_URL}) ----
+// POST /devbox/peer/request  PeerRequestPayload     (x-devbox-secret)
+// GET  /devbox/peer/reply?taskId=...&requestId=...  (x-devbox-secret)
+//
+// The peer channel is Convex-relayed (both sides subscribe/poll outbound; the
+// cloud never dials an agent) and the orchestrator LLM is out of the loop once
+// a local agent is live: requests are delivered to the local session as
+// `user_message` localCommands mechanically, and replies are polled by the
+// cloud agent's await tool. Permission is per-task, whole-machine: the first
+// peer request against an ungranted task flips it to "requested" and posts a
+// Slack ask in the task's thread (tagging the requester); the orchestrator
+// records the user's decision via its resolve_local_access tool.
+
+/** Per-task local-machine grant state. Absent on the task = never requested.
+ * "requested" means the Slack ask is posted and pending; peer requests queue
+ * (unanswered) until the user decides. No standing "always allow" exists. */
+export type LocalAccessStatus = "requested" | "granted" | "denied";
+
+/** Lifecycle/info event posted by the local daemon to /local/events — the
+ * DevboxEvent shape with the machine id in place of a devbox id. Status
+ * events drive task status ONLY when the local agent is the task's primary
+ * agent (placement "local"); for a split task's helper agent they are
+ * recorded on the timeline (and needs_input still notifies) but never move
+ * task status — see convex/local.ts recordEvent. */
+export type LocalAgentEvent = {
+  machineId: string;
+  taskId: string;
+  type: DevboxEventType;
+  summary: string;
+  ts: number;
+  detail?: string;
+  tool?: string;
+  imageStorageId?: string;
+};
+
+/** Cloud agent -> orchestrator: request work on the user's local machine
+ * (gateway `request_local_work` tool -> POST /devbox/peer/request). The
+ * devboxId is the crosstalk guard: only the task's current devbox may file
+ * requests for it. requestId is caller-generated and idempotent — a retried
+ * POST with the same requestId returns the current state without duplicating
+ * the request. */
+export type PeerRequestPayload = {
+  taskId: string;
+  devboxId: string;
+  requestId: string;
+  body: string;
+};
+
+/** Local agent -> orchestrator: answer a peer request (localagent
+ * `reply_to_cloud` tool -> POST /local/peer/reply). */
+export type PeerReplyPayload = {
+  machineId: string;
+  taskId: string;
+  requestId: string;
+  body: string;
+};
+
+/** Max characters of a peer request/reply body persisted on the row; longer
+ * bodies are truncated server-side (rows must stay far under Convex's ~1 MB
+ * doc cap). Matches DETAIL_MAX_CHARS so a full tool-sized payload fits. */
+export const PEER_BODY_MAX_CHARS = 16_000;
+
+/** The synthetic reply a blocked cloud agent receives when local access is
+ * denied — one constant so the request-after-denial path, the denial
+ * resolution path, and the gateway tool guidance stay in lockstep. */
+export const LOCAL_ACCESS_DENIED_REPLY =
+  "Local-machine access was denied for this task. Continue cloud-only, best effort, and note the limitation in your result.";
+
+/** Timeline-only event types for peer traffic, inserted Convex-side when a
+ * request/reply lands (never posted by an agent, never drive task status).
+ * The dashboard renders them as pills; unknown consumers ignore them. */
+export const PEER_EVENT_TYPES = ["peer_request", "peer_reply"] as const;
+
+export type PeerEventType = (typeof PEER_EVENT_TYPES)[number];
 
 export type TaskStatus =
   | "queued"

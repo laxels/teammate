@@ -335,6 +335,21 @@ section[aria-label="task history"] h2 {
   background: var(--paper-sunken);
 }
 
+/* Cloud/local agent badge (#138): same tinted-pill geometry as .status, mono
+   because it's a data-ish label. Only rendered for local / split tasks. */
+.agent-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 1px 10px 2px;
+  border-radius: 999px;
+  flex: none;
+  color: var(--info-blue);
+  background: var(--info-tint);
+  border: 1px solid rgba(106, 155, 204, 0.25);
+}
+
 /* ---- buttons ---- */
 
 .act {
@@ -1463,4 +1478,49 @@ section[aria-label="task history"] h2 {
 .rec-compose-btn:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+/* ---- #138: local-agent attribution + peer-channel rows ---- */
+
+/* Small "local" tag in the gutter of rows a split task's local agent produced. */
+.tl-localtag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--info-blue);
+  background: var(--info-tint);
+  border-radius: 999px;
+  padding: 0 7px 1px;
+  margin-right: 6px;
+  vertical-align: 2px;
+}
+
+/* Peer request/reply rows: collapsed one-liners, expandable to the full body. */
+.tl-peer {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--paper-sunken);
+  padding: 2px 10px;
+}
+
+.tl-peer-summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--info-blue);
+  user-select: none;
+}
+
+.tl-peer-body {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  background: var(--paper-raised);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
 }

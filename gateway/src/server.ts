@@ -26,6 +26,7 @@ import {
   removeBatchInbox,
   removeTaskInbox,
 } from "./files";
+import { createPeerMcpServer } from "./peer";
 import { createScreenRecorder, type ScreenRecorder } from "./recorder";
 import { type QueryFn, SessionManager, type SessionStatus } from "./session";
 import { createShareMcpServer } from "./share";
@@ -209,6 +210,9 @@ export function createGatewayServer(
       "computer-use": createComputerUseMcpServer(new ComputerExecutor()),
       browser: createBrowserMcpServer(browserSession),
       "share-file": createShareMcpServer({ config, taskId, fetchFn }),
+      // #138: request work on the user's own machine (split tasks) and block
+      // in-turn awaiting the result.
+      "local-machine": createPeerMcpServer({ config, taskId, fetchFn }),
     }),
     onMessage: (message) =>
       server.publish(STEER_TOPIC, encode({ type: "sdk_message", message })),
