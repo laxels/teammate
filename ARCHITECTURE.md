@@ -266,4 +266,8 @@ never promises a finished task will be "notified" or "auto-resume".
 - Model policy: `claude-fable-5` + effort `xhigh` everywhere; never configure
   `--fallback-model`; API calls send no `fallbacks` parameter; flagged
   requests refuse rather than downgrade (the orchestrator surfaces the
-  refusal to the user in Slack).
+  refusal to the user in Slack). The policy lives in code as
+  `MODEL`/`DEFAULT_EFFORT` in `shared/protocol.ts` — the orchestrator loop and
+  every task-agent session import them, and `scripts/bake-golden.sh` reads
+  `MODEL` from there for the golden image's `settings.json` pin. Change the
+  policy there and nowhere else.

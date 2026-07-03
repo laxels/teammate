@@ -94,9 +94,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_ROOT/scripts/golden-constants.sh"
 SOURCE_IMAGE="$GOLDEN_LOCAL"
 TARGET=""
-# Canonical Claude model baked into ~/.claude/settings.json. MUST match the
-# gateway/orchestrator runtime model (gateway/src/session.ts, convex/orchestrator.ts).
-MODEL="claude-fable-5"
+# Canonical Claude model baked into ~/.claude/settings.json. Read from the
+# code's single source of truth (shared/protocol.ts MODEL) so a policy change
+# there can't leave the next bake stale; --model still overrides for
+# experiments. set -e aborts the bake if the import ever fails.
+MODEL="$(bun --silent -e "import { MODEL } from '$REPO_ROOT/shared/protocol.ts'; console.log(MODEL)")"
+[[ -n "$MODEL" ]] || { echo "Failed to read MODEL from shared/protocol.ts" >&2; exit 1; }
 # The tart host the bake runs on (any fleet host carries the golden).
 HOST_SSH="m1@100.121.13.107"
 

@@ -25,7 +25,12 @@ import {
   stringifyToolInput,
 } from "./agentSummary";
 import { createThrottler, type Throttler } from "./agentThrottle";
-import { DETAIL_MAX_CHARS, type StartTaskRequest } from "./protocol";
+import {
+  DEFAULT_EFFORT,
+  DETAIL_MAX_CHARS,
+  MODEL,
+  type StartTaskRequest,
+} from "./protocol";
 
 // The agent-session core shared by the devbox gateway and the localagent
 // daemon (#138). Everything host-specific is injected: the standing system
@@ -114,11 +119,6 @@ export const PROGRESS_INTERVAL_MS = 30_000;
 export const INIT_WATCHDOG_MS = 2 * 60_000;
 export const STALL_WATCHDOG_MS = 10 * 60_000;
 export const WATCHDOG_INTERVAL_MS = 10_000;
-
-const MODEL = "claude-fable-5";
-// Default reasoning effort. xhigh maximizes accuracy (model policy); a task can
-// override it per-request when the user explicitly asks for another level (#91).
-const DEFAULT_EFFORT = "xhigh";
 
 type AsyncQueue<T> = {
   push(item: T): void;
