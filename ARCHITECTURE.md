@@ -124,7 +124,10 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    Serve).
 5. Each task gets a **status card**: the bot's first lifecycle message in the
    thread, chat.update'd in place on every event (status, latest summary,
-   duration, monitoring link). Detail events that deserve a notification ping
+   duration, monitoring link). The card's `Latest:` line is a concise
+   model-written summary of the latest progress (#145) — full assistant text
+   still flows to thread replies and the dashboard timeline (#114). Detail
+   events that deserve a notification ping
    (needs_input/terminal) still arrive as fresh thread replies; progress only
    refreshes the card. Status reactions (🙋/✅/❌/🛑) land on the request
    message, on top of the orchestrator's instant 🫡 ack. Legacy threadless

@@ -1,7 +1,7 @@
 // Pure orchestration helpers shared by the Convex functions (convex/) and
 // covered by `bun test`. No Convex runtime dependencies here.
 
-import { excerpt } from "../shared/agentSummary";
+import { excerpt, SUMMARY_MAX_CHARS } from "../shared/agentSummary";
 import {
   DEVBOX_EVENT_TYPES,
   type DevboxEvent,
@@ -782,10 +782,55 @@ export function formatDurationMs(ms: number): string {
   return `${r}s`;
 }
 
+/** Produces the concise `_Latest:_` line for a long summary, or null when it
+ * can't (missing key, refusal, truncation) — see convex/notify.ts for the real
+ * model-backed implementation. */
+export type CardSummarizer = (text: string) => Promise<string | null>;
+
+/** Prompt for the card-line summarizer (#145). The full report rides in an
+ * XML block so instructions and payload can't blur together. */
+export function buildCardSummaryPrompt(text: string): string {
+  return [
+    "Write the `Latest:` line of a Slack task status card. Summarize the agent report below as ONE plain sentence (aim for under 150 characters) capturing the essential outcome or current activity — what a teammate glancing at the card needs to know. No markdown, no quotes, no preamble.",
+    "<report>",
+    text,
+    "</report>",
+  ].join("\n");
+}
+
+/**
+ * The status card's `_Latest:_` line (#145): an extremely concise, genuinely
+ * intelligent summary of the latest progress — not the full text (#114 made
+ * summaries full-length, which turned the card into a wall of text) and not a
+ * naive truncation. Short summaries pass through verbatim (whitespace
+ * collapsed to keep the card one line per field); long ones are compressed by
+ * the injected summarizer. Any summarizer failure degrades to a plain excerpt
+ * so a card repaint is never blocked on the model.
+ */
+export async function cardLatestLine(
+  summary: string,
+  summarize: CardSummarizer,
+): Promise<string> {
+  const collapsed = summary.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= SUMMARY_MAX_CHARS) return collapsed;
+  try {
+    const line = await summarize(summary);
+    if (line !== null) {
+      const cleaned = excerpt(line);
+      if (cleaned !== "") return cleaned;
+    }
+  } catch (error) {
+    console.error("card summary failed; falling back to excerpt:", error);
+  }
+  return excerpt(summary);
+}
+
 /**
  * Renders the task's status card: one glanceable message per task, posted on
  * the first lifecycle event and chat.update'd in place on every later one.
  * Detail events still arrive as separate thread replies (edits don't notify).
+ * `summary` is expected to be the concise card line (see cardLatestLine) —
+ * this renderer shows it as-is.
  */
 export function buildStatusCard(args: {
   taskId: string;
