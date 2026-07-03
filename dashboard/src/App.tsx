@@ -7,6 +7,7 @@ import { spaLink, taskPath, useRoute } from "./router";
 import { TaskDetailPage } from "./TaskDetailPage";
 import {
   type ActiveTask,
+  AgentBadge,
   ArchiveButton,
   calendar,
   duration,
@@ -76,6 +77,25 @@ function FleetStrip({ fleet }: { fleet: NonNullable<Fleet> }) {
                 .join("  ")}
         </span>
       </div>
+      {fleet.localMachines.length > 0 && (
+        <div className="cell">
+          <span className="cell-label">local machines</span>
+          <span className="cell-value">
+            {fleet.localMachines
+              .map(
+                (m) =>
+                  `${m.displayName ?? m.machineId}:${
+                    m.online
+                      ? m.taskId === undefined
+                        ? "free"
+                        : "busy"
+                      : "offline"
+                  }`,
+              )
+              .join("  ")}
+          </span>
+        </div>
+      )}
       <div className="cell">
         <span className="cell-label">queue</span>
         <span className="cell-value">
@@ -113,6 +133,7 @@ function ActiveRow({
     <div className="row row-active">
       <div className="row-main">
         <StatusTag status={task.status} />
+        <AgentBadge task={task} />
         <span className="row-title" title={task.taskId}>
           {task.title}
         </span>
@@ -134,6 +155,9 @@ function ActiveRow({
           )}
           {task.devboxId !== undefined && (
             <span className="dim"> · {task.devboxId}</span>
+          )}
+          {task.localMachineId !== undefined && (
+            <span className="dim"> · {task.localMachineId}</span>
           )}
         </span>
         <span className="row-links">
@@ -160,9 +184,11 @@ function ActiveRow({
           )}
         </span>
         <span className="row-actions">
-          {task.status !== "queued" && task.devboxId !== undefined && (
-            <FollowUp taskId={task.taskId} onNote={onNote} />
-          )}
+          {task.status !== "queued" &&
+            (task.devboxId !== undefined ||
+              task.localMachineId !== undefined) && (
+              <FollowUp taskId={task.taskId} onNote={onNote} />
+            )}
           <StopButton taskId={task.taskId} onNote={onNote} />
         </span>
       </div>
@@ -194,6 +220,7 @@ function HistoryRow({
       <div className="row-main">
         <a className="row-toggle" href={href} onClick={spaLink(href)}>
           <StatusTag status={task.status} />
+          <AgentBadge task={task} />
           <span className="row-title" title={task.taskId}>
             {task.title}
           </span>

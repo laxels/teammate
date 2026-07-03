@@ -67,6 +67,28 @@ export function StatusTag({ status }: { status: TaskStatus }) {
   );
 }
 
+/**
+ * Cloud/local agent badge (#138). A local-primary task shows "local"; a split
+ * task (cloud devbox + local helper) shows "cloud+local"; the cloud-only
+ * default renders nothing (the overwhelmingly common case stays clean).
+ */
+export function AgentBadge({
+  task,
+}: {
+  task: {
+    placement?: string | undefined;
+    localMachineId?: string | undefined;
+  };
+}) {
+  if (task.placement === "local") {
+    return <span className="agent-badge">local</span>;
+  }
+  if (task.localMachineId !== undefined) {
+    return <span className="agent-badge">cloud+local</span>;
+  }
+  return null;
+}
+
 export function ArmedButton({
   label,
   armedLabel,

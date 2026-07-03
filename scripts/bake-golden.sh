@@ -202,6 +202,7 @@ log "Rsyncing repo subset into ~/ultraclaude"
   -e "ssh ${VM_SSH_OPTS[*]}" \
   package.json bun.lock bunfig.toml shared gateway/src gateway/package.json \
   web/dist web/package.json dashboard/package.json hostagent/package.json \
+  localagent/package.json \
   "$VM_USER@$VM_IP:ultraclaude/")
 
 # This is the step that bakes playwright-core (and any other deps added since
@@ -248,6 +249,27 @@ vm "python3 -c 'import json; d=json.load(open(\"/Users/admin/.claude/settings.js
 
 # The golden image must NOT carry a gateway env file: provisioning writes it.
 vm 'rm -f ~/ultraclaude.env'
+
+# ----------------------------------------------- capability manifest (#138)
+# Enumerate what this golden actually carries (apps, tool versions, OS facts)
+# and upload it — merged with scripts/golden-capabilities.md (the hand-curated
+# authed/limits section) — keyed by the target tag. The orchestrator injects
+# the LATEST manifest to route cloud vs local work; it only changes on a bake,
+# matching how devbox changes actually persist. Best-effort: a manifest upload
+# failure must not sink a multi-hour bake (re-run the upload script manually).
+log "Generating + uploading the capability manifest for $TARGET"
+MANIFEST_TMP="$(mktemp)"
+{
+  echo "## Generated at bake ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  echo
+  echo "- macOS: $(vm 'sw_vers -productVersion' 2>/dev/null || echo '?')"
+  echo "- Tooling: bun $(vm '~/.bun/bin/bun --version' 2>/dev/null || echo '?'), python3 $(vm 'python3 --version 2>&1' 2>/dev/null || echo '?'), cliclick $(vm 'test -x /usr/local/bin/cliclick && echo present || echo absent' 2>/dev/null || echo '?')"
+  echo "- /Applications:"
+  vm 'ls /Applications | sed "s/^/  - /"' 2>/dev/null || echo "  - (unreadable)"
+} > "$MANIFEST_TMP"
+"$REPO_ROOT/scripts/upload-capability-manifest.sh" --tag "$TARGET" --generated "$MANIFEST_TMP" \
+  || echo "WARNING: capability-manifest upload failed; run scripts/upload-capability-manifest.sh --tag $TARGET --generated <file> manually"
+rm -f "$MANIFEST_TMP"
 
 # ------------------------------------------------------------ tailscale state
 log "Wiping tailscaled state (golden images must not carry a tailnet identity)"

@@ -16,6 +16,9 @@ export type RawEvent = {
   detail: string | null;
   tool: string | null;
   imageUrl: string | null;
+  /** #138: which agent produced the event ("local" = the user's machine).
+   * Coerced optional so an older backend's events render as cloud. */
+  source?: "cloud" | "local" | undefined;
 };
 
 export type ToolRow = {
@@ -28,11 +31,15 @@ export type ToolRow = {
   result: string | null;
   /** Result screenshot, filled from the matching tool_result. */
   imageUrl: string | null;
+  /** #138: true when the local agent produced the row (split tasks show a
+   * "local" tag on these). */
+  local: boolean;
 };
 
 export type TimelineRow =
   | { kind: "status"; ts: number; status: string; summary: string }
-  | { kind: "assistant"; ts: number; text: string }
+  | { kind: "assistant"; ts: number; text: string; local: boolean }
+  | { kind: "peer"; ts: number; direction: "request" | "reply"; text: string }
   | ToolRow;
 
 // Only these statuses render (as distinct, color-coded pills). `started` and
@@ -40,16 +47,25 @@ export type TimelineRow =
 // older dashboard bundle degrades gracefully against a newer backend.
 const SHOWN_STATUS_TYPES = new Set(["needs_input", "failed", "stopped"]);
 
-/** Take the oldest unpaired tool row that matches `toolName` (or just the
- * oldest, when the result names no tool), removing it from the queue. */
+/** Take the oldest unpaired tool row from the SAME agent that matches
+ * `toolName` (or just that agent's oldest, when the result names no tool),
+ * removing it from the queue. #138: a split task interleaves two agents'
+ * tool events, and a local get_window_state result must never fold into a
+ * cloud row that happens to share the name. */
 function takeMatch(
   unpaired: ToolRow[],
   toolName: string | null,
+  local: boolean,
 ): ToolRow | null {
   if (unpaired.length === 0) return null;
+  const named =
+    toolName === null
+      ? -1
+      : unpaired.findIndex((r) => r.tool === toolName && r.local === local);
   const idx =
-    toolName === null ? -1 : unpaired.findIndex((r) => r.tool === toolName);
-  const [row] = unpaired.splice(idx === -1 ? 0 : idx, 1);
+    named !== -1 ? named : unpaired.findIndex((r) => r.local === local);
+  if (idx === -1) return null;
+  const [row] = unpaired.splice(idx, 1);
   return row ?? null;
 }
 
@@ -72,7 +88,22 @@ export function buildTimeline(events: RawEvent[]): TimelineRow[] {
       // The new fields are coerced with ?? null so an older backend's events
       // (which lack detail/tool/imageUrl) never render as literal "undefined".
       case "assistant_text":
-        rows.push({ kind: "assistant", ts: e.ts, text: e.detail ?? e.summary });
+        rows.push({
+          kind: "assistant",
+          ts: e.ts,
+          text: e.detail ?? e.summary,
+          local: e.source === "local",
+        });
+        break;
+      // #138: peer-channel traffic between a split task's agents.
+      case "peer_request":
+      case "peer_reply":
+        rows.push({
+          kind: "peer",
+          ts: e.ts,
+          direction: e.type === "peer_request" ? "request" : "reply",
+          text: e.detail ?? e.summary,
+        });
         break;
       case "tool_call": {
         const row: ToolRow = {
@@ -82,13 +113,14 @@ export function buildTimeline(events: RawEvent[]): TimelineRow[] {
           params: e.detail ?? null,
           result: null,
           imageUrl: null,
+          local: e.source === "local",
         };
         rows.push(row);
         unpaired.push(row);
         break;
       }
       case "tool_result": {
-        const match = takeMatch(unpaired, e.tool);
+        const match = takeMatch(unpaired, e.tool, e.source === "local");
         if (match !== null) {
           match.result = e.detail ?? null;
           match.imageUrl = e.imageUrl ?? null;
@@ -102,6 +134,7 @@ export function buildTimeline(events: RawEvent[]): TimelineRow[] {
             params: null,
             result: e.detail ?? null,
             imageUrl: e.imageUrl ?? null,
+            local: e.source === "local",
           });
         }
         break;

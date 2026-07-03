@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ultraclaude.localagent</string>
+  <!-- Log redirect + env sourcing inside the shell string (launchd doesn't
+       expand ~ in StandardOutPath, and the plist must be user-agnostic — the
+       machine-specific bits, including LOCALAGENT_DIR pointing at the repo
+       checkout, live in ~/.localagent.env; see scripts/setup-localagent.sh). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>exec >> ~/localagent.log 2>&amp;1; set -a; source ~/.localagent.env; set +a; exec ~/.bun/bin/bun run "$LOCALAGENT_DIR/localagent/src/index.ts"</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

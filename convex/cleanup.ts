@@ -45,6 +45,12 @@ export const PRUNE_TABLES = [
   { table: "slackEvents", retentionMs: QUEUE_RETENTION_MS },
   { table: "commands", retentionMs: QUEUE_RETENTION_MS },
   { table: "hostCommands", retentionMs: QUEUE_RETENTION_MS },
+  // #138: the local daemon's command queue and the peer channel age out with
+  // the other queues — peer replies are consumed by the awaiting cloud agent
+  // within its own turn, never read weeks later. capabilityManifests is
+  // deliberately NOT pruned (one long-lived row per golden tag).
+  { table: "localCommands", retentionMs: QUEUE_RETENTION_MS },
+  { table: "peerMessages", retentionMs: QUEUE_RETENTION_MS },
   { table: "taskEvents", retentionMs: EVENT_RETENTION_MS },
   { table: "hostEvents", retentionMs: EVENT_RETENTION_MS },
 ] as const;

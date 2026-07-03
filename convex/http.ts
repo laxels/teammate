@@ -1,7 +1,7 @@
 import { httpRouter } from "convex/server";
 import { timingSafeEqual } from "../shared/auth";
 import { MAX_OUTBOUND_FILE_BYTES } from "../shared/protocol";
-import { parseDevboxEvent } from "../src/orchestration";
+import { parseDevboxEvent, parseLocalAgentEvent } from "../src/orchestration";
 import { verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -17,6 +17,22 @@ const http = httpRouter();
 function devboxSecretOk(request: Request): boolean {
   const secret = process.env.DEVBOX_SHARED_SECRET;
   const provided = request.headers.get("x-devbox-secret");
+  return (
+    secret !== undefined &&
+    secret !== "" &&
+    provided !== null &&
+    timingSafeEqual(provided, secret)
+  );
+}
+
+/**
+ * True when the request carries LOCAL_MACHINE_SECRET in `x-local-secret` —
+ * the local daemon's own trust tier (#138), deliberately separate from the
+ * fleet-wide devbox secret. Gates every /local/* endpoint.
+ */
+function localSecretOk(request: Request): boolean {
+  const secret = process.env.LOCAL_MACHINE_SECRET;
+  const provided = request.headers.get("x-local-secret");
   return (
     secret !== undefined &&
     secret !== "" &&
@@ -359,6 +375,251 @@ http.route({
   }),
 });
 
+// ---- Cloud-agent peer surface (#138, x-devbox-secret) ----
+
+// A cloud agent requests work on the user's local machine (the gateway's
+// request_local_work tool). Body: PeerRequestPayload. Returns { requestId,
+// state } — see local.ts peerRequest for the state machine (delivery, spawn,
+// or the permission flow).
+http.route({
+  path: "/devbox/peer/request",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let payload: {
+      taskId?: unknown;
+      devboxId?: unknown;
+      requestId?: unknown;
+      body?: unknown;
+    };
+    try {
+      payload = JSON.parse(await request.text()) as typeof payload;
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (
+      typeof payload.taskId !== "string" ||
+      typeof payload.devboxId !== "string" ||
+      typeof payload.requestId !== "string" ||
+      payload.requestId === "" ||
+      payload.requestId.length > 64 ||
+      typeof payload.body !== "string" ||
+      payload.body === ""
+    ) {
+      return new Response("expected { taskId, devboxId, requestId, body }", {
+        status: 400,
+      });
+    }
+    const result = await ctx.runMutation(internal.local.peerRequest, {
+      taskId: payload.taskId,
+      devboxId: payload.devboxId,
+      requestId: payload.requestId,
+      body: payload.body,
+    });
+    return Response.json({ requestId: payload.requestId, ...result });
+  }),
+});
+
+// Poll target for the cloud agent's await_local_result tool.
+// GET /devbox/peer/reply?taskId=...&requestId=... ->
+// { reply: string | null, localAccess, agentActive }.
+http.route({
+  path: "/devbox/peer/reply",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const url = new URL(request.url);
+    const taskId = url.searchParams.get("taskId");
+    const requestId = url.searchParams.get("requestId");
+    if (
+      taskId === null ||
+      taskId === "" ||
+      requestId === null ||
+      requestId === ""
+    ) {
+      return new Response("missing taskId/requestId", { status: 400 });
+    }
+    const result = await ctx.runQuery(internal.local.peerReplyFor, {
+      taskId,
+      requestId,
+    });
+    return Response.json(result);
+  }),
+});
+
+// ---- Local daemon surface (#138, x-local-secret) ----
+
+// Local agent lifecycle/info events — /devbox/events' sibling for the
+// localagent daemon (LocalAgentEvent: machineId in place of devboxId).
+http.route({
+  path: "/local/events",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!localSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(await request.text());
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    const event = parseLocalAgentEvent(payload);
+    if (event === null) {
+      return new Response("invalid local agent event", { status: 400 });
+    }
+    const { taskFound, applied } = await ctx.runMutation(
+      internal.local.recordEvent,
+      {
+        machineId: event.machineId,
+        taskId: event.taskId,
+        type: event.type,
+        summary: event.summary,
+        ts: event.ts,
+        ...(event.detail === undefined ? {} : { detail: event.detail }),
+        ...(event.tool === undefined ? {} : { tool: event.tool }),
+        ...(event.imageStorageId === undefined
+          ? {}
+          : { imageStorageId: event.imageStorageId as Id<"_storage"> }),
+      },
+    );
+    if (taskFound && applied) {
+      await ctx.scheduler.runAfter(0, internal.notify.devboxEvent, {
+        machineId: event.machineId,
+        taskId: event.taskId,
+        type: event.type,
+        summary: event.summary,
+      });
+    }
+    return new Response(null, { status: 200 });
+  }),
+});
+
+// Storage upload URL for the local daemon's tool-result screenshots —
+// /devbox/recording/upload-url's sibling under the local trust tier.
+http.route({
+  path: "/local/upload-url",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!localSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const url = await ctx.storage.generateUploadUrl();
+    return Response.json({ url });
+  }),
+});
+
+// Staged Slack attachments for local tasks — /devbox/file's sibling.
+http.route({
+  path: "/local/file",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    if (!localSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const storageId = new URL(request.url).searchParams.get("storageId");
+    if (storageId === null || storageId === "") {
+      return new Response("missing storageId", { status: 400 });
+    }
+    let blob: Blob | null;
+    try {
+      blob = await ctx.storage.get(storageId as Id<"_storage">);
+    } catch {
+      blob = null;
+    }
+    if (blob === null) {
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(blob);
+  }),
+});
+
+// Local agent artifact upload — /devbox/artifact's sibling (same multipart
+// fields, same Slack hand-off).
+http.route({
+  path: "/local/artifact",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!localSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return new Response("expected multipart/form-data", { status: 400 });
+    }
+    const file = form.get("file");
+    const taskId = form.get("taskId");
+    const filename = form.get("filename");
+    if (
+      !(file instanceof Blob) ||
+      typeof taskId !== "string" ||
+      typeof filename !== "string"
+    ) {
+      return new Response("expected file, taskId, filename", { status: 400 });
+    }
+    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
+      return new Response("payload too large", { status: 413 });
+    }
+    const title = form.get("title");
+    const comment = form.get("comment");
+    const storageId = await ctx.storage.store(file);
+    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
+      taskId,
+      storageId,
+      filename,
+      ...(typeof title === "string" && title !== "" ? { title } : {}),
+      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
+    });
+    return new Response(null, { status: 202 });
+  }),
+});
+
+// A local agent answers a peer request (the reply_to_cloud tool).
+// Body: PeerReplyPayload.
+http.route({
+  path: "/local/peer/reply",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!localSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let payload: {
+      machineId?: unknown;
+      taskId?: unknown;
+      requestId?: unknown;
+      body?: unknown;
+    };
+    try {
+      payload = JSON.parse(await request.text()) as typeof payload;
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (
+      typeof payload.machineId !== "string" ||
+      typeof payload.taskId !== "string" ||
+      typeof payload.requestId !== "string" ||
+      typeof payload.body !== "string"
+    ) {
+      return new Response("expected { machineId, taskId, requestId, body }", {
+        status: 400,
+      });
+    }
+    const result = await ctx.runMutation(internal.local.peerReply, {
+      machineId: payload.machineId,
+      taskId: payload.taskId,
+      requestId: payload.requestId,
+      body: payload.body,
+    });
+    return Response.json(result);
+  }),
+});
+
 // ---- Fleet provisioner plane (GitHub Actions / laptop runs) ----
 // The authoritative cross-origin fleet lock (#87) and fleet observability,
 // exposed over plain HTTP so a Linux GH Actions runner (and a laptop) can grab
@@ -493,6 +754,41 @@ http.route({
       summary: payload.summary,
     });
     return new Response(null, { status: 200 });
+  }),
+});
+
+// Capability manifest upload (#138): bake-golden.sh /
+// scripts/upload-capability-manifest.sh POST the enumerated + curated
+// sections for a golden tag; the orchestrator injects the latest manifest
+// into its system prompt. Body: { goldenTag, generated?, curated? }.
+http.route({
+  path: "/fleet/capability-manifest",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!devboxSecretOk(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let payload: {
+      goldenTag?: unknown;
+      generated?: unknown;
+      curated?: unknown;
+    };
+    try {
+      payload = JSON.parse(await request.text()) as typeof payload;
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+    if (typeof payload.goldenTag !== "string" || payload.goldenTag === "") {
+      return new Response("expected { goldenTag, generated?, curated? }", {
+        status: 400,
+      });
+    }
+    const result = await ctx.runMutation(internal.capabilities.record, {
+      goldenTag: payload.goldenTag,
+      generated: typeof payload.generated === "string" ? payload.generated : "",
+      curated: typeof payload.curated === "string" ? payload.curated : "",
+    });
+    return Response.json(result);
   }),
 });
 

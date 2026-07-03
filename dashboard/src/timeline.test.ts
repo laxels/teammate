@@ -44,6 +44,7 @@ describe("buildTimeline", () => {
       kind: "assistant",
       ts: 2,
       text: "the complete narration",
+      local: false,
     });
   });
 
@@ -55,6 +56,7 @@ describe("buildTimeline", () => {
       kind: "assistant",
       ts: 2,
       text: "only summary",
+      local: false,
     });
   });
 
@@ -84,6 +86,7 @@ describe("buildTimeline", () => {
         params: '{"coordinate":[1,2]}',
         result: "Left-clicked (1, 2).",
         imageUrl: "https://blob/shot.png",
+        local: false,
       },
     ]);
   });
@@ -103,6 +106,7 @@ describe("buildTimeline", () => {
         params: "b1",
         result: "bash done",
         imageUrl: null,
+        local: false,
       },
       {
         kind: "tool",
@@ -111,6 +115,7 @@ describe("buildTimeline", () => {
         params: "r1",
         result: "read done",
         imageUrl: null,
+        local: false,
       },
     ]);
   });
@@ -133,6 +138,7 @@ describe("buildTimeline", () => {
         params: null,
         result: "clicked",
         imageUrl: "https://blob/shot.png",
+        local: false,
       },
     ]);
   });
@@ -154,8 +160,78 @@ describe("buildTimeline", () => {
         params: null,
         result: null,
         imageUrl: null,
+        local: false,
       },
-      { kind: "assistant", ts: 5, text: "thinking" },
+      { kind: "assistant", ts: 5, text: "thinking", local: false },
+    ]);
+  });
+
+  test("attributes rows to the local agent and never folds results across agents (#138)", () => {
+    const rows = buildTimeline([
+      ev({
+        type: "tool_call",
+        ts: 1,
+        tool: "Bash",
+        detail: "cloud call",
+        source: "cloud",
+      }),
+      ev({
+        type: "tool_call",
+        ts: 2,
+        tool: "Bash",
+        detail: "local call",
+        source: "local",
+      }),
+      // The local result must fold into the LOCAL call even though the cloud
+      // call with the same tool name is older.
+      ev({
+        type: "tool_result",
+        ts: 3,
+        tool: "Bash",
+        detail: "local done",
+        source: "local",
+      }),
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "tool",
+        ts: 1,
+        tool: "Bash",
+        params: "cloud call",
+        result: null,
+        imageUrl: null,
+        local: false,
+      },
+      {
+        kind: "tool",
+        ts: 2,
+        tool: "Bash",
+        params: "local call",
+        result: "local done",
+        imageUrl: null,
+        local: true,
+      },
+    ]);
+  });
+
+  test("renders peer-channel traffic as peer rows (#138)", () => {
+    const rows = buildTimeline([
+      ev({
+        type: "peer_request",
+        ts: 1,
+        summary: "check my notes",
+        detail: "Open Notes and find X",
+      }),
+      ev({ type: "peer_reply", ts: 2, summary: "found it", detail: "X = 42" }),
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "peer",
+        ts: 1,
+        direction: "request",
+        text: "Open Notes and find X",
+      },
+      { kind: "peer", ts: 2, direction: "reply", text: "X = 42" },
     ]);
   });
 

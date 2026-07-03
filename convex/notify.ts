@@ -10,6 +10,7 @@ import {
 } from "../shared/protocol";
 import {
   buildDevboxEventMessage,
+  buildLocalAccessRequestMessage,
   buildStatusCard,
   monitoringUrl,
   replyHintFor,
@@ -40,13 +41,16 @@ const STATUS_REACTION: Partial<Record<string, string>> = {
 };
 
 /**
- * Posts a devbox lifecycle event to the task's Slack channel (threaded when
+ * Posts an agent lifecycle event to the task's Slack channel (threaded when
  * the task lives in a thread). Scheduled from the /devbox/events HTTP action
- * and from hosts.ts's terminal-failure paths (terminallyFailTask).
+ * (devboxId set), the /local/events HTTP action (#138, machineId set), and
+ * from hosts.ts's terminal-failure paths (terminallyFailTask). Local-agent
+ * events have no devbox: no monitoring link, no retire note.
  */
 export const devboxEvent = internalAction({
   args: {
-    devboxId: v.string(),
+    devboxId: v.optional(v.string()),
+    machineId: v.optional(v.string()),
     taskId: v.string(),
     type: devboxEventTypeValidator,
     summary: v.string(),
@@ -63,9 +67,12 @@ export const devboxEvent = internalAction({
     if (task === null) {
       return;
     }
-    const devbox = await ctx.runQuery(internal.devboxes.getByDevboxId, {
-      devboxId: args.devboxId,
-    });
+    const devbox =
+      args.devboxId === undefined
+        ? null
+        : await ctx.runQuery(internal.devboxes.getByDevboxId, {
+            devboxId: args.devboxId,
+          });
     const monitorUrl =
       devbox === null ? null : monitoringUrl(devbox.gatewayUrl);
 
@@ -83,6 +90,7 @@ export const devboxEvent = internalAction({
         startedAt: row.startedAt,
         finishedAt: row.finishedAt,
         replyHint: replyHintFor(row),
+        localAgent: row.placement === "local",
       });
 
     // 1. The status card: posted on the task's first lifecycle event, then
@@ -206,6 +214,61 @@ export const devboxEvent = internalAction({
         channel: task.slackChannel,
         messageTs: threadTs,
         name: reaction,
+      });
+    }
+  },
+});
+
+/**
+ * The local-machine permission ask (#138): posted to the task's thread,
+ * tagging the requester, when a cloud agent first requests local work on an
+ * ungranted task (local.ts peerRequest). Mechanical — the orchestrator LLM
+ * only enters the loop to interpret the user's reply (resolve_local_access).
+ */
+export const localAccessRequest = internalAction({
+  args: { taskId: v.string(), reason: v.string() },
+  handler: async (ctx, args) => {
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    if (botToken === undefined) {
+      console.error("SLACK_BOT_TOKEN is not set; dropping notification");
+      return;
+    }
+    const task = await ctx.runQuery(internal.tasks.getByTaskId, {
+      taskId: args.taskId,
+    });
+    if (task === null) {
+      return;
+    }
+    const machines = await ctx.runQuery(internal.local.listMachines, {});
+    const candidate =
+      machines.find(
+        (m) =>
+          m.online &&
+          (m.ownerSlackUser === undefined ||
+            m.ownerSlackUser === task.slackUser),
+      ) ?? machines[0];
+    await postSlackMessage({
+      botToken,
+      channel: task.slackChannel,
+      text: buildLocalAccessRequestMessage({
+        taskId: args.taskId,
+        title: task.title,
+        slackUser: task.slackUser,
+        machineName:
+          candidate === undefined
+            ? "your Mac"
+            : (candidate.displayName ?? candidate.machineId),
+        reason: args.reason,
+      }),
+      threadTs: task.slackThreadTs,
+    });
+    // Notification ping mirrors needs_input: the ask needs a human decision.
+    if (task.slackThreadTs !== undefined) {
+      await addSlackReaction({
+        botToken,
+        channel: task.slackChannel,
+        messageTs: task.slackThreadTs,
+        name: "lock",
       });
     }
   },

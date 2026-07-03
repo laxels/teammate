@@ -9,6 +9,7 @@
  */
 
 import type * as artifacts from "../artifacts.js";
+import type * as capabilities from "../capabilities.js";
 import type * as cleanup from "../cleanup.js";
 import type * as commands from "../commands.js";
 import type * as constants from "../constants.js";
@@ -19,6 +20,7 @@ import type * as files from "../files.js";
 import type * as fleetLock from "../fleetLock.js";
 import type * as hosts from "../hosts.js";
 import type * as http from "../http.js";
+import type * as local from "../local.js";
 import type * as notify from "../notify.js";
 import type * as orchestrator from "../orchestrator.js";
 import type * as recordings from "../recordings.js";
@@ -34,6 +36,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   artifacts: typeof artifacts;
+  capabilities: typeof capabilities;
   cleanup: typeof cleanup;
   commands: typeof commands;
   constants: typeof constants;
@@ -44,6 +47,7 @@ declare const fullApi: ApiFromModules<{
   fleetLock: typeof fleetLock;
   hosts: typeof hosts;
   http: typeof http;
+  local: typeof local;
   notify: typeof notify;
   orchestrator: typeof orchestrator;
   recordings: typeof recordings;

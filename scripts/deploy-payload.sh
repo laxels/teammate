@@ -51,7 +51,7 @@ for HOST_SSH in "$@"; do
     rsync -az --relative -e "ssh ${SSH_OPTS[*]}" gateway/src shared web/dist \
       scripts gateway/package.json bun.lock \
       package.json bunfig.toml dashboard/package.json hostagent/package.json \
-      web/package.json \
+      localagent/package.json web/package.json \
       "$HOST_SSH:ultraclaude-payload/")
 
   # hostagent/src imports ../../shared at runtime (shared/commandConsumer.ts,

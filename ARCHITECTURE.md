@@ -13,7 +13,8 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
 | Host agent | `hostagent/` | Each fleet Mac host (LaunchAgent `com.ultraclaude.hostagent`, Bun) | Heartbeats the host to Convex every 60s (self-registers its row + liveness) and consumes `provision_vm`/`destroy_vm` host commands to clone/boot/rsync-code-into/destroy ephemeral Tart VMs (`hostagent/src/vm.ts`). Advertises the fleet-provisioner role (`FLEET_PROVISIONER=1`) in its heartbeat, but no longer bootstraps new hosts itself — GitHub Actions does (#87) |
-| Shared contracts | `shared/` | imported by `convex`, `gateway`, `hostagent`, `src`, `web`, `dashboard` | Wire types (`shared/protocol.ts`) + shared transcript UI (`shared/transcriptUi.tsx`) |
+| Local agent | `localagent/` | The user's own Mac (LaunchAgent `com.ultraclaude.localagent`, Bun; installed by `scripts/setup-localagent.sh`) | #138 "local machine" mode: fully outbound daemon (own trust tier, `LOCAL_MACHINE_SECRET` — never the fleet secret) that self-registers via `local:heartbeat`, consumes the `localCommands` queue, and runs Agent SDK sessions with **background** computer use via a pinned [cua-driver](https://github.com/trycua/cua) release (external stdio MCP; AX-tree perception, per-window screenshots, per-pid delivery, visible agent cursor, no focus stealing). Covers what devboxes can't: the user's local files, locally installed apps, authed sessions that don't survive cloning (#70). Codex-style hard bans (terminals, admin auth, OS security prompts, CuaDriver itself) enforced mechanically by a tool gate (`localagent/src/safety.ts`); sensitive actions re-ask in the thread via AskUserQuestion. No screen recording (privacy) — per-window screenshots on the dashboard timeline are the observability story. See "Local machine mode" below |
+| Shared contracts | `shared/` | imported by `convex`, `gateway`, `hostagent`, `localagent`, `src`, `web`, `dashboard` | Wire types (`shared/protocol.ts`), shared transcript UI (`shared/transcriptUi.tsx`), and the agent session/event layer both the gateway and localagent run (`shared/agentSession.ts`, `agentEvents.ts`, `agentFiles.ts`, `agentShare.ts`, `agentSummary.ts` — #138) |
 
 ## Infrastructure
 
@@ -166,6 +167,47 @@ cycle's tool results count as activity), and under the ~5-min prompt-cache TTL.
 The orchestrator sets a deadline in the spec for work it expects to wait, and
 never promises a finished task will be "notified" or "auto-resume".
 
+## Local machine mode (#138)
+
+- **Placement**: the orchestrator routes each task cloud (default), fully
+  local (`start_task target="local"` — only on explicit user consent in
+  conversation, which IS the per-task grant), or split: the task runs on a
+  devbox and the cloud agent requests local help mid-task via its
+  `local-machine` MCP tools (`gateway/src/peer.ts`). Routing is informed by
+  two dynamic system-prompt sections: the golden image's **capability
+  manifest** (`capabilityManifests` table, uploaded per bake by
+  `scripts/upload-capability-manifest.sh` from a generated section + the
+  hand-curated `scripts/golden-capabilities.md`) and the registered
+  **local machines** (`localMachines` table, daemon heartbeats).
+- **Permission**: per-task, whole-machine, no standing allow. The first peer
+  request against an ungranted task posts a mechanical Slack ask in the
+  task's thread (tagging the requester); the orchestrator records the user's
+  yes/no with `resolve_local_access` (only the machine's owner may grant when
+  `LOCAL_OWNER_SLACK_USER` is set). Denied/unanswered → the cloud agent
+  continues cloud-only best-effort and says so.
+- **Peer channel**: Convex-relayed (`peerMessages`; both sides outbound —
+  the cloud never dials an agent), orchestrator LLM out of the loop after
+  the grant. The cloud agent blocks mid-turn on `await_local_result` (each
+  call ≤240s, looped under the #69 wait-in-turn discipline); requests are
+  delivered into the local session as `user_message` localCommands; the
+  local agent answers with `reply_to_cloud`. Denial, helper death, task
+  teardown, and daemon restarts synthesize replies so a blocked cloud agent
+  always unblocks. A split task models one agent of each kind
+  (`tasks.devboxId` + `tasks.localMachineId`).
+- **Status semantics**: a local-primary task's events drive task status
+  exactly like a devbox's; a split task's helper contributes timeline rows
+  and `needs_input` notifications only (its per-request turns end in
+  `completed`, which must never move the cloud-owned task). One local
+  session per machine, no queueing, no monitoring page, no recording.
+- **cua-driver pin**: `scripts/setup-localagent.sh` installs a pinned release
+  (SHA256-verified; the project is young with fast API churn) plus the
+  `serve` LaunchAgent for stable TCC attribution to CuaDriver.app. The
+  `--claude-code-computer-use-compat` flag is deliberately NOT used (no-op
+  since upstream #1692 removed the compat screenshot tool; it confuses tool
+  indexing). Known driver limits (canvas/GL apps need foreground, Chrome
+  omnibox can't be driven backgrounded) are encoded in the local agent's
+  system prompt; locked-screen behavior is out of scope for v1.
+
 ## Browser automation
 
 - Devbox sessions get two complementary browser paths: Playwright `browser_*`
@@ -218,7 +260,9 @@ never promises a finished task will be "notified" or "auto-resume".
   divergent theme.
 
 - Secrets: local `.env` (never committed); Convex env vars for the deployment;
-  `DEVBOX_SHARED_SECRET` authenticates gateway→Convex posts.
+  `DEVBOX_SHARED_SECRET` authenticates gateway→Convex posts;
+  `LOCAL_MACHINE_SECRET` authenticates the localagent daemon (#138) — its own
+  trust tier, so a leaked fleet credential can never drive a user's real Mac.
 - Model policy: `claude-fable-5` + effort `xhigh` everywhere; never configure
   `--fallback-model`; API calls send no `fallbacks` parameter; flagged
   requests refuse rather than downgrade (the orchestrator surfaces the

@@ -25,6 +25,7 @@ import { playerState } from "./recording";
 import { spaLink } from "./router";
 import { buildTimeline, type TimelineRow } from "./timeline";
 import {
+  AgentBadge,
   ArchiveButton,
   calendar,
   clock,
@@ -164,6 +165,7 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
     <article className="task-detail">
       <div className="task-detail-head">
         <StatusTag status={task.status} />
+        <AgentBadge task={task} />
         <h2 className="task-detail-title">{task.title}</h2>
         <span className="task-detail-meta">
           <code>{task.taskId}</code>
@@ -172,6 +174,12 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
             <>
               <span className="dot">·</span>
               {task.devboxId}
+            </>
+          )}
+          {task.localMachineId !== undefined && (
+            <>
+              <span className="dot">·</span>
+              {task.localMachineId}
             </>
           )}
           {task.finishedAt !== undefined && (
@@ -204,9 +212,11 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
           )}
         </span>
         <span className="task-detail-actions">
-          {!terminal && task.devboxId !== undefined && (
-            <FollowUp taskId={task.taskId} onNote={postNote} />
-          )}
+          {!terminal &&
+            (task.devboxId !== undefined ||
+              task.localMachineId !== undefined) && (
+              <FollowUp taskId={task.taskId} onNote={postNote} />
+            )}
           {!terminal && <StopButton taskId={task.taskId} onNote={postNote} />}
           {terminal && <RetryButton taskId={task.taskId} onNote={postNote} />}
           {terminal && (
@@ -224,15 +234,22 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
 
       <section className="rec-section">
         <h3 className="detail-section-label">screen recording</h3>
-        <RecordingPlayer
-          state={recState}
-          src={detail.recording?.url ?? null}
-          title={task.title}
-          comments={playerComments}
-          onCreateComment={onCreateComment}
-          onFocusComment={setFocusedId}
-          playerRef={playerRef}
-        />
+        {task.placement === "local" ? (
+          <div className="rec-meta">
+            Local tasks aren't screen-recorded (the user's own machine —
+            privacy). Per-window screenshots appear in the timeline below.
+          </div>
+        ) : (
+          <RecordingPlayer
+            state={recState}
+            src={detail.recording?.url ?? null}
+            title={task.title}
+            comments={playerComments}
+            onCreateComment={onCreateComment}
+            onFocusComment={setFocusedId}
+            playerRef={playerRef}
+          />
+        )}
         {recState === "available" && detail.recording !== null && (
           <div className="rec-meta">
             {detail.recording.bytes !== null &&
@@ -412,16 +429,35 @@ function TimelineEventRow({ row }: { row: TimelineRow }) {
 
 function TimelineRowContent({ row }: { row: TimelineRow }) {
   if (row.kind === "assistant") {
-    return <AssistantText text={row.text} />;
+    return (
+      <>
+        {row.local && <span className="tl-localtag">local</span>}
+        <AssistantText text={row.text} />
+      </>
+    );
   }
   if (row.kind === "tool") {
     return (
-      <ToolPill
-        name={row.tool}
-        params={row.params ?? ""}
-        result={row.result}
-        imageUrl={row.imageUrl}
-      />
+      <>
+        {row.local && <span className="tl-localtag">local</span>}
+        <ToolPill
+          name={row.tool}
+          params={row.params ?? ""}
+          result={row.result}
+          imageUrl={row.imageUrl}
+        />
+      </>
+    );
+  }
+  // #138: peer-channel traffic between a split task's cloud and local agents.
+  if (row.kind === "peer") {
+    return (
+      <details className="tl-peer">
+        <summary className="tl-peer-summary">
+          {row.direction === "request" ? "→ local request" : "← local reply"}
+        </summary>
+        <pre className="tl-peer-body">{row.text}</pre>
+      </details>
     );
   }
   // status — a distinct, color-coded pill centered in the content column, with
