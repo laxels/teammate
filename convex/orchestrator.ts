@@ -3,9 +3,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
 import {
+  DEFAULT_EFFORT,
   MAX_INBOUND_FILE_BYTES,
   MAX_ORCHESTRATOR_IMAGE_BYTES,
   MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES,
+  MODEL,
   parseTaskEffort,
   TASK_EFFORTS,
   type UserMessagePayload,
@@ -38,10 +40,11 @@ import { type ActionCtx, internalAction } from "./_generated/server";
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 import { resolveDeliverableFiles, type StoredFile } from "./files";
 
-// Model policy (ARCHITECTURE.md): claude-fable-5 at xhigh everywhere, no
-// fallback model, no `fallbacks` parameter — flagged requests refuse rather
-// than downgrade.
-const MODEL = "claude-fable-5";
+// Model policy (ARCHITECTURE.md): MODEL at DEFAULT_EFFORT everywhere — both
+// imported from shared/protocol.ts, the single source of truth — no fallback
+// model, no `fallbacks` parameter; flagged requests refuse rather than
+// downgrade. Unlike task agents (#91), this loop has no per-request effort
+// override: it always runs at DEFAULT_EFFORT.
 const MAX_TOOL_ITERATIONS = 12;
 
 // Instant "I'm on it" acknowledgement, reacted onto the triggering message the
@@ -794,7 +797,7 @@ export const processSlackEvent = internalAction({
           model: MODEL,
           max_tokens: 16000,
           thinking: { type: "adaptive" },
-          output_config: { effort: "xhigh" },
+          output_config: { effort: DEFAULT_EFFORT },
           // Automatic prompt caching: marks the stable tools+system prefix as
           // cacheable so the loop's later iterations read what the first wrote.
           // A NO-OP TODAY ON PURPOSE — the prefix (~1.8K tok) is just below

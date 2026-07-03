@@ -27,13 +27,26 @@ export type SteerServerMessage =
 // consumed by noVNC/react-vnc. No JSON framing — raw bytes both ways.
 
 /**
+ * Model policy (ARCHITECTURE.md): `claude-fable-5` at effort `xhigh`
+ * everywhere, no fallback model. These two constants are the single code
+ * source of truth — the orchestrator's tool loop (convex/orchestrator.ts) and
+ * every task-agent session (gateway + localagent, via shared/agentSession.ts)
+ * import them rather than re-declaring the strings. scripts/bake-golden.sh
+ * reads MODEL from this file at bake time for the golden image's
+ * ~/.claude/settings.json pin, so a policy change here propagates to the next
+ * bake automatically.
+ */
+export const MODEL = "claude-fable-5";
+export const DEFAULT_EFFORT: TaskEffort = "xhigh";
+
+/**
  * Reasoning-effort levels a task agent's Claude Code session may run at —
  * mirrors the Agent SDK's `EffortLevel`. Single source of truth for the type,
  * the tool-schema enum (orchestrator), and the wire validators (gateway parse,
- * Convex schema). The default everywhere is `xhigh` (model policy: accuracy
- * first, see ARCHITECTURE.md); the orchestrator overrides it ONLY when the
- * requester explicitly and unambiguously asks for a specific level (issue #91),
- * and its own model stays pinned to `xhigh` regardless. */
+ * Convex schema). The default everywhere is `DEFAULT_EFFORT` (model policy:
+ * accuracy first, see ARCHITECTURE.md); the orchestrator overrides it ONLY
+ * when the requester explicitly and unambiguously asks for a specific level
+ * (issue #91), and its own loop stays pinned to `DEFAULT_EFFORT` regardless. */
 export const TASK_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 export type TaskEffort = (typeof TASK_EFFORTS)[number];
