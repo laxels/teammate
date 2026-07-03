@@ -16,7 +16,7 @@ import {
   BrowserSession,
   findChrome,
   type ManualBrowserProcess,
-} from "../src/browser/executor";
+} from "./browser/executor";
 
 // Integration tests against a real headless Chrome (the same binary the
 // devbox uses). Skipped when no Chrome/Chromium is installed; CI runners and
@@ -218,12 +218,9 @@ describe.skipIf(!hasChrome)("BrowserSession (real Chrome)", () => {
   test("a stale ref fails with guidance instead of a bare timeout", async () => {
     await session.navigate(`${base}/counter`);
     await session.state();
-    expect(session.click("e999")).rejects.toThrow(BrowserError);
-    try {
-      await session.click("e999");
-    } catch (error) {
-      expect((error as Error).message).toContain("browser_snapshot");
-    }
+    const stale = session.click("e999");
+    await expect(stale).rejects.toThrow(BrowserError);
+    await expect(stale).rejects.toThrow("browser_snapshot");
   }, 20_000);
 
   test("screenshot returns a PNG with its dimensions", async () => {

@@ -1,20 +1,8 @@
 import type {
-  PermissionMode,
   SteerClientMessage,
   SteerServerMessage,
 } from "../../shared/protocol";
 import type { SessionManager } from "./session";
-
-const PERMISSION_MODES: readonly PermissionMode[] = [
-  "default",
-  "acceptEdits",
-  "bypassPermissions",
-  "plan",
-];
-
-function isPermissionMode(value: unknown): value is PermissionMode {
-  return PERMISSION_MODES.includes(value as PermissionMode);
-}
 
 /** Validate a raw /ws/steer frame into a SteerClientMessage, or null. */
 export function parseSteerClientMessage(
@@ -36,10 +24,6 @@ export function parseSteerClientMessage(
         : null;
     case "interrupt":
       return { type: "interrupt" };
-    case "set_permission_mode":
-      return isPermissionMode(candidate.mode)
-        ? { type: "set_permission_mode", mode: candidate.mode }
-        : null;
     default:
       return null;
   }
@@ -67,18 +51,5 @@ export async function dispatchSteerMessage(
       return (await session.stop())
         ? null
         : { type: "error", message: "no active session" };
-    case "set_permission_mode":
-      try {
-        return (await session.setPermissionMode(message.mode))
-          ? null
-          : { type: "error", message: "no active session" };
-      } catch (error) {
-        return {
-          type: "error",
-          message: `failed to set permission mode: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        };
-      }
   }
 }

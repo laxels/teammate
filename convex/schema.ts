@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { type Infer, v } from "convex/values";
 import type {
+  HostCommandKind,
   RecordingStatus,
   TaskEffort,
   TaskStatus,
@@ -43,6 +44,29 @@ type _TaskEffortMatchesProtocol = [
   : never;
 const _taskEffortMatchesProtocol: _TaskEffortMatchesProtocol = true;
 void _taskEffortMatchesProtocol;
+
+/** Devbox gateway command kinds (the `commands` queue — see commands.ts). */
+export const commandKindValidator = v.union(
+  v.literal("start"),
+  v.literal("user_message"),
+  v.literal("interrupt"),
+);
+
+/** Host-agent command kinds (the `hostCommands` queue — see hosts.ts). */
+export const hostCommandKindValidator = v.union(
+  v.literal("provision_vm"),
+  v.literal("destroy_vm"),
+);
+
+// Compile-time check: the validator stays in lockstep with the wire contract.
+type _HostCommandKindMatchesProtocol = [
+  Infer<typeof hostCommandKindValidator>,
+  HostCommandKind,
+] extends [HostCommandKind, Infer<typeof hostCommandKindValidator>]
+  ? true
+  : never;
+const _hostCommandKindMatchesProtocol: _HostCommandKindMatchesProtocol = true;
+void _hostCommandKindMatchesProtocol;
 
 /** A file the requester shared in Slack, staged in Convex storage for the
  * task's devbox to fetch (see shared/protocol.ts DeliverableFile). The bytes
@@ -142,6 +166,12 @@ export default defineSchema({
     finishedAt: v.optional(v.number()),
     // When the staleness cron last posted a check-in for this task.
     lastNudgedAt: v.optional(v.number()),
+    // Summary of the latest APPLIED status event (devboxes.recordEvent /
+    // hosts.ts terminallyFailTask). The status card renders from the task row,
+    // so a delayed notify action must be able to pair the row's status with
+    // the summary that produced it — not its own (possibly stale) event's.
+    // Absent on rows that predate the field.
+    lastSummary: v.optional(v.string()),
     // Files the requester shared in Slack, staged in Convex storage. The
     // storageId rides the start command (hosts.dispatchTaskToSlot); the devbox
     // fetches the bytes from the secret-gated /devbox/file endpoint, never a
@@ -166,7 +196,7 @@ export default defineSchema({
     // Inbound thread replies look their task(s) up by thread anchor.
     .index("by_channel_thread", ["slackChannel", "slackThreadTs"]),
 
-  // Devbox VMs — all ephemeral, created by hosts.allocateEphemeral
+  // Devbox VMs — all ephemeral, created by hosts.ts allocateEphemeralSlot
   // (provisioning -> busy -> retiring -> row deleted by hosts.removeDevbox).
   // A devbox is never reused: no task runs on a previous task's VM.
   devboxes: defineTable({
@@ -223,7 +253,7 @@ export default defineSchema({
   hostCommands: defineTable({
     commandId: v.string(),
     hostId: v.string(),
-    kind: v.union(v.literal("provision_vm"), v.literal("destroy_vm")),
+    kind: hostCommandKindValidator,
     // JSON payload: HostVmPayload for both kinds.
     payload: v.string(),
     // A consumer claims a command (pending -> running) before running its side
@@ -281,13 +311,9 @@ export default defineSchema({
   commands: defineTable({
     commandId: v.string(),
     devboxId: v.string(),
-    kind: v.union(
-      v.literal("start"),
-      v.literal("user_message"),
-      v.literal("interrupt"),
-    ),
+    kind: commandKindValidator,
     // JSON payload: StartTaskRequest for "start", UserMessagePayload for
-    // "user_message", "{}" for "interrupt".
+    // "user_message", InterruptPayload for "interrupt".
     payload: v.string(),
     // A gateway claims a command (pending -> running) before running its side
     // effect and only acks (-> acked) after, so a crash anywhere after the

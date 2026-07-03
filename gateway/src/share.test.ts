@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatewayConfig } from "./config";
 import { shareFile } from "./share";
+import { recordingFetch } from "./test-helpers";
 
 const config: GatewayConfig = {
   devboxId: "devbox-1",
@@ -13,25 +14,13 @@ const config: GatewayConfig = {
   devboxSharedSecret: "s3cret",
 };
 
-function recordingFetch(response: Response): {
-  fetchFn: typeof fetch;
-  calls: { url: string; init: RequestInit | undefined }[];
-} {
-  const calls: { url: string; init: RequestInit | undefined }[] = [];
-  const fetchFn = (async (url: unknown, init?: RequestInit) => {
-    calls.push({ url: String(url), init });
-    return response;
-  }) as unknown as typeof fetch;
-  return { fetchFn, calls };
-}
-
 describe("shareFile", () => {
   test("POSTs the file as multipart to /devbox/artifact with the shared secret", async () => {
     const dir = await mkdtemp(join(tmpdir(), "share-"));
     try {
       const path = join(dir, "shot.png");
       await writeFile(path, new Uint8Array([1, 2, 3]));
-      const rec = recordingFetch(new Response(null, { status: 202 }));
+      const rec = recordingFetch(() => new Response(null, { status: 202 }));
       const result = await shareFile({
         config,
         taskId: "task-abc",
@@ -59,7 +48,7 @@ describe("shareFile", () => {
   });
 
   test("reports a missing file without calling fetch", async () => {
-    const rec = recordingFetch(new Response(null, { status: 202 }));
+    const rec = recordingFetch(() => new Response(null, { status: 202 }));
     const result = await shareFile({
       config,
       taskId: "task-abc",
@@ -75,7 +64,7 @@ describe("shareFile", () => {
     try {
       const path = join(dir, "x.log");
       await writeFile(path, "hello");
-      const rec = recordingFetch(new Response("no", { status: 500 }));
+      const rec = recordingFetch(() => new Response("no", { status: 500 }));
       const result = await shareFile({
         config,
         taskId: "t",

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import {
+  type HostCommandKind,
   type HostVmPayload,
   isTerminalTaskStatus,
   type StartTaskRequest,
@@ -12,7 +13,6 @@ import {
   pickHost,
   pickProvisioner,
 } from "../src/hostPool";
-import { timingSafeEqual } from "../src/slack";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
@@ -23,14 +23,15 @@ import {
   type QueryCtx,
   query,
 } from "./_generated/server";
-import { deleteCommandsForDevbox, enqueueCommandRow } from "./commands";
+import {
+  deleteCommandsForDevbox,
+  devboxSecretOk,
+  enqueueCommandRow,
+} from "./commands";
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
+import { devboxByDevboxId } from "./devboxes";
 import { resolveDeliverableFiles, type StoredFile } from "./files";
-
-export const hostCommandKindValidator = v.union(
-  v.literal("provision_vm"),
-  v.literal("destroy_vm"),
-);
+import { taskByTaskId } from "./tasks";
 
 /** Apple's EULA allows 2 concurrent macOS VMs per host. */
 const DEFAULT_MAX_VMS = 2;
@@ -40,30 +41,9 @@ const DEFAULT_MAX_VMS = 2;
 const MAX_EVENT_SUMMARY = 500;
 
 /**
- * Host agents authenticate with the same shared secret gateways use, passed
- * as a function argument (host agents are Convex clients, so there are no
- * request headers). On mismatch the functions no-op rather than throw: a
- * misconfigured host agent sees an empty queue instead of generating error
- * spam. A console.warn still records the mismatch for diagnosability.
- */
-function secretOk(secret: string): boolean {
-  const expected = process.env.DEVBOX_SHARED_SECRET;
-  const ok =
-    expected !== undefined &&
-    expected !== "" &&
-    timingSafeEqual(secret, expected);
-  if (!ok) {
-    console.warn(
-      "hosts: devbox shared secret mismatch (or DEVBOX_SHARED_SECRET unset); ignoring request",
-    );
-  }
-  return ok;
-}
-
-/**
  * Liveness signal + self-registration: the first heartbeat from a new host
  * creates its row (maxVms 2, active), so provisioning a host needs no manual
- * Convex step. allocateEphemeral only places VMs on recently-seen hosts.
+ * Convex step. allocateEphemeralSlot only places VMs on recently-seen hosts.
  */
 export const heartbeat = mutation({
   args: {
@@ -76,7 +56,7 @@ export const heartbeat = mutation({
     goldenImage: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return;
     }
     const reported = {
@@ -131,7 +111,7 @@ export const heartbeat = mutation({
 export const pendingFor = query({
   args: { hostId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return [];
     }
     const rows = await ctx.db
@@ -164,7 +144,7 @@ export const pendingFor = query({
 export const claim = mutation({
   args: { commandId: v.string(), secret: v.string() },
   handler: async (ctx, args): Promise<boolean> => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return false;
     }
     const row = await ctx.db
@@ -182,7 +162,7 @@ export const claim = mutation({
 export const ack = mutation({
   args: { commandId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return;
     }
     const row = await ctx.db
@@ -199,19 +179,16 @@ export const ack = mutation({
 
 /**
  * Called by the host agent after `tart delete` succeeds: removes the devbox
- * row, freeing the VM slot it held on the host (allocateEphemeral counts
+ * row, freeing the VM slot it held on the host (allocateEphemeralSlot counts
  * rows, not statuses).
  */
 export const removeDevbox = mutation({
   args: { devboxId: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return;
     }
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    const devbox = await devboxByDevboxId(ctx, args.devboxId);
     if (devbox !== null) {
       await ctx.db.delete(devbox._id);
       // The freed VM slot may unblock a queued ephemeral task.
@@ -239,10 +216,7 @@ async function terminallyFailTask(
   ctx: MutationCtx,
   args: { taskId: string; devboxId: string; summary: string },
 ): Promise<void> {
-  const task = await ctx.db
-    .query("tasks")
-    .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-    .unique();
+  const task = await taskByTaskId(ctx, args.taskId);
   if (task === null || isTerminalTaskStatus(task.status)) {
     return;
   }
@@ -250,6 +224,9 @@ async function terminallyFailTask(
   const summary = args.summary.slice(0, MAX_EVENT_SUMMARY);
   await ctx.db.patch(task._id, {
     status: "failed",
+    // Keep the row's status/summary pair coherent for the status card, same
+    // as devboxes.recordEvent does for applied gateway events.
+    lastSummary: summary,
     updatedAt: now,
     finishedAt: now,
   });
@@ -280,13 +257,10 @@ async function terminallyFailTask(
 export const provisionVmFailed = mutation({
   args: { devboxId: v.string(), summary: v.string(), secret: v.string() },
   handler: async (ctx, args) => {
-    if (!secretOk(args.secret)) {
+    if (!devboxSecretOk(args.secret, "hosts")) {
       return;
     }
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    const devbox = await devboxByDevboxId(ctx, args.devboxId);
     if (devbox === null) {
       return;
     }
@@ -364,7 +338,7 @@ async function enqueueHostCommand(
   ctx: MutationCtx,
   args: {
     hostId: string;
-    kind: "provision_vm" | "destroy_vm";
+    kind: HostCommandKind;
     payload: string;
   },
 ): Promise<string> {
@@ -380,17 +354,6 @@ async function enqueueHostCommand(
   return commandId;
 }
 
-export const enqueue = internalMutation({
-  args: {
-    hostId: v.string(),
-    kind: hostCommandKindValidator,
-    payload: v.string(),
-  },
-  handler: async (ctx, args) => {
-    return await enqueueHostCommand(ctx, args);
-  },
-});
-
 /**
  * Atomically allocates an ephemeral devbox slot for a task on a host with
  * spare VM capacity (mutations are serialized, so concurrent allocations
@@ -399,7 +362,7 @@ export const enqueue = internalMutation({
  * devboxId, so the task's start command can be enqueued before the VM exists.
  * Returns null when no active, recently-seen host has a free slot.
  */
-async function allocateEphemeralSlot(
+export async function allocateEphemeralSlot(
   ctx: MutationCtx,
   taskId: string,
 ): Promise<{ devboxId: string; hostId: string; gatewayUrl: string } | null> {
@@ -447,13 +410,6 @@ async function allocateEphemeralSlot(
   });
   return { devboxId, hostId, gatewayUrl };
 }
-
-export const allocateEphemeral = internalMutation({
-  args: { taskId: v.string() },
-  handler: async (ctx, args) => {
-    return await allocateEphemeralSlot(ctx, args.taskId);
-  },
-});
 
 /**
  * Assigns an allocated slot to a task: patches the task row, enqueues the
@@ -522,10 +478,7 @@ export async function placeEphemeralTaskRow(
   ctx: MutationCtx,
   taskId: string,
 ): Promise<PlacementResult> {
-  const task = await ctx.db
-    .query("tasks")
-    .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
-    .unique();
+  const task = await taskByTaskId(ctx, taskId);
   if (task === null) {
     throw new Error(`placeEphemeralTask: no task ${taskId}`);
   }
@@ -644,8 +597,8 @@ export const requestHostProvision = internalMutation({
 
 const RECENT_HOST_EVENTS = 15;
 
-/** Fleet snapshot for the orchestrator's get_fleet tool. */
-/** Plain-function form shared with the dashboard's fleet query. */
+/** Fleet snapshot for the orchestrator's get_fleet tool. Plain-function form
+ * shared with the dashboard's fleet query. */
 export async function fleetSnapshotData(ctx: QueryCtx) {
   const hosts = await ctx.db.query("hosts").collect();
   const devboxes = await ctx.db.query("devboxes").collect();
@@ -715,10 +668,7 @@ export const fleetSnapshot = internalQuery({
 export const retireDevbox = internalMutation({
   args: { devboxId: v.string() },
   handler: async (ctx, args) => {
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    const devbox = await devboxByDevboxId(ctx, args.devboxId);
     if (devbox === null || devbox.status !== "retiring") {
       return;
     }

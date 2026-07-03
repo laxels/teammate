@@ -7,19 +7,29 @@ import {
 } from "../shared/protocol";
 import { shouldRetireDevbox } from "../src/hostPool";
 import { internal } from "./_generated/api";
-import { internalMutation, internalQuery } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  type QueryCtx,
+} from "./_generated/server";
 import { devboxEventTypeValidator } from "./constants";
+import { taskByTaskId } from "./tasks";
 
-/** Devbox statuses that mean "occupied by a task". */
+/** Devbox event types that mean the devbox is occupied by a task. */
 const BUSY_EVENT_TYPES = new Set(["started", "progress", "needs_input"]);
+
+/** The devbox row for a devboxId (unique index lookup), or null. */
+export async function devboxByDevboxId(ctx: QueryCtx, devboxId: string) {
+  return await ctx.db
+    .query("devboxes")
+    .withIndex("by_devbox_id", (q) => q.eq("devboxId", devboxId))
+    .unique();
+}
 
 export const getByDevboxId = internalQuery({
   args: { devboxId: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    return await devboxByDevboxId(ctx, args.devboxId);
   },
 });
 
@@ -27,7 +37,9 @@ export const getByDevboxId = internalQuery({
  * Records a DevboxEvent posted by a gateway: appends to taskEvents, moves the
  * task to the mapped TaskStatus, and refreshes the devbox row (lastSeenAt, and
  * busy/retiring as the event warrants). Returns whether the task exists so the
- * caller can decide whether to notify Slack.
+ * caller can decide whether to notify Slack — only meaningful for status
+ * events (the info-event early return hardcodes taskFound without loading the
+ * task; callers only consult it when `applied` is true).
  */
 export const recordEvent = internalMutation({
   args: {
@@ -60,20 +72,14 @@ export const recordEvent = internalMutation({
     // retro timeline — they must never drive task status, retire a devbox, or
     // re-mark it busy. Record liveness and stop here, before any of that logic.
     if (incomingStatus === undefined) {
-      const infoDevbox = await ctx.db
-        .query("devboxes")
-        .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-        .unique();
+      const infoDevbox = await devboxByDevboxId(ctx, args.devboxId);
       if (infoDevbox !== null) {
         await ctx.db.patch(infoDevbox._id, { lastSeenAt: Date.now() });
       }
       return { taskFound: true, applied: false };
     }
 
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     // Events can arrive out of order (concurrent POSTs, retries): a late
     // non-terminal event must never regress a terminal task status, and must
     // not re-mark the devbox busy for an already-finished task.
@@ -84,6 +90,10 @@ export const recordEvent = internalMutation({
       await ctx.db.patch(task._id, {
         status: incomingStatus,
         devboxId: args.devboxId,
+        // The summary that produced the row's current status, so a delayed
+        // notify action can render the card without pairing a fresh status
+        // with its own stale event's summary.
+        lastSummary: args.summary,
         updatedAt: now,
         // Duration bookkeeping: first time running / first terminal status.
         ...(incomingStatus === "running" && task.startedAt === undefined
@@ -97,10 +107,7 @@ export const recordEvent = internalMutation({
       });
     }
 
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    const devbox = await devboxByDevboxId(ctx, args.devboxId);
     if (devbox !== null) {
       // Events for a task that is NOT the devbox's current assignment must
       // not clobber the devbox row (e.g. a late event from a previous task
@@ -130,22 +137,19 @@ export const recordEvent = internalMutation({
           internal.hosts.retireDevbox,
           { devboxId: args.devboxId },
         );
-      } else if (eligible && (applied || task === null)) {
-        const busy = BUSY_EVENT_TYPES.has(args.type);
-        if (busy) {
-          await ctx.db.patch(devbox._id, {
-            status: "busy",
-            taskId: args.taskId,
-            lastSeenAt: Date.now(),
-          });
-        } else {
-          // Non-busy event on an ephemeral devbox that didn't qualify for
-          // retire (e.g. its task row is missing): just refresh liveness —
-          // a devbox is never reused, so it's never parked as claimable.
-          await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
-        }
       } else {
-        await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
+        // Not retiring: refresh liveness; mark busy only when the event is a
+        // busy type on the devbox's current assignment AND its status applied
+        // (or the task row is missing) — a devbox is never reused, so it's
+        // never parked as claimable.
+        const markBusy =
+          eligible &&
+          (applied || task === null) &&
+          BUSY_EVENT_TYPES.has(args.type);
+        await ctx.db.patch(devbox._id, {
+          lastSeenAt: Date.now(),
+          ...(markBusy ? { status: "busy" as const, taskId: args.taskId } : {}),
+        });
       }
     }
 

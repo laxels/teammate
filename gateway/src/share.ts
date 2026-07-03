@@ -79,7 +79,7 @@ type ToolResult = {
   isError?: boolean;
 };
 
-export function createShareFileTool(args: {
+function createShareFileTool(args: {
   config: GatewayConfig;
   taskId: string;
   fetchFn?: FetchLike;

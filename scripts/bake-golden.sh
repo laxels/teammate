@@ -5,8 +5,9 @@
 # the result. Parameterized so the repo always ships a reproducible recipe for
 # the current image (replaces the old per-version bake-golden-v2.sh; see #56).
 #
-#   Usage: scripts/bake-golden.sh [--from <image>] [--to <image>]
-#   Defaults: --from golden-v5  --to golden-v6  (the current pin -> the next)
+#   Usage: scripts/bake-golden.sh [--from <image>] [--to <image>] [--host <ssh>]
+#   Defaults: --from the current pin (scripts/golden-constants.sh) --to the
+#   next version, on fleet host-1
 #
 # What this bake does, on a clone of --from:
 #   1. ensure bun is installed (idempotent — present on v2+ images)
@@ -81,29 +82,38 @@ if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
   exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
 fi
 
-# Bake the NEXT golden FROM the current one. The live fleet pin is golden-v5
-# (scripts/golden-constants.sh, rolled out by issue #89), so the next bake goes
-# golden-v5 -> golden-v6; override with --from/--to for a different jump.
-SOURCE_IMAGE="golden-v5"
-TARGET="golden-v6"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Bake the NEXT golden FROM the current one: the defaults derive from the live
+# fleet pin (scripts/golden-constants.sh, rolled out by issue #89), so a pin
+# bump moves them too; override with --from/--to for a different jump. The +1
+# arithmetic assumes the pin's v<digits> format (GOLDEN_VERSION is
+# env-overridable to arbitrary tags — pass --to explicitly for those), so the
+# TARGET default is computed after arg parsing, only when --to wasn't given.
+source "$REPO_ROOT/scripts/golden-constants.sh"
+SOURCE_IMAGE="$GOLDEN_LOCAL"
+TARGET=""
 # Canonical Claude model baked into ~/.claude/settings.json. MUST match the
 # gateway/orchestrator runtime model (gateway/src/session.ts, convex/orchestrator.ts).
 MODEL="claude-opus-4-8"
+# The tart host the bake runs on (any fleet host carries the golden).
+HOST_SSH="m1@100.121.13.107"
 
 while (($#)); do
   case "$1" in
     --from) SOURCE_IMAGE="$2"; shift 2 ;;
     --to) TARGET="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
-    *) echo "Usage: $0 [--from <image>] [--to <image>] [--model <id>]" >&2; exit 1 ;;
+    --host) HOST_SSH="$2"; shift 2 ;;
+    *) echo "Usage: $0 [--from <image>] [--to <image>] [--model <id>] [--host <ssh>]" >&2; exit 1 ;;
   esac
 done
 
-HOST_SSH="m1@100.121.13.107"
+[[ -n "$TARGET" ]] || TARGET="golden-v$(( ${GOLDEN_VERSION#v} + 1 ))"
+
 TART='~/tart.app/Contents/MacOS/tart'
 STAGING="${TARGET}-staging"
 VM_USER="admin"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Ephemeral NAT clones share host keys and reuse 192.168.64.x IPs, so host-key
 # pinning is meaningless; skip known_hosts to keep reruns non-interactive.
@@ -292,4 +302,4 @@ tart_host rename "$STAGING" "$TARGET"
 tart_host list | grep "^local *$TARGET "
 
 log "Done. Golden image '$TARGET' is ready."
-log "Next: E2E-verify a clone, then push to ghcr (see header), then flip the live host (config.ts default + scripts/deploy-payload.sh)."
+log "Next: E2E-verify a clone, push to ghcr (see header), bump GOLDEN_VERSION in scripts/golden-constants.sh, then roll it out with scripts/refresh-golden.sh."

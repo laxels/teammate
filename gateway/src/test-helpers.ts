@@ -6,8 +6,21 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { DevboxEventType } from "../../shared/protocol";
-import type { EventSender } from "../src/events";
-import type { AgentQuery, QueryFn } from "../src/session";
+import type { EventSender } from "./events";
+import type { AgentQuery, QueryFn } from "./session";
+
+/** Fetch stub that records every call and answers via `responder`. */
+export function recordingFetch(responder: (url: string) => Response): {
+  fetchFn: typeof fetch;
+  calls: { url: string; init: RequestInit | undefined }[];
+} {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  const fetchFn = (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return responder(String(url));
+  }) as unknown as typeof fetch;
+  return { fetchFn, calls };
+}
 
 // Type-level filler for fields the gateway never reads.
 const usageStub = {} as SDKAssistantMessage["message"]["usage"];
@@ -190,7 +203,6 @@ export function createEventRecorder(): {
 export type FakeQueryControl = {
   calls: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }[];
   interrupts: number;
-  permissionModes: string[];
 };
 
 /**
@@ -208,7 +220,6 @@ export function createEchoQueryFn(
   const control: FakeQueryControl = {
     calls: [],
     interrupts: 0,
-    permissionModes: [],
   };
 
   const queryFn: QueryFn = (params) => {
@@ -231,14 +242,78 @@ export function createEchoQueryFn(
         control.interrupts += 1;
         interrupted = true;
       },
-      setPermissionMode: async (mode: string) => {
-        control.permissionModes.push(mode);
-      },
     });
     return query;
   };
 
   return { queryFn, control };
+}
+
+/** The result shape MCP tool handlers resolve with, as the tests consume it. */
+export type ToolResult = {
+  content: Array<Record<string, unknown>>;
+  isError?: boolean;
+};
+
+/** Minimal structural view of an SDK tool definition; the real handler takes
+ * `extra: unknown`, so any second argument is accepted. */
+type McpTool = {
+  name: string;
+  handler: (args: never, extra: Record<string, unknown>) => Promise<unknown>;
+};
+
+export function findTool<T extends { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T {
+  const found = tools.find((t) => t.name === name);
+  if (found === undefined) throw new Error(`no tool named ${name}`);
+  return found;
+}
+
+export async function call(
+  tools: readonly McpTool[],
+  name: string,
+  args: unknown,
+): Promise<ToolResult> {
+  // Tools are a heterogeneous union, so handler's parameter collapses to
+  // never; tests call handlers with args matching that tool's schema.
+  return (await findTool(tools, name).handler(args as never, {})) as ToolResult;
+}
+
+/** Wrap a hand-written SDK message generator into the AgentQuery shape,
+ * hiding the interrupt wiring every manual stub repeats. */
+export function manualQueryFn(
+  generate: (
+    params: Parameters<QueryFn>[0],
+  ) => AsyncGenerator<SDKMessage, void>,
+  hooks: { onInterrupt?: () => void } = {},
+): QueryFn {
+  return (params) =>
+    Object.assign(generate(params), {
+      interrupt: async () => hooks.onInterrupt?.(),
+    });
+}
+
+/** A single turn that hangs until interrupted, finishing normally only if the
+ * interrupt never arrives — the stub both interrupt tests share. */
+export function interruptGatedQueryFn(): QueryFn {
+  const gate = Promise.withResolvers<void>();
+  let interrupted = false;
+  return manualQueryFn(
+    async function* (params) {
+      await params.prompt[Symbol.asyncIterator]().next();
+      yield assistantMessage("working...");
+      await gate.promise;
+      if (!interrupted) yield resultSuccess("finished");
+    },
+    {
+      onInterrupt: () => {
+        interrupted = true;
+        gate.resolve();
+      },
+    },
+  );
 }
 
 export async function until(

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { ScreenshotUploader } from "../src/events";
-import { type QueryFn, SessionManager } from "../src/session";
+import type { ScreenshotUploader } from "./events";
+import { type QueryFn, SessionManager } from "./session";
 import {
   askUserQuestionMessage,
   assistantMessage,
@@ -10,7 +10,7 @@ import {
   resultSuccess,
   toolResultMessage,
   until,
-} from "./helpers";
+} from "./test-helpers";
 
 const PNG_B64 = Buffer.from("fake-png-bytes").toString("base64");
 
@@ -129,6 +129,46 @@ describe("info-event streaming (#70)", () => {
     expect(resultIdx).toBeGreaterThanOrEqual(0); // not dropped
     expect(completedIdx).toBeGreaterThan(resultIdx); // ordered before completed
     expect(events[resultIdx]?.imageStorageId).toBe("storage-shot-late");
+  });
+
+  test("a throwing screenshot uploader does not block later tool results or the terminal event", async () => {
+    // The production uploader is written to never reject, but nothing enforces
+    // that contract: a rejection on the tool-result tail must not swallow the
+    // remaining tool results or the terminal event queued behind them (the
+    // task would otherwise hang in "running" until the staleness cron).
+    let uploads = 0;
+    const throwingUploader: ScreenshotUploader = async () => {
+      uploads += 1;
+      if (uploads === 1) throw new Error("upload exploded");
+      return "storage-shot-2";
+    };
+    const { queryFn } = createEchoQueryFn(() => [
+      assistantWithToolUse({
+        toolName: "mcp__computer-use__left_click",
+        toolUseId: "tu-1",
+        input: { coordinate: [1, 2] },
+      }),
+      toolResultMessage({
+        toolUseId: "tu-1",
+        text: "first",
+        imageBase64: PNG_B64,
+      }),
+      toolResultMessage({
+        toolUseId: "tu-1",
+        text: "second",
+        imageBase64: PNG_B64,
+      }),
+      resultSuccess("done"),
+    ]);
+    const { session, events } = makeSession(queryFn, throwingUploader);
+
+    session.start({ taskId: "task-1", prompt: "go" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    // The failed emission was logged and skipped; the next one still flowed.
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results.map((e) => e.detail)).toEqual(["second"]);
+    expect(results[0]?.imageStorageId).toBe("storage-shot-2");
   });
 
   test("a tool_result with no uploader still records text, without an image", async () => {

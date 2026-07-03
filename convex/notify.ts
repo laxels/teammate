@@ -26,10 +26,6 @@ import { devboxEventTypeValidator } from "./constants";
 
 const RETIRE_GRACE_MIN = Math.round(EPHEMERAL_RETIRE_GRACE_MS / 60_000);
 
-/**
- * Posts a devbox lifecycle event to the task's Slack channel (threaded when
- * the task lives in a thread). Scheduled from the /devbox/events HTTP action.
- */
 /** Status reactions on the task's anchor message: glanceable from the
  * channel scroll without opening the thread. Best-effort (needs the
  * reactions:write scope; silently skipped until the manifest is applied).
@@ -43,6 +39,11 @@ const STATUS_REACTION: Partial<Record<string, string>> = {
   stopped: "octagonal_sign",
 };
 
+/**
+ * Posts a devbox lifecycle event to the task's Slack channel (threaded when
+ * the task lives in a thread). Scheduled from the /devbox/events HTTP action
+ * and from hosts.ts's terminal-failure paths (terminallyFailTask).
+ */
 export const devboxEvent = internalAction({
   args: {
     devboxId: v.string(),
@@ -73,7 +74,11 @@ export const devboxEvent = internalAction({
         taskId: args.taskId,
         title: row.title,
         status: row.status,
-        summary: args.summary,
+        // Pair the row's status with the summary that produced it, not this
+        // (possibly stale, raced) event's — a delayed progress action must not
+        // paint its own summary under a terminal status. Fall back to the
+        // event summary for legacy rows without the field.
+        summary: row.lastSummary ?? args.summary,
         monitorUrl,
         startedAt: row.startedAt,
         finishedAt: row.finishedAt,

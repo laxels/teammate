@@ -1,5 +1,6 @@
 import type { MediaPlayerInstance } from "@vidstack/react";
 import { useMutation, useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import {
   type RefObject,
   useEffect,
@@ -9,6 +10,7 @@ import {
 } from "react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { isTerminalTaskStatus } from "../../shared/protocol";
 import { AssistantText, ToolPill } from "../../shared/transcriptUi";
 import { CommentRail, type RailComment } from "./CommentRail";
 import {
@@ -24,14 +26,15 @@ import { spaLink } from "./router";
 import { buildTimeline, type TimelineRow } from "./timeline";
 import {
   ArchiveButton,
-  ArmedButton,
   calendar,
   clock,
   duration,
   FollowUp,
   MastClock,
+  RetryButton,
   StatusTag,
-  TERMINAL,
+  StopButton,
+  useActionNotes,
   useNowTicker,
 } from "./ui";
 
@@ -76,25 +79,22 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
 }
 
 type TaskDetail = NonNullable<
-  ReturnType<typeof useQuery<typeof api.dashboard.taskDetail>>
+  FunctionReturnType<typeof api.dashboard.taskDetail>
 >;
 
 function TaskDetailBody({ detail }: { detail: TaskDetail }) {
   const secret = useDashboardSecret();
-  const retry = useMutation(api.dashboard.retryTask);
-  const stop = useMutation(api.dashboard.stopTask);
   const createComment = useMutation(api.dashboard.createComment);
   const editComment = useMutation(api.dashboard.editComment);
   const deleteComment = useMutation(api.dashboard.deleteComment);
   const now = useNowTicker();
-  const [note, setNote] = useState<string | null>(null);
-  const postNote = (_taskId: string, text: string) => setNote(text);
+  const { notes, postNote } = useActionNotes();
 
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance | null>(null);
 
   const task = detail.task;
-  const terminal = TERMINAL.has(task.status);
+  const terminal = isTerminalTaskStatus(task.status);
   const ran =
     task.startedAt !== undefined && task.finishedAt !== undefined
       ? duration(task.finishedAt - task.startedAt)
@@ -207,32 +207,8 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
           {!terminal && task.devboxId !== undefined && (
             <FollowUp taskId={task.taskId} onNote={postNote} />
           )}
-          {!terminal && (
-            <ArmedButton
-              label="stop"
-              armedLabel="confirm stop"
-              danger
-              onFire={() => {
-                void stop({ secret, taskId: task.taskId }).then((r) =>
-                  postNote(task.taskId, r.ok ? `✓ ${r.note}` : `✗ ${r.reason}`),
-                );
-              }}
-            />
-          )}
-          {terminal && (
-            <ArmedButton
-              label="retry"
-              armedLabel="confirm retry"
-              onFire={() => {
-                void retry({ secret, taskId: task.taskId }).then((r) =>
-                  postNote(
-                    task.taskId,
-                    r.ok ? `✓ ${r.note} → ${r.taskId}` : `✗ ${r.reason}`,
-                  ),
-                );
-              }}
-            />
-          )}
+          {!terminal && <StopButton taskId={task.taskId} onNote={postNote} />}
+          {terminal && <RetryButton taskId={task.taskId} onNote={postNote} />}
           {terminal && (
             <ArchiveButton
               taskId={task.taskId}
@@ -242,7 +218,9 @@ function TaskDetailBody({ detail }: { detail: TaskDetail }) {
           )}
         </span>
       </div>
-      {note !== null && <div className="row-note">{note}</div>}
+      {notes[task.taskId] !== undefined && (
+        <div className="row-note">{notes[task.taskId]}</div>
+      )}
 
       <section className="rec-section">
         <h3 className="detail-section-label">screen recording</h3>

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { SessionManager } from "../src/session";
-import { dispatchSteerMessage, parseSteerClientMessage } from "../src/steer";
-import { createEchoQueryFn, createEventRecorder, until } from "./helpers";
+import { SessionManager } from "./session";
+import { dispatchSteerMessage, parseSteerClientMessage } from "./steer";
+import { createEchoQueryFn, createEventRecorder, until } from "./test-helpers";
 
 describe("parseSteerClientMessage", () => {
   test("rejects non-string frames, invalid JSON and non-objects", () => {
@@ -32,15 +32,6 @@ describe("parseSteerClientMessage", () => {
     expect(parseSteerClientMessage('{"type":"interrupt"}')).toEqual({
       type: "interrupt",
     });
-  });
-
-  test("set_permission_mode validates the mode", () => {
-    expect(
-      parseSteerClientMessage('{"type":"set_permission_mode","mode":"yolo"}'),
-    ).toBeNull();
-    expect(
-      parseSteerClientMessage('{"type":"set_permission_mode","mode":"plan"}'),
-    ).toEqual({ type: "set_permission_mode", mode: "plan" });
   });
 });
 
@@ -91,17 +82,5 @@ describe("dispatchSteerMessage", () => {
     expect(reply).toBeNull();
     expect(control.interrupts).toBe(1);
     await until(() => !session.status().running);
-  });
-
-  test("set_permission_mode forwards to the SDK session", async () => {
-    const { session, control } = makeSession();
-    session.start({ taskId: "task-1", prompt: "first" });
-
-    const reply = await dispatchSteerMessage(
-      '{"type":"set_permission_mode","mode":"acceptEdits"}',
-      session,
-    );
-    expect(reply).toBeNull();
-    expect(control.permissionModes).toEqual(["acceptEdits"]);
   });
 });

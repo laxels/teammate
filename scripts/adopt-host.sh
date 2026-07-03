@@ -44,23 +44,10 @@ source "$REPO_ROOT/scripts/deployment-constants.sh"
 # authoritative runtime value, overriding hostagent/src/config.ts's fallback
 # default. refresh-golden.sh rewrites this same line to roll a new golden.
 source "$REPO_ROOT/scripts/golden-constants.sh"
-
-log() { printf '\n==> %s\n' "$*"; }
+# Shared fleet helpers (log, env_secret, …): single copy in scripts/fleet-lib.sh.
+source "$REPO_ROOT/scripts/fleet-lib.sh"
 
 host() { ssh -o ConnectTimeout=10 "$HOST_SSH" "$@"; }
-
-env_secret() { # <KEY> -> value from the environment, else repo .env; never echoed
-  # Prefer an env var of the same name (GitHub Actions injects secrets that
-  # way); fall back to $ENV_FILE for laptop runs.
-  local key="$1" val="${!1:-}"
-  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
-  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-  if [[ -z "$val" ]]; then
-    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
-    return 1
-  fi
-  printf '%s' "$val"
-}
 
 # ---------------------------------------------------------------- preflight
 log "Preflight checks"

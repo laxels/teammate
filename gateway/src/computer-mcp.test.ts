@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { Screenshot } from "../src/computer/executor";
-import {
-  type ComputerControl,
-  createComputerUseTools,
-} from "../src/computer/mcp";
+import type { Screenshot } from "./computer/executor";
+import { type ComputerControl, createComputerUseTools } from "./computer/mcp";
+import { call } from "./test-helpers";
 
 const SHOT: Screenshot = { base64: "QUJD", width: 100, height: 50 };
 
@@ -50,30 +48,6 @@ function createFakeControl(
     ...overrides,
   };
   return { control, log };
-}
-
-type ToolResult = {
-  content: Array<Record<string, unknown>>;
-  isError?: boolean;
-};
-
-function findTool(
-  tools: ReturnType<typeof createComputerUseTools>,
-  name: string,
-) {
-  const found = tools.find((t) => t.name === name);
-  if (found === undefined) throw new Error(`no tool named ${name}`);
-  return found;
-}
-
-async function call(
-  tools: ReturnType<typeof createComputerUseTools>,
-  name: string,
-  args: unknown,
-): Promise<ToolResult> {
-  // Tools are a heterogeneous union, so handler's parameter collapses to
-  // never; tests call handlers with args matching that tool's schema.
-  return (await findTool(tools, name).handler(args as never, {})) as ToolResult;
 }
 
 describe("computer-use MCP tools", () => {
@@ -149,7 +123,7 @@ describe("computer-use MCP tools", () => {
       scroll_amount: 2,
     });
     expect(result.isError).toBe(true);
-    expect(log).not.toContain("scroll");
+    expect(log).toEqual([]);
   });
 
   test("computer_batch runs actions in order with one final screenshot", async () => {
@@ -208,6 +182,8 @@ describe("computer-use MCP tools", () => {
       actions: [{ action: "left_click" }],
     });
     expect(result.isError).toBe(true);
-    expect(log).not.toContain("leftClick([[1,2],null])");
+    // The executor was never reached; only the settle + verification
+    // screenshot that follow a batch failure ran.
+    expect(log).toEqual(["settle", "screenshot"]);
   });
 });

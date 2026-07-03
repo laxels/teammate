@@ -116,12 +116,7 @@ export class SteerClient {
   }
 }
 
-export function steerUrl(loc: Location): string {
+export function wsUrl(loc: Location, path: string): string {
   const scheme = loc.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${loc.host}/ws/steer`;
-}
-
-export function vncUrl(loc: Location): string {
-  const scheme = loc.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${loc.host}/ws/vnc`;
+  return `${scheme}://${loc.host}${path}`;
 }

@@ -17,9 +17,7 @@
 #
 # Usage:
 #   scripts/fleet-lock.sh acquire [holder]      # one-shot; exits 0 if acquired
-#   scripts/fleet-lock.sh renew   [holder]      # extend our lease
 #   scripts/fleet-lock.sh release [holder]      # release if we own it
-#   scripts/fleet-lock.sh renew-loop [holder]   # renew forever (background it)
 #   scripts/fleet-lock.sh with <command> [args] # acquire → renew → run → release
 #   scripts/fleet-lock.sh guard <command> [args]# (lock already held) renew → run,
 #                                               #   aborting the command if the
@@ -52,25 +50,14 @@ ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 # Deployment-identity constants (CONVEX_SITE_URL): single source of truth shared
 # with the other fleet scripts; stays env-overridable.
 source "$REPO_ROOT/scripts/deployment-constants.sh"
+# Shared fleet helpers (log, env_secret, …): single copy in scripts/fleet-lib.sh.
+source "$REPO_ROOT/scripts/fleet-lib.sh"
 LOCK_NAME="${FLEET_LOCK_NAME:-fleet}"
 TTL_MS="${FLEET_LOCK_TTL_MS:-900000}"
 WAIT_SECS="${FLEET_LOCK_WAIT_SECS:-0}"
 # Renew at a third of the lease so two missed renewals still leave margin.
 RENEW_SECS=$(( TTL_MS / 1000 / 3 ))
 (( RENEW_SECS < 5 )) && RENEW_SECS=5
-
-log() { printf '\n==> %s\n' "$*"; }
-
-env_secret() { # <KEY> -> value from env, else the repo .env; never echoed
-  local key="$1" val="${!1:-}"
-  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
-  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-  if [[ -z "$val" ]]; then
-    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
-    return 1
-  fi
-  printf '%s' "$val"
-}
 
 DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
 
@@ -155,21 +142,6 @@ release_once() {
   echo "fleet-lock: released '$LOCK_NAME' ($HOLDER)" >&2
 }
 
-# Renew immediately (close the lock-job -> renewer scheduling gap), then every
-# RENEW_SECS. Exits non-zero the moment the lease is lost so the caller learns;
-# transient errors keep retrying (the lease still has slack until expiry).
-renew_loop() {
-  local rc
-  while true; do
-    renew_once && rc=0 || rc=$?
-    if (( rc == 2 )); then
-      echo "ERROR: fleet-lock renewer aborting — lease lost." >&2
-      return 1
-    fi
-    sleep "$RENEW_SECS"
-  done
-}
-
 # Run "$@" as the leader of a NEW session (its own process group) so the whole
 # descendant tree can be signalled together. Signalling only the wrapper shell
 # is not enough: if the command is blocked in a long ssh / curl / brew /
@@ -238,6 +210,28 @@ EOF
   fi
 }
 
+# Shared shepherd for `with` and `guard`: launch the wrapped command as a
+# session leader (so a lost-lease abort can kill its whole descendant tree, not
+# just the wrapper), background the lease-keeper, and always stop renewing +
+# kill the child's process group on exit. Re-entrancy: the wrapped command (and
+# anything it calls, e.g. provision-host.sh -> adopt-host.sh) sees the lock is
+# held and runs its body directly instead of acquiring again. `with` sets
+# RELEASE_ON_EXIT=1 so its trap also releases the lock; `guard` never does (the
+# run-level lock/release jobs own that). Exits with the child's exit code.
+RELEASE_ON_EXIT=0
+shepherd() { # <command> [args...]
+  FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" python3 -c "$SESSION_LAUNCHER" "$@" &
+  CHILD=$!
+  abort_on_lost_lease "$CHILD" &
+  RENEWER=$!
+  trap 'kill "$RENEWER" 2>/dev/null || true; kill_group "$CHILD"; if (( RELEASE_ON_EXIT )); then release_once; fi' EXIT
+  set +e
+  wait "$CHILD"
+  code=$?
+  set -e
+  exit "$code"
+}
+
 cmd="${1:-}"
 shift || true
 
@@ -245,9 +239,7 @@ shift || true
 # (the GH workflow prefers the FLEET_LOCK_HOLDER env var).
 case "$cmd" in
   acquire) [[ -n "${1:-}" ]] && HOLDER="$1"; acquire_waiting ;;
-  renew) [[ -n "${1:-}" ]] && HOLDER="$1"; renew_once ;;
   release) [[ -n "${1:-}" ]] && HOLDER="$1"; release_once ;;
-  renew-loop) [[ -n "${1:-}" ]] && HOLDER="$1"; renew_loop ;;
   with)
     # Full shepherd: acquire the lock, run the command while renewing, release
     # on exit. Aborts the command if the lease is ever lost mid-op.
@@ -257,21 +249,8 @@ case "$cmd" in
     fi
     worktree_guard
     acquire_waiting
-    # Re-entrancy: the wrapped command (and anything it calls, e.g.
-    # provision-host.sh -> adopt-host.sh) sees the lock is held and runs its
-    # body directly instead of acquiring again. Run it as a session leader so a
-    # lost-lease abort can kill its whole descendant tree, not just the wrapper.
-    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" python3 -c "$SESSION_LAUNCHER" "$@" &
-    CHILD=$!
-    abort_on_lost_lease "$CHILD" &
-    RENEWER=$!
-    # Always stop renewing, kill the child's whole process group, and release.
-    trap 'kill "$RENEWER" 2>/dev/null || true; kill_group "$CHILD"; release_once' EXIT
-    set +e
-    wait "$CHILD"
-    code=$?
-    set -e
-    exit "$code"
+    RELEASE_ON_EXIT=1
+    shepherd "$@"
     ;;
   guard)
     # Like `with`, but the lock is ALREADY held by this holder (e.g. the GH
@@ -284,20 +263,10 @@ case "$cmd" in
       echo "Usage: $0 guard <command> [args...]" >&2
       exit 1
     fi
-    # Session leader so a lost-lease abort kills the whole descendant tree.
-    FLEET_LOCK_HELD=1 FLEET_LOCK_HOLDER="$HOLDER" python3 -c "$SESSION_LAUNCHER" "$@" &
-    CHILD=$!
-    abort_on_lost_lease "$CHILD" &
-    RENEWER=$!
-    trap 'kill "$RENEWER" 2>/dev/null || true; kill_group "$CHILD"' EXIT
-    set +e
-    wait "$CHILD"
-    code=$?
-    set -e
-    exit "$code"
+    shepherd "$@"
     ;;
   *)
-    echo "Usage: $0 {acquire|renew|release|renew-loop|with <command...>|guard <command...>} [holder]" >&2
+    echo "Usage: $0 {acquire|release|with <command...>|guard <command...>} [holder]" >&2
     exit 1
     ;;
 esac

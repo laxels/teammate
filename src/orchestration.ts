@@ -2,6 +2,7 @@
 // covered by `bun test`. No Convex runtime dependencies here.
 
 import {
+  DEVBOX_EVENT_TYPES,
   type DevboxEvent,
   type DevboxEventType,
   isTerminalTaskStatus,
@@ -28,8 +29,6 @@ export type SlackFileRef = {
 export type SlackTrigger = {
   type: "message" | "app_mention";
   channel: string;
-  /** "im" for DMs; absent on app_mention events. */
-  channelType: string | undefined;
   user: string;
   text: string;
   ts: string;
@@ -199,7 +198,6 @@ export function classifySlackEvent(
     trigger: {
       type: event.type,
       channel: event.channel,
-      channelType: event.channel_type,
       user: event.user,
       text: event.text,
       ts: event.ts,
@@ -212,18 +210,7 @@ export function classifySlackEvent(
 
 // ---- DevboxEvent (gateway -> /devbox/events) body validation ----
 
-const DEVBOX_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "started",
-  "progress",
-  "needs_input",
-  "completed",
-  "failed",
-  "stopped",
-  // Info events (#70) — recorded on the timeline, never drive task status.
-  "assistant_text",
-  "tool_call",
-  "tool_result",
-] satisfies DevboxEventType[]);
+const DEVBOX_EVENT_TYPES_SET: ReadonlySet<string> = new Set(DEVBOX_EVENT_TYPES);
 
 /**
  * Validates an already-JSON-parsed request body against the DevboxEvent wire
@@ -241,7 +228,7 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
     typeof body.devboxId !== "string" ||
     typeof body.taskId !== "string" ||
     typeof body.type !== "string" ||
-    !DEVBOX_EVENT_TYPES.has(body.type) ||
+    !DEVBOX_EVENT_TYPES_SET.has(body.type) ||
     typeof body.summary !== "string" ||
     typeof body.ts !== "number"
   ) {
@@ -550,7 +537,7 @@ export function shouldRetrySlackEvent(args: {
 
 // ---- Staleness predicate ----
 
-export const STALE_AFTER_MS = 30 * 60 * 1000;
+const STALE_AFTER_MS = 30 * 60_000;
 
 /**
  * True when a running task deserves a proactive check-in: its latest devbox
@@ -562,15 +549,13 @@ export function shouldNudge(args: {
   /** Timestamp of the latest task event (fall back to task.updatedAt). */
   latestActivityMs: number;
   lastNudgedAtMs?: number;
-  thresholdMs?: number;
 }): boolean {
-  const threshold = args.thresholdMs ?? STALE_AFTER_MS;
-  if (args.nowMs - args.latestActivityMs < threshold) {
+  if (args.nowMs - args.latestActivityMs < STALE_AFTER_MS) {
     return false;
   }
   if (
     args.lastNudgedAtMs !== undefined &&
-    args.nowMs - args.lastNudgedAtMs < threshold
+    args.nowMs - args.lastNudgedAtMs < STALE_AFTER_MS
   ) {
     return false;
   }

@@ -7,24 +7,13 @@ import {
   type DownloadedFile,
   downloadInboundFiles,
 } from "./files";
+import { recordingFetch } from "./test-helpers";
 
 const SITE = "https://convex.example";
 const SECRET = "shh";
 
 function file(name: string, storageId: string) {
   return { name, mimeType: "text/plain", size: 3, storageId };
-}
-
-function recordingFetch(responder: (url: string) => Response): {
-  fetchFn: typeof fetch;
-  calls: { url: string; init: RequestInit | undefined }[];
-} {
-  const calls: { url: string; init: RequestInit | undefined }[] = [];
-  const fetchFn = (async (url: unknown, init?: RequestInit) => {
-    calls.push({ url: String(url), init });
-    return responder(String(url));
-  }) as unknown as typeof fetch;
-  return { fetchFn, calls };
 }
 
 describe("downloadInboundFiles", () => {

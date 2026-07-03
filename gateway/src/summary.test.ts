@@ -9,14 +9,14 @@ import {
   mapResultMessage,
   prettyToolName,
   stringifyToolInput,
-} from "../src/summary";
+} from "./summary";
 import {
   assistantMessage,
   assistantWithToolUse,
   resultError,
   resultSuccess,
   toolResultMessage,
-} from "./helpers";
+} from "./test-helpers";
 
 describe("excerpt", () => {
   test("collapses whitespace and trims", () => {

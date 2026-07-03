@@ -16,12 +16,6 @@ export type HistoryTask = FunctionReturnType<
 export type Fleet = FunctionReturnType<typeof api.dashboard.fleet>;
 export type TaskStatus = ActiveTask["status"];
 
-export const TERMINAL: ReadonlySet<TaskStatus> = new Set([
-  "completed",
-  "failed",
-  "stopped",
-]);
-
 export function clock(ts: number): string {
   return new Date(ts).toLocaleTimeString("en-US", { hour12: false });
 }
@@ -39,6 +33,14 @@ export function duration(ms: number): string {
   if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
   if (m > 0) return `${m}m${String(r).padStart(2, "0")}s`;
   return `${r}s`;
+}
+
+/** m:ss timecode for a number of seconds. */
+export function formatTimecode(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
 /** Per-second tick, used only in leaf components so the page tree doesn't
@@ -97,6 +99,60 @@ export function ArmedButton({
     >
       {armed ? armedLabel : label}
     </button>
+  );
+}
+
+/** Confirm-armed stop for a live task; the result note lands via the page's
+ * action-note channel. Shared by the fleet board and the task-details page. */
+export function StopButton({
+  taskId,
+  onNote,
+}: {
+  taskId: string;
+  onNote: (taskId: string, note: string) => void;
+}) {
+  const secret = useDashboardSecret();
+  const stop = useMutation(api.dashboard.stopTask);
+  return (
+    <ArmedButton
+      label="stop"
+      armedLabel="confirm stop"
+      danger
+      onFire={() => {
+        void stop({ secret, taskId }).then((result) => {
+          onNote(taskId, result.ok ? `✓ ${result.note}` : `✗ ${result.reason}`);
+        });
+      }}
+    />
+  );
+}
+
+/** Confirm-armed retry for a terminal task; the note carries the new taskId.
+ * Shared by the fleet board and the task-details page. */
+export function RetryButton({
+  taskId,
+  onNote,
+}: {
+  taskId: string;
+  onNote: (taskId: string, note: string) => void;
+}) {
+  const secret = useDashboardSecret();
+  const retry = useMutation(api.dashboard.retryTask);
+  return (
+    <ArmedButton
+      label="retry"
+      armedLabel="confirm retry"
+      onFire={() => {
+        void retry({ secret, taskId }).then((result) => {
+          onNote(
+            taskId,
+            result.ok
+              ? `✓ ${result.note} → ${result.taskId}`
+              : `✗ ${result.reason}`,
+          );
+        });
+      }}
+    />
   );
 }
 
@@ -212,4 +268,15 @@ export function useActionNotes(): {
     }, 8000);
   }, []);
   return { notes, postNote };
+}
+
+/** Notes whose task row isn't rendered anywhere on the page — the safety net
+ * for feedback that lands as (or after) its row unmounts, e.g. an archive
+ * confirmation under the "all" filter. */
+export function orphanNoteEntries(
+  notes: Record<string, string>,
+  shownTaskIds: Iterable<string>,
+): [taskId: string, note: string][] {
+  const shown = new Set(shownTaskIds);
+  return Object.entries(notes).filter(([taskId]) => !shown.has(taskId));
 }

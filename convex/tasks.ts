@@ -1,12 +1,21 @@
 import { v } from "convex/values";
-import type { TaskEffort } from "../shared/protocol";
+import {
+  type InterruptPayload,
+  isTerminalTaskStatus,
+  type TaskEffort,
+  type TaskStatus,
+} from "../shared/protocol";
+import { stopRejection } from "../src/orchestration";
+import { internal } from "./_generated/api";
 import {
   internalMutation,
   internalQuery,
   type MutationCtx,
+  type QueryCtx,
   query,
 } from "./_generated/server";
-import { devboxSecretOk } from "./commands";
+import { devboxSecretOk, enqueueCommandRow } from "./commands";
+import { devboxByDevboxId } from "./devboxes";
 import type { StoredFile } from "./files";
 import {
   effortValidator,
@@ -16,6 +25,14 @@ import {
 
 const MAX_LISTED_TASKS = 50;
 const MAX_TASK_EVENTS = 10;
+
+/** The task row for a taskId (unique index lookup), or null. */
+export async function taskByTaskId(ctx: QueryCtx, taskId: string) {
+  return await ctx.db
+    .query("tasks")
+    .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
+    .unique();
+}
 
 export const list = internalQuery({
   args: {},
@@ -38,10 +55,7 @@ export const list = internalQuery({
 export const getByTaskId = internalQuery({
   args: { taskId: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    return await taskByTaskId(ctx, args.taskId);
   },
 });
 
@@ -74,10 +88,7 @@ export const findByChannelThread = internalQuery({
 export const getWithEvents = internalQuery({
   args: { taskId: v.string() },
   handler: async (ctx, args) => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return null;
     }
@@ -167,18 +178,14 @@ export const create = internalMutation({
  * assigned, nothing to interrupt). Returns false when the task has already
  * been placed — the caller should interrupt the devbox instead. Records a
  * "stopped" task event so the task's history isn't empty (devbox-path stops
- * get theirs from /devbox/events).
+ * get theirs from /devbox/events). Plain-function form so stopTaskCore can
+ * cancel inside its caller's transaction.
  */
-/** Plain-function form so dashboard.stop can cancel inside its own
- * transaction. */
 export async function cancelQueuedRow(
   ctx: MutationCtx,
   taskId: string,
 ): Promise<boolean> {
-  const task = await ctx.db
-    .query("tasks")
-    .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
-    .unique();
+  const task = await taskByTaskId(ctx, taskId);
   if (
     task === null ||
     task.devboxId !== undefined ||
@@ -201,10 +208,92 @@ export async function cancelQueuedRow(
   return true;
 }
 
-export const cancelQueued = internalMutation({
-  args: { taskId: v.string() },
-  handler: async (ctx, args) => {
-    return await cancelQueuedRow(ctx, args.taskId);
+/** Outcome of stopTaskCore; each surface maps kinds to its own wording. */
+export type StopTaskOutcome =
+  | { kind: "not_found" }
+  | { kind: "already_terminal"; status: TaskStatus }
+  | { kind: "cancelled_queued" }
+  | { kind: "cancel_conflict"; status: TaskStatus }
+  | { kind: "rejected"; reason: string }
+  | { kind: "interrupted" };
+
+/**
+ * Stops a task inside one transaction: cancels in place while queued,
+ * otherwise enqueues a taskId-guarded interrupt. Terminal tasks and devboxes
+ * that moved on are refused, never interrupted. Callers supply the Slack note
+ * texts (each surface attributes its stops differently) and map the outcome
+ * to their own result/error strings. Plain-function form so dashboard.stopTask
+ * can stop inside its own mutation; the orchestrator's stop_task goes through
+ * the tasks.stop wrapper.
+ */
+export async function stopTaskCore(
+  ctx: MutationCtx,
+  taskId: string,
+  notes: {
+    /** Thread note posted when the task is cancelled while still queued
+     * (queue cancellations never reach /devbox/events, so this is the only
+     * terminal note the thread gets). */
+    queuedCancelText: string;
+    /** Optional attribution note posted once an interrupt is enqueued — the
+     * eventual :octagonal_sign: update doesn't say who asked. */
+    interruptRequestedText?: string;
+  },
+): Promise<StopTaskOutcome> {
+  const task = await taskByTaskId(ctx, taskId);
+  if (task === null) {
+    return { kind: "not_found" };
+  }
+  if (isTerminalTaskStatus(task.status)) {
+    return { kind: "already_terminal", status: task.status };
+  }
+  if (task.devboxId === undefined) {
+    if (await cancelQueuedRow(ctx, taskId)) {
+      await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+        taskId,
+        text: notes.queuedCancelText,
+      });
+      return { kind: "cancelled_queued" };
+    }
+    // Same transaction, so no race: the task is unplaced but not "queued"
+    // (a state cancelQueuedRow refuses to touch).
+    return { kind: "cancel_conflict", status: task.status };
+  }
+  const devbox = await devboxByDevboxId(ctx, task.devboxId);
+  const rejection = stopRejection(task, devbox);
+  if (rejection !== null || devbox === null) {
+    return {
+      kind: "rejected",
+      reason: rejection ?? `devbox ${task.devboxId} is missing`,
+    };
+  }
+  const payload: InterruptPayload = { taskId };
+  await enqueueCommandRow(ctx, {
+    devboxId: devbox.devboxId,
+    kind: "interrupt",
+    payload: JSON.stringify(payload),
+  });
+  if (notes.interruptRequestedText !== undefined) {
+    await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
+      taskId,
+      text: notes.interruptRequestedText,
+    });
+  }
+  return { kind: "interrupted" };
+}
+
+export const stop = internalMutation({
+  args: {
+    taskId: v.string(),
+    queuedCancelText: v.string(),
+    interruptRequestedText: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<StopTaskOutcome> => {
+    return await stopTaskCore(ctx, args.taskId, {
+      queuedCancelText: args.queuedCancelText,
+      ...(args.interruptRequestedText === undefined
+        ? {}
+        : { interruptRequestedText: args.interruptRequestedText }),
+    });
   },
 });
 
@@ -218,10 +307,7 @@ export const cancelQueued = internalMutation({
 export const setSlackCard = internalMutation({
   args: { taskId: v.string(), cardTs: v.string() },
   handler: async (ctx, args) => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return null;
     }
@@ -253,10 +339,7 @@ export const setSlackCard = internalMutation({
 export const clearSlackCard = internalMutation({
   args: { taskId: v.string(), cardTs: v.string() },
   handler: async (ctx, args) => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task !== null && task.slackCardTs === args.cardTs) {
       await ctx.db.patch(task._id, { slackCardTs: undefined });
     }
@@ -266,10 +349,7 @@ export const clearSlackCard = internalMutation({
 export const markNudged = internalMutation({
   args: { taskId: v.string(), nudgedAt: v.number() },
   handler: async (ctx, args) => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task !== null) {
       await ctx.db.patch(task._id, { lastNudgedAt: args.nudgedAt });
     }
@@ -394,10 +474,7 @@ export const orphansForDevbox = query({
 export const forceStatus = internalMutation({
   args: { taskId: v.string(), status: taskStatusValidator },
   handler: async (ctx, args) => {
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return { ok: false };
     }

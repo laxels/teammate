@@ -13,6 +13,12 @@
 
 set -euo pipefail
 
+# Singleton lane: one fleet operation at a time, from the primary checkout
+# (scripts/singleton-lock.sh; no-ops on fleet hosts, which have no git).
+if [[ "${SINGLETON_LOCK:-}" != "fleet" ]]; then
+  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/singleton-lock.sh" fleet "$0" "$@"
+fi
+
 HOST_SSH="${1:-m1@100.121.13.107}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_OPTS=(-o ConnectTimeout=10)

@@ -4,7 +4,16 @@ import {
   tool,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { ComputerExecutor, Screenshot, ScrollDirection } from "./executor";
+import {
+  actionNames,
+  defineSpec,
+  errorResult,
+  runAction,
+  runBatch,
+  shotContent,
+  type ToolResult,
+} from "../mcp-actions";
+import type { ComputerExecutor, ScrollDirection } from "./executor";
 
 // In-process MCP server exposing desktop control to the Agent SDK session.
 // The tool surface deliberately mirrors the native Anthropic computer-use
@@ -45,55 +54,15 @@ const modifierText = z
     "Modifier key(s) to hold during the action: shift, ctrl, alt, super (super = the Mac Cmd key). Combine with +, e.g. 'super+shift'.",
   );
 
-type ToolResultContent =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string };
-
-type ToolResult = { content: ToolResultContent[]; isError?: boolean };
-
-function shotContent(shot: Screenshot): ToolResultContent[] {
-  return [
-    { type: "text", text: `Screenshot (${shot.width}x${shot.height}):` },
-    { type: "image", data: shot.base64, mimeType: "image/png" },
-  ];
-}
-
-function errorResult(error: unknown): ToolResult {
-  return {
-    content: [
-      {
-        type: "text",
-        text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-      },
-    ],
-    isError: true,
-  };
-}
-
 // ---- Action registry --------------------------------------------------------
 // Single source of truth shared by the individual tools and computer_batch.
 
-type ActionSpec<Shape extends z.ZodRawShape> = {
-  name: string;
-  description: string;
-  shape: Shape;
-  /** Perform the action; returns a one-line note for the result text. */
-  perform: (
-    executor: ComputerControl,
-    args: z.infer<z.ZodObject<Shape>>,
-  ) => Promise<string>;
-};
-
-function spec<Shape extends z.ZodRawShape>(
-  s: ActionSpec<Shape>,
-): ActionSpec<Shape> {
-  return s;
-}
+const spec = defineSpec<ComputerControl>();
 
 const CLICK_NOTE =
   "The screen may need a moment for the result to render; the attached screenshot was taken after a short settle delay.";
 
-export const ACTION_SPECS = [
+const ACTION_SPECS = [
   spec({
     name: "left_click",
     description:
@@ -248,21 +217,7 @@ export const ACTION_SPECS = [
   }),
 ] as const;
 
-type AnyActionSpec = (typeof ACTION_SPECS)[number];
-
-const ACTION_NAMES = ACTION_SPECS.map((s) => s.name) as [string, ...string[]];
-
-async function runAction(
-  executor: ComputerControl,
-  actionSpec: AnyActionSpec,
-  args: unknown,
-): Promise<string> {
-  const parsed = z.object(actionSpec.shape).parse(args);
-  // ACTION_SPECS is a heterogeneous const tuple, so calling perform through
-  // the union collapses its parameter to never; parse() above already
-  // validated args against this spec's own shape.
-  return await actionSpec.perform(executor, parsed as never);
-}
+const ACTION_NAMES = actionNames(ACTION_SPECS);
 
 const SERVER_INSTRUCTIONS = `Desktop control for this macOS machine: screenshots, mouse, and keyboard.
 
@@ -348,35 +303,14 @@ export function createComputerUseTools(executor: ComputerControl) {
         .max(20),
     },
     async (args): Promise<ToolResult> => {
-      const notes: string[] = [];
-      let failure: unknown = null;
-      for (const item of args.actions) {
-        const actionSpec = ACTION_SPECS.find((s) => s.name === item.action);
-        if (actionSpec === undefined) {
-          failure = new Error(`unknown action "${item.action}"`);
-          break;
-        }
-        try {
-          const { action: _action, ...rest } = item;
-          notes.push(await runAction(executor, actionSpec, rest));
-        } catch (error) {
-          failure = error;
-          break;
-        }
-      }
+      const { summary, failure } = await runBatch(
+        executor,
+        ACTION_SPECS,
+        args.actions,
+      );
       try {
         await executor.settle();
         const shot = await executor.screenshot();
-        const summary = [
-          ...notes.map((note, i) => `${i + 1}. ${note}`),
-          ...(failure === null
-            ? []
-            : [
-                `FAILED at step ${notes.length + 1}: ${
-                  failure instanceof Error ? failure.message : String(failure)
-                }`,
-              ]),
-        ].join("\n");
         return {
           content: [{ type: "text", text: summary }, ...shotContent(shot)],
           ...(failure === null ? {} : { isError: true }),

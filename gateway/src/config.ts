@@ -1,3 +1,5 @@
+import { GATEWAY_PORT } from "../../shared/protocol";
+
 export type GatewayConfig = {
   devboxId: string;
   port: number;
@@ -7,11 +9,10 @@ export type GatewayConfig = {
   devboxSharedSecret: string;
 };
 
-export const DEFAULT_PORT = 8787;
-
 /**
  * Read gateway configuration from the environment, failing fast with a clear
- * message when a required variable is missing. PORT is optional (default 8787).
+ * message when a required variable is missing. PORT is optional (defaults to
+ * the shared GATEWAY_PORT).
  */
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
@@ -39,7 +40,7 @@ export function loadConfig(
   const rawPort = env.PORT;
   const port =
     rawPort === undefined || rawPort === ""
-      ? DEFAULT_PORT
+      ? GATEWAY_PORT
       : Number.parseInt(rawPort, 10);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`gateway: invalid PORT value: ${JSON.stringify(rawPort)}`);

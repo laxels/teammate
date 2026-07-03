@@ -4,12 +4,13 @@ import type {
   ConsoleMessage,
   PageState,
   TabInfo,
-} from "../src/browser/executor";
+} from "./browser/executor";
 import {
   type BrowserControl,
   createBrowserTools,
   MAX_SNAPSHOT_CHARS,
-} from "../src/browser/mcp";
+} from "./browser/mcp";
+import { call, type ToolResult } from "./test-helpers";
 
 const TAB: TabInfo = {
   index: 0,
@@ -86,27 +87,6 @@ function createFakeControl(
     ...overrides,
   };
   return { control, log };
-}
-
-type ToolResult = {
-  content: Array<Record<string, unknown>>;
-  isError?: boolean;
-};
-
-function findTool(tools: ReturnType<typeof createBrowserTools>, name: string) {
-  const found = tools.find((t) => t.name === name);
-  if (found === undefined) throw new Error(`no tool named ${name}`);
-  return found;
-}
-
-async function call(
-  tools: ReturnType<typeof createBrowserTools>,
-  name: string,
-  args: unknown,
-): Promise<ToolResult> {
-  // Tools are a heterogeneous union, so handler's parameter collapses to
-  // never; tests call handlers with args matching that tool's schema.
-  return (await findTool(tools, name).handler(args as never, {})) as ToolResult;
 }
 
 /** Concatenate every text block of a result (the fallback hint is a separate
@@ -244,7 +224,7 @@ describe("browser MCP tools", () => {
     const tools = createBrowserTools(control);
     const result = await call(tools, "browser_tabs", { action: "select" });
     expect(result.isError).toBe(true);
-    expect(log).not.toContain("selectTab([0])");
+    expect(log).toEqual([]);
   });
 
   test("executor failures become isError results with the message", async () => {
@@ -324,7 +304,9 @@ describe("browser MCP tools", () => {
       actions: [{ action: "browser_click" }],
     });
     expect(result.isError).toBe(true);
-    expect(log).not.toContain('click(["e2",{}])');
+    // The executor was never reached; only the settle + fresh page state that
+    // follow a batch failure ran.
+    expect(log).toEqual(["settle", "state"]);
   });
 
   test("a single action failure does not yet nudge toward computer use", async () => {

@@ -93,6 +93,47 @@ test("guard kills the wrapped command's whole tree when the lease is lost", asyn
   }
 }, 30_000);
 
+test("with acquires, propagates the command's exit code, and releases", async () => {
+  const hits: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      hits.push(url.pathname);
+      if (url.pathname === "/fleet/lock/acquire") {
+        return Response.json({ acquired: true });
+      }
+      if (url.pathname === "/fleet/lock/renew") {
+        return Response.json({ renewed: true, expiresAt: Date.now() + 15_000 });
+      }
+      return Response.json({ ok: true });
+    },
+  });
+  try {
+    const proc = spawn({
+      cmd: ["bash", SCRIPT, "with", "bash", "-c", "exit 7"],
+      env: {
+        ...process.env,
+        CONVEX_SITE_URL: `http://localhost:${server.port}`,
+        DEVBOX_SHARED_SECRET: "test-secret",
+        FLEET_LOCK_HOLDER: "test-runner",
+        FLEET_LOCK_TTL_MS: "15000",
+        // The test run may live in a linked worktree; the guard isn't under test.
+        ULTRACLAUDE_SINGLETON_FROM_WORKTREE: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // The wrapped command's exit code must propagate through the shepherd.
+    expect(await proc.exited).toBe(7);
+    expect(hits).toContain("/fleet/lock/acquire");
+    // Unlike `guard`, `with` owns the lock and must release it on exit.
+    expect(hits).toContain("/fleet/lock/release");
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
 test("guard lets a command finish cleanly while the lease holds", async () => {
   // A fast command that exits 0; the renewer keeps reporting the lease held.
   const server = Bun.serve({

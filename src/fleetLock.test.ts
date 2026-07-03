@@ -55,7 +55,7 @@ describe("decideAcquire", () => {
     ).toEqual({ action: "reject", heldBy: "laptop:1", expiresAt: 10_000 });
   });
 
-  test("steals when a different holder's lease has expired", () => {
+  test("steals when a different holder's lease has expired (boundary inclusive: nowMs === expiresAt)", () => {
     expect(
       decideAcquire({
         existing: row({ holder: "laptop:1", expiresAt: 10_000 }),
@@ -63,21 +63,6 @@ describe("decideAcquire", () => {
         nowMs: 10_000,
       }),
     ).toEqual({ action: "steal", stolenFrom: "laptop:1" });
-  });
-
-  test("expiry boundary is inclusive — exactly at expiresAt is reclaimable", () => {
-    const justBefore = decideAcquire({
-      existing: row({ holder: "laptop:1", expiresAt: 10_000 }),
-      holder: "gh:1",
-      nowMs: 9_999,
-    });
-    const exactly = decideAcquire({
-      existing: row({ holder: "laptop:1", expiresAt: 10_000 }),
-      holder: "gh:1",
-      nowMs: 10_000,
-    });
-    expect(justBefore.action).toBe("reject");
-    expect(exactly.action).toBe("steal");
   });
 });
 

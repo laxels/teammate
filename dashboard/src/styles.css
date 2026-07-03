@@ -305,9 +305,7 @@ section[aria-label="task history"] h2 {
   flex: none;
 }
 
-.status-running,
-.status-ev-started,
-.status-ev-progress {
+.status-running {
   color: var(--ok-green);
   background: var(--ok-tint);
 }
@@ -317,26 +315,22 @@ section[aria-label="task history"] h2 {
   background: var(--warn-tint);
 }
 
-.status-needs_input,
-.status-ev-needs_input {
+.status-needs_input {
   color: var(--info-blue);
   background: var(--info-tint);
 }
 
-.status-completed,
-.status-ev-completed {
+.status-completed {
   color: var(--ink-secondary);
   background: var(--paper-sunken);
 }
 
-.status-failed,
-.status-ev-failed {
+.status-failed {
   color: var(--stop-red);
   background: var(--stop-tint);
 }
 
-.status-stopped,
-.status-ev-stopped {
+.status-stopped {
   color: var(--ink-secondary);
   background: var(--paper-sunken);
 }
@@ -855,6 +849,15 @@ section[aria-label="task history"] h2 {
   color: var(--ink);
   box-shadow: 0 0 0 3px var(--terracotta-tint);
 }
+.comment-editor-text:focus {
+  outline: none;
+}
+.comment-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
 
 /* Comment full-view dialog (#118): clicking a comment thumbnail opens the frame
  * at full quality beside its text. The backdrop centers the card and keeps a
@@ -952,15 +955,6 @@ section[aria-label="task history"] h2 {
   .comment-dialog-body {
     flex: 1 1 auto;
   }
-}
-.comment-editor-text:focus {
-  outline: none;
-}
-.comment-editor-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 6px;
 }
 
 /* primary variant of the .act button */

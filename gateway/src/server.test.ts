@@ -7,15 +7,15 @@ import type {
   GatewayHealth,
   SteerServerMessage,
 } from "../../shared/protocol";
-import type { GatewayConfig } from "../src/config";
-import type { FetchLike } from "../src/events";
-import { createGatewayServer, type GatewayServer } from "../src/server";
+import type { GatewayConfig } from "./config";
+import type { FetchLike } from "./events";
+import { createGatewayServer, type GatewayServer } from "./server";
 import {
   assistantMessage,
   createEchoQueryFn,
   resultSuccess,
   until,
-} from "./helpers";
+} from "./test-helpers";
 
 const config: GatewayConfig = {
   devboxId: "devbox-test",

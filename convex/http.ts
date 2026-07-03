@@ -1,7 +1,8 @@
 import { httpRouter } from "convex/server";
+import { timingSafeEqual } from "../shared/auth";
 import { MAX_OUTBOUND_FILE_BYTES } from "../shared/protocol";
 import { parseDevboxEvent } from "../src/orchestration";
-import { timingSafeEqual, verifySlackSignature } from "../src/slack";
+import { verifySlackSignature } from "../src/slack";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
@@ -144,13 +145,7 @@ http.route({
   path: "/devbox/events",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
+    if (!devboxSecretOk(request)) {
       return new Response("unauthorized", { status: 401 });
     }
 
@@ -202,13 +197,7 @@ http.route({
   path: "/devbox/artifact",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
+    if (!devboxSecretOk(request)) {
       return new Response("unauthorized", { status: 401 });
     }
 
@@ -255,13 +244,7 @@ http.route({
   path: "/devbox/recording/upload-url",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
+    if (!devboxSecretOk(request)) {
       return new Response("unauthorized", { status: 401 });
     }
     const url = await ctx.storage.generateUploadUrl();
@@ -277,13 +260,7 @@ http.route({
   path: "/devbox/recording",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
+    if (!devboxSecretOk(request)) {
       return new Response("unauthorized", { status: 401 });
     }
 
@@ -360,13 +337,7 @@ http.route({
   path: "/devbox/file",
   method: "GET",
   handler: httpAction(async (ctx, request) => {
-    const secret = process.env.DEVBOX_SHARED_SECRET;
-    const provided = request.headers.get("x-devbox-secret");
-    if (
-      secret === undefined ||
-      provided === null ||
-      !timingSafeEqual(provided, secret)
-    ) {
+    if (!devboxSecretOk(request)) {
       return new Response("unauthorized", { status: 401 });
     }
     const storageId = new URL(request.url).searchParams.get("storageId");

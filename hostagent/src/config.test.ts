@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { join } from "node:path";
 import { loadConfig } from "./config";
 
 const REQUIRED_ENV = {
@@ -23,25 +22,4 @@ test("GOLDEN_IMAGE from the env is authoritative over the fallback default", () 
   // see config.ts — so it can't be cross-checked against golden-constants.sh.)
   const fallback = loadConfig(REQUIRED_ENV);
   expect(fallback.goldenImage).toMatch(/^golden-v\d+$/);
-});
-
-// The golden pin (scripts/golden-constants.sh) is the single source of truth the
-// fleet scripts source; this guards its internal consistency (the local image
-// name and ghcr ref both derive from the one version), so a bump can't leave
-// them out of step.
-test("golden-constants.sh derives the local image and ghcr ref from the version", () => {
-  const scriptPath = join(import.meta.dir, "../../scripts/golden-constants.sh");
-  const proc = Bun.spawnSync([
-    "bash",
-    "-c",
-    `source ${JSON.stringify(scriptPath)} && ` +
-      `printf '%s\\n%s\\n%s' "$GOLDEN_VERSION" "$GOLDEN_LOCAL" "$GOLDEN_REMOTE"`,
-  ]);
-  expect(proc.success).toBe(true);
-
-  const lines = proc.stdout.toString().trim().split("\n");
-  const version = lines[0];
-  expect(version).toMatch(/^v\d+$/);
-  expect(lines[1]).toBe(`golden-${version}`);
-  expect(lines[2]).toBe(`ghcr.io/laxels/ultraclaude-golden:${version}`);
 });

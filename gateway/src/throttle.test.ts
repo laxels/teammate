@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createThrottler } from "../src/throttle";
+import { createThrottler } from "./throttle";
 
 describe("createThrottler", () => {
   test("allows the first acquire immediately", () => {

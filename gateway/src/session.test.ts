@@ -3,18 +3,20 @@ import type {
   McpServerConfig,
   SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { DEVBOX_SYSTEM_PROMPT } from "../src/prompt";
-import { type QueryFn, SessionManager } from "../src/session";
+import { DEVBOX_SYSTEM_PROMPT } from "./prompt";
+import { type QueryFn, SessionManager } from "./session";
 import {
   askUserQuestionMessage,
   assistantMessage,
   createEchoQueryFn,
   createEventRecorder,
+  interruptGatedQueryFn,
+  manualQueryFn,
   resultError,
   resultSuccess,
   until,
   userMessageText,
-} from "./helpers";
+} from "./test-helpers";
 
 function makeSession(
   queryFn: QueryFn,
@@ -142,24 +144,7 @@ describe("SessionManager", () => {
   });
 
   test("finishes the screen recording when a task is interrupted", async () => {
-    const gate = Promise.withResolvers<void>();
-    let interrupted = false;
-    const queryFn: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        const iterator = params.prompt[Symbol.asyncIterator]();
-        await iterator.next();
-        yield assistantMessage("working...");
-        await gate.promise;
-        if (!interrupted) yield resultSuccess("finished");
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {
-          interrupted = true;
-          gate.resolve();
-        },
-        setPermissionMode: async () => {},
-      });
-    };
+    const queryFn = interruptGatedQueryFn();
     const { emitEvent } = createEventRecorder();
     const finishes: string[] = [];
     const session = new SessionManager({
@@ -210,25 +195,7 @@ describe("SessionManager", () => {
   });
 
   test("interrupt mid-turn emits stopped (and no completed)", async () => {
-    const gate = Promise.withResolvers<void>();
-    let interrupted = false;
-    const queryFn: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        const iterator = params.prompt[Symbol.asyncIterator]();
-        await iterator.next();
-        yield assistantMessage("working...");
-        await gate.promise; // a long-running turn
-        if (!interrupted) yield resultSuccess("finished");
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {
-          interrupted = true;
-          gate.resolve();
-        },
-        setPermissionMode: async () => {},
-      });
-    };
-    const { session, events } = makeSession(queryFn);
+    const { session, events } = makeSession(interruptGatedQueryFn());
 
     session.start({ taskId: "task-1", prompt: "long job" });
     await until(() => events.some((e) => e.type === "progress"));
@@ -289,21 +256,15 @@ describe("SessionManager", () => {
 
   test("progress events are throttled to one per window", async () => {
     const clock = { t: 0 };
-    const queryFn: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        const iterator = params.prompt[Symbol.asyncIterator]();
-        await iterator.next();
-        yield assistantMessage("first");
-        yield assistantMessage("second"); // same instant: suppressed
-        clock.t = 30_000;
-        yield assistantMessage("third"); // window elapsed: emitted
-        yield resultSuccess("done");
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {},
-        setPermissionMode: async () => {},
-      });
-    };
+    const queryFn = manualQueryFn(async function* (params) {
+      const iterator = params.prompt[Symbol.asyncIterator]();
+      await iterator.next();
+      yield assistantMessage("first");
+      yield assistantMessage("second"); // same instant: suppressed
+      clock.t = 30_000;
+      yield assistantMessage("third"); // window elapsed: emitted
+      yield resultSuccess("done");
+    });
     const { session, events } = makeSession(queryFn, { now: () => clock.t });
 
     session.start({ taskId: "task-1", prompt: "chatty" });
@@ -343,19 +304,37 @@ describe("SessionManager", () => {
     expect(events.some((e) => e.type === "completed")).toBe(false);
   });
 
+  test("a stream error on an idle finished-but-steerable session does not regress the task to failed", async () => {
+    // The SDK subprocess dies while the session idles AFTER its result: the
+    // task already reported its terminal status, and a late "failed" would
+    // overwrite it (Convex applies terminal-to-terminal transitions).
+    const crash = Promise.withResolvers<void>();
+    const queryFn = manualQueryFn(async function* (params) {
+      const iterator = params.prompt[Symbol.asyncIterator]();
+      await iterator.next();
+      yield assistantMessage("working");
+      yield resultSuccess("done");
+      await crash.promise; // idle, finished-but-steerable
+      throw new Error("subprocess died while idle");
+    });
+    const { session, events } = makeSession(queryFn);
+
+    session.start({ taskId: "task-1", prompt: "quick job" });
+    await until(() => events.some((e) => e.type === "completed"));
+
+    crash.resolve();
+    await until(() => !session.status().running);
+
+    expect(events.some((e) => e.type === "failed")).toBe(false);
+  });
+
   test("a crash in the SDK stream emits failed and frees the session", async () => {
-    const queryFn: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        const iterator = params.prompt[Symbol.asyncIterator]();
-        await iterator.next();
-        yield assistantMessage("about to crash");
-        throw new Error("subprocess exploded");
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {},
-        setPermissionMode: async () => {},
-      });
-    };
+    const queryFn = manualQueryFn(async function* (params) {
+      const iterator = params.prompt[Symbol.asyncIterator]();
+      await iterator.next();
+      yield assistantMessage("about to crash");
+      throw new Error("subprocess exploded");
+    });
     const { session, events } = makeSession(queryFn);
 
     session.start({ taskId: "task-1", prompt: "kaboom" });
@@ -364,17 +343,6 @@ describe("SessionManager", () => {
     const failed = events.find((e) => e.type === "failed");
     expect(failed?.summary).toContain("subprocess exploded");
     expect(session.start({ taskId: "task-2", prompt: "retry" })).toBe(true);
-  });
-
-  test("setPermissionMode forwards to the live query", async () => {
-    const { queryFn, control } = createEchoQueryFn();
-    const { session } = makeSession(queryFn);
-
-    expect(await session.setPermissionMode("plan")).toBe(false);
-
-    session.start({ taskId: "task-1", prompt: "task" });
-    expect(await session.setPermissionMode("plan")).toBe(true);
-    expect(control.permissionModes).toEqual(["plan"]);
   });
 
   test("in-process MCP servers are rebuilt and passed to the SDK per task", async () => {
@@ -456,17 +424,11 @@ describe("SessionManager", () => {
     const clock = { t: 0 };
     const gate = Promise.withResolvers<void>();
     let captured: Parameters<QueryFn>[0] | null = null;
-    const oneMessageThenSilence: QueryFn = (params) => {
+    const oneMessageThenSilence = manualQueryFn(async function* (params) {
       captured = params;
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        yield assistantMessage("starting");
-        await gate.promise; // mid-task silence (waiting on the human)
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {},
-        setPermissionMode: async () => {},
-      });
-    };
+      yield assistantMessage("starting");
+      await gate.promise; // mid-task silence (waiting on the human)
+    });
     const { events, emitEvent } = createEventRecorder();
     const session = new SessionManager({
       emitEvent,
@@ -499,21 +461,19 @@ describe("SessionManager", () => {
   test("init watchdog fails a session with no SDK messages and recycles it", async () => {
     const clock = { t: 0 };
     let interrupts = 0;
-    const neverYields: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        // Simulates the observed first-turn hang: the subprocess produces
-        // nothing, and even reading the input stalls.
+    const neverYields = manualQueryFn(
+      // Simulates the observed first-turn hang: the subprocess produces
+      // nothing, and even reading the input stalls.
+      async function* () {
         await new Promise<void>(() => {});
-        void params;
         yield assistantMessage("unreachable");
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {
+      },
+      {
+        onInterrupt: () => {
           interrupts += 1;
         },
-        setPermissionMode: async () => {},
-      });
-    };
+      },
+    );
     const { events, emitEvent } = createEventRecorder();
     const session = new SessionManager({
       emitEvent,
@@ -536,20 +496,15 @@ describe("SessionManager", () => {
   test("stall watchdog fails a session that goes silent mid-task", async () => {
     const clock = { t: 0 };
     const gate = Promise.withResolvers<void>();
-    const stallsAfterOne: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
+    const stallsAfterOne = manualQueryFn(
+      async function* (params) {
         const iterator = params.prompt[Symbol.asyncIterator]();
         await iterator.next();
         yield assistantMessage("working...");
         await gate.promise; // never resolves: mid-task stall
-      }
-      return Object.assign(generate(), {
-        interrupt: async () => {
-          gate.resolve();
-        },
-        setPermissionMode: async () => {},
-      });
-    };
+      },
+      { onInterrupt: () => gate.resolve() },
+    );
     const { events, emitEvent } = createEventRecorder();
     const session = new SessionManager({
       emitEvent,
@@ -597,20 +552,14 @@ describe("SessionManager", () => {
     const clock = { t: 0 };
     const gate = Promise.withResolvers<void>();
     let turns = 0;
-    const gatedSecondTurn: QueryFn = (params) => {
-      async function* generate(): AsyncGenerator<SDKMessage, void> {
-        for await (const message of params.prompt) {
-          turns += 1;
-          // The steered turn starts "thinking" without emitting anything yet.
-          if (turns === 2) await gate.promise;
-          yield resultSuccess(`done: ${userMessageText(message)}`);
-        }
+    const gatedSecondTurn = manualQueryFn(async function* (params) {
+      for await (const message of params.prompt) {
+        turns += 1;
+        // The steered turn starts "thinking" without emitting anything yet.
+        if (turns === 2) await gate.promise;
+        yield resultSuccess(`done: ${userMessageText(message)}`);
       }
-      return Object.assign(generate(), {
-        interrupt: async () => {},
-        setPermissionMode: async () => {},
-      });
-    };
+    });
     const { events, emitEvent } = createEventRecorder();
     const session = new SessionManager({
       emitEvent,

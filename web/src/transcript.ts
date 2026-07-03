@@ -230,18 +230,13 @@ function applyAssistantMessage(
       const kept = state.items.filter(
         (item) => item.kind === "user" || item.frameId !== frameId,
       );
-      // Number of retained items that precede the replaced run.
-      let insertAt = 0;
-      for (let i = 0; i < firstIndex; i += 1) {
-        const item = state.items[i];
-        if (
-          item !== undefined &&
-          (item.kind === "user" || item.frameId !== frameId)
-        ) {
-          insertAt += 1;
-        }
-      }
-      items = [...kept.slice(0, insertAt), ...fresh, ...kept.slice(insertAt)];
+      // Everything before firstIndex is by construction retained, so
+      // firstIndex is the insertion point within kept.
+      items = [
+        ...kept.slice(0, firstIndex),
+        ...fresh,
+        ...kept.slice(firstIndex),
+      ];
     } else {
       items = [...state.items, ...fresh];
     }

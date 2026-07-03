@@ -28,10 +28,18 @@ verified by the Slack signature instead.
   deduped into `slackEvents`, processed async by `orchestrator.processSlackEvent`).
 - `POST /devbox/events` — gateway lifecycle events (`DevboxEvent` from
   `shared/protocol.ts`) that update task/devbox state.
-- `POST /devbox/transcript` — final session transcript (one JSON payload per
-  task at terminal status), stored so the record outlives the ephemeral VM.
 - `POST /devbox/artifact` — a devbox `share_file` upload (multipart); staged in
   storage, posted into the task's Slack thread, then the blob is deleted.
+- `POST /devbox/recording/upload-url` — returns a short-lived Convex storage
+  upload URL for large/binary blobs (screen recordings, tool-result
+  screenshots, host frame grabs), keeping them off the size-capped
+  HTTP-action path.
+- `POST /devbox/recording` — records a screen-recording lifecycle transition
+  (`recording`/`uploading`/`available`/`failed`) on the task row; `available`
+  requires the `storageId` from the upload-URL flow.
+- `GET /devbox/recording-url` — resolves a task's recording to a short-lived
+  signed storage URL for the fleet host's frame-grab endpoint (no raw
+  storageId or caller-supplied URL crosses the browser).
 - `GET /devbox/file` — serves a staged inbound Slack attachment to the gateway by
   `storageId` (secret-gated instead of a public storage URL).
 - `POST /fleet/lock/{acquire,renew,release}` — the authoritative cross-origin
@@ -43,11 +51,18 @@ verified by the Slack signature instead.
   the GH Actions provisioner / a laptop run into `hostEvents` (get_fleet shows
   them); a `provision_failed` event also drops a stale pre-created `provisioning`
   row.
+- `POST /fleet/host/status` — drain or rejoin a host for a golden refresh
+  (#89): `draining` makes placement skip the host without touching its
+  in-flight VMs; `active` rejoins it.
+- `POST /fleet/host/evict` — force-evict every ephemeral VM on a host
+  (all-at-once golden refresh, after a bounded drain), abandoning any
+  in-flight tasks on them; returns the evicted count.
 
 ## Devbox placement
 
 Every task runs on a **fresh ephemeral devbox VM** — there is nothing
-to register. When a task starts, `hosts.allocateEphemeral` provisions a VM on an
+to register. When a task starts, `hosts.placeEphemeralTask` (via the
+`allocateEphemeralSlot` helper) provisions a VM on an
 available Mac host (`provisioning` → `busy` → `retiring` → row deleted by
 `hosts.removeDevbox`) and derives its gateway URL from `TAILNET_SUFFIX`.
 A devbox is never reused — no task runs on a previous task's
@@ -70,7 +85,7 @@ ahead of demand and fire the provisioner via `repository_dispatch`.
    `orchestrator.processSlackEvent`.
 2. The orchestrator filters bot/self messages (`src/orchestration.ts`), then
    runs the Opus 4.8 loop with tools `list_tasks` / `get_task` / `start_task` /
-   `steer_task` / `stop_task`. Every reply is threaded under the triggering
+   `get_fleet` / `steer_task` / `stop_task`. Every reply is threaded under the triggering
    message (one request = one thread); a reply inside a task's thread gets
    that task injected as `<thread_context>` (looked up via the tasks
    `by_channel_thread` index), so thread replies steer, query, or stop their

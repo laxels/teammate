@@ -4,7 +4,17 @@ import {
   tool,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { BrowserScreenshot, BrowserSession, PageState } from "./executor";
+import {
+  actionNames,
+  defineSpec,
+  errorResult,
+  runAction,
+  runBatch,
+  shotContent,
+  type ToolResult,
+  type ToolResultContent,
+} from "../mcp-actions";
+import type { BrowserSession, PageState, TabInfo } from "./executor";
 
 // In-process MCP server exposing Playwright-backed browser control to the
 // Agent SDK session. Complements the pixel computer-use server: element-ref
@@ -41,24 +51,6 @@ const ref = z
   .min(1)
   .describe('Element ref from the latest page snapshot, e.g. "e12"');
 
-type ToolResultContent =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string };
-
-type ToolResult = { content: ToolResultContent[]; isError?: boolean };
-
-function errorResult(error: unknown): ToolResult {
-  return {
-    content: [
-      {
-        type: "text",
-        text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-      },
-    ],
-    isError: true,
-  };
-}
-
 /** Beyond this the snapshot is cut off; huge pages still fit in one result. */
 export const MAX_SNAPSHOT_CHARS = 40_000;
 const MAX_EVAL_RESULT_CHARS = 5_000;
@@ -71,14 +63,16 @@ function truncate(text: string, limit: number, what: string): string {
   return `${text.slice(0, limit)}\n[... ${what} truncated at ${limit} characters ...]`;
 }
 
+function formatTabLine(tab: TabInfo): string {
+  return `${tab.index}:${tab.active ? " (active)" : ""} ${tab.title === "" ? "(untitled)" : tab.title} — ${tab.url}`;
+}
+
 export function formatPageState(state: PageState): string {
   const lines = ["### Page", `URL: ${state.url}`, `Title: ${state.title}`];
   if (state.tabs.length > 1) {
     lines.push("", "### Tabs");
     for (const tab of state.tabs) {
-      lines.push(
-        `- ${tab.index}:${tab.active ? " (active)" : ""} ${tab.title === "" ? "(untitled)" : tab.title} — ${tab.url}`,
-      );
+      lines.push(`- ${formatTabLine(tab)}`);
     }
   }
   lines.push(
@@ -89,34 +83,12 @@ export function formatPageState(state: PageState): string {
   return lines.join("\n");
 }
 
-function shotContent(shot: BrowserScreenshot): ToolResultContent[] {
-  return [
-    { type: "text", text: `Screenshot (${shot.width}x${shot.height}):` },
-    { type: "image", data: shot.base64, mimeType: "image/png" },
-  ];
-}
-
 // ---- Action registry --------------------------------------------------------
 // Single source of truth shared by the individual tools and browser_batch.
 
-type ActionSpec<Shape extends z.ZodRawShape> = {
-  name: string;
-  description: string;
-  shape: Shape;
-  /** Perform the action; returns a one-line note for the result text. */
-  perform: (
-    control: BrowserControl,
-    args: z.infer<z.ZodObject<Shape>>,
-  ) => Promise<string>;
-};
+const spec = defineSpec<BrowserControl>();
 
-function spec<Shape extends z.ZodRawShape>(
-  s: ActionSpec<Shape>,
-): ActionSpec<Shape> {
-  return s;
-}
-
-export const ACTION_SPECS = [
+const ACTION_SPECS = [
   spec({
     name: "browser_navigate",
     description:
@@ -263,12 +235,7 @@ export const ACTION_SPECS = [
       switch (args.action) {
         case "list": {
           const tabs = await control.tabList();
-          return tabs
-            .map(
-              (tab) =>
-                `${tab.index}:${tab.active ? " (active)" : ""} ${tab.title === "" ? "(untitled)" : tab.title} — ${tab.url}`,
-            )
-            .join("\n");
+          return tabs.map(formatTabLine).join("\n");
         }
         case "new":
           await control.newTab(args.url);
@@ -288,21 +255,7 @@ export const ACTION_SPECS = [
   }),
 ] as const;
 
-type AnyActionSpec = (typeof ACTION_SPECS)[number];
-
-const ACTION_NAMES = ACTION_SPECS.map((s) => s.name) as [string, ...string[]];
-
-async function runAction(
-  control: BrowserControl,
-  actionSpec: AnyActionSpec,
-  args: unknown,
-): Promise<string> {
-  const parsed = z.object(actionSpec.shape).parse(args);
-  // ACTION_SPECS is a heterogeneous const tuple, so calling perform through
-  // the union collapses its parameter to never; parse() above already
-  // validated args against this spec's own shape.
-  return await actionSpec.perform(control, parsed as never);
-}
+const ACTION_NAMES = actionNames(ACTION_SPECS);
 
 const SERVER_INSTRUCTIONS = `Fast, precise browser control via Playwright, driving a dedicated Chrome window on this machine's desktop.
 
@@ -471,35 +424,14 @@ export function createBrowserTools(control: BrowserControl) {
         .max(20),
     },
     async (args): Promise<ToolResult> => {
-      const notes: string[] = [];
-      let failure: unknown = null;
-      for (const item of args.actions) {
-        const actionSpec = ACTION_SPECS.find((s) => s.name === item.action);
-        if (actionSpec === undefined) {
-          failure = new Error(`unknown action "${item.action}"`);
-          break;
-        }
-        try {
-          const { action: _action, ...rest } = item;
-          notes.push(await runAction(control, actionSpec, rest));
-        } catch (error) {
-          failure = error;
-          break;
-        }
-      }
+      const { summary, failure } = await runBatch(
+        control,
+        ACTION_SPECS,
+        args.actions,
+      );
       try {
         await control.settle();
         const state = await control.state();
-        const summary = [
-          ...notes.map((note, i) => `${i + 1}. ${note}`),
-          ...(failure === null
-            ? []
-            : [
-                `FAILED at step ${notes.length + 1}: ${
-                  failure instanceof Error ? failure.message : String(failure)
-                }`,
-              ]),
-        ].join("\n");
         const content: ToolResultContent[] = [
           { type: "text", text: `${summary}\n\n${formatPageState(state)}` },
         ];

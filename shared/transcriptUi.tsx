@@ -39,9 +39,9 @@ export function ToolPill({
   imageUrl,
   onToggle,
 }: ToolPillProps) {
-  const hasResult =
-    (result !== undefined && result !== null && result !== "") ||
-    (imageUrl !== undefined && imageUrl !== null);
+  const hasText = result !== undefined && result !== null && result !== "";
+  const hasImage = imageUrl !== undefined && imageUrl !== null;
+  const hasResult = hasText || hasImage;
   return (
     <details className="tx-tool" onToggle={onToggle}>
       <summary className="tx-tool-summary">
@@ -54,10 +54,8 @@ export function ToolPill({
         <pre className="tx-tool-params">{params}</pre>
         {hasResult && (
           <div className="tx-tool-result">
-            {result !== undefined && result !== null && result !== "" && (
-              <pre className="tx-tool-result-text">{result}</pre>
-            )}
-            {imageUrl !== undefined && imageUrl !== null && (
+            {hasText && <pre className="tx-tool-result-text">{result}</pre>}
+            {hasImage && (
               <img
                 className="tx-tool-shot"
                 src={imageUrl}

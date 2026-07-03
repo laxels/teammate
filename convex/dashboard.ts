@@ -7,36 +7,35 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import {
-  type InterruptPayload,
   isTerminalTaskStatus,
   type UserMessagePayload,
 } from "../shared/protocol";
-import {
-  monitoringUrl,
-  steerRejection,
-  stopRejection,
-} from "../src/orchestration";
-import { timingSafeEqual } from "../src/slack";
+import { monitoringUrl, steerRejection } from "../src/orchestration";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { type MutationCtx, mutation, query } from "./_generated/server";
-import { enqueueCommandRow } from "./commands";
+import {
+  type MutationCtx,
+  mutation,
+  type QueryCtx,
+  query,
+} from "./_generated/server";
+import { enqueueCommandRow, secretMatches } from "./commands";
+import { devboxByDevboxId } from "./devboxes";
 import { fleetSnapshotData, placeEphemeralTaskRow } from "./hosts";
 import { taskStatusValidator } from "./schema";
-import { cancelQueuedRow, insertTaskRow } from "./tasks";
+import { insertTaskRow, stopTaskCore, taskByTaskId } from "./tasks";
 
 function secretOk(secret: string): boolean {
-  const expected = process.env.DASHBOARD_SECRET;
-  const ok =
-    expected !== undefined &&
-    expected !== "" &&
-    timingSafeEqual(secret, expected);
-  if (!ok) {
-    console.warn(
-      "dashboard: secret mismatch (or DASHBOARD_SECRET unset); denying request",
-    );
-  }
-  return ok;
+  return secretMatches(
+    process.env.DASHBOARD_SECRET,
+    secret,
+    "dashboard: secret mismatch (or DASHBOARD_SECRET unset); denying request",
+  );
+}
+
+/** The devbox row for a task's (possibly absent) devboxId, or null. */
+async function loadDevbox(ctx: QueryCtx, devboxId: string | undefined) {
+  return devboxId === undefined ? null : await devboxByDevboxId(ctx, devboxId);
 }
 
 /** The slice of a task row the dashboard renders. */
@@ -86,15 +85,7 @@ export const activeTasks = query({
     const sorted = active.sort((a, b) => b.createdAt - a.createdAt);
     return await Promise.all(
       sorted.map(async (task) => {
-        const devbox =
-          task.devboxId === undefined
-            ? null
-            : await ctx.db
-                .query("devboxes")
-                .withIndex("by_devbox_id", (q) =>
-                  q.eq("devboxId", task.devboxId as string),
-                )
-                .unique();
+        const devbox = await loadDevbox(ctx, task.devboxId);
         return {
           ...publicTask(task),
           monitoringUrl:
@@ -126,29 +117,22 @@ export const listTasks = query({
       return { page: [], isDone: true, continueCursor: "" };
     }
     const onlyArchived = args.archived === true;
-    const results =
+    const baseQuery =
       args.status === undefined
-        ? await ctx.db
-            .query("tasks")
-            .filter((q) =>
-              onlyArchived
-                ? q.eq(q.field("archived"), true)
-                : q.neq(q.field("archived"), true),
-            )
-            .order("desc")
-            .paginate(args.paginationOpts)
-        : await ctx.db
+        ? ctx.db.query("tasks")
+        : ctx.db
             .query("tasks")
             .withIndex("by_status", (q) =>
               q.eq("status", args.status as Doc<"tasks">["status"]),
-            )
-            .filter((q) =>
-              onlyArchived
-                ? q.eq(q.field("archived"), true)
-                : q.neq(q.field("archived"), true),
-            )
-            .order("desc")
-            .paginate(args.paginationOpts);
+            );
+    const results = await baseQuery
+      .filter((q) =>
+        onlyArchived
+          ? q.eq(q.field("archived"), true)
+          : q.neq(q.field("archived"), true),
+      )
+      .order("desc")
+      .paginate(args.paginationOpts);
     return { ...results, page: results.page.map(publicTask) };
   },
 });
@@ -160,10 +144,7 @@ export const taskDetail = query({
     if (!secretOk(args.secret)) {
       return null;
     }
-    const task = await ctx.db
-      .query("tasks")
-      .withIndex("by_task_id", (q) => q.eq("taskId", args.taskId))
-      .unique();
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return null;
     }
@@ -189,15 +170,7 @@ export const taskDetail = query({
             : await ctx.storage.getUrl(e.imageStorageId),
       })),
     );
-    const devbox =
-      task.devboxId === undefined
-        ? null
-        : await ctx.db
-            .query("devboxes")
-            .withIndex("by_devbox_id", (q) =>
-              q.eq("devboxId", task.devboxId as string),
-            )
-            .unique();
+    const devbox = await loadDevbox(ctx, task.devboxId);
     // Retro comments (#70), oldest first, each with its grabbed frame resolved
     // to a URL. Scoped by taskId, so a retry's comments never bleed in.
     const commentRows = await ctx.db
@@ -266,29 +239,11 @@ type ActionResult =
   | { ok: true; taskId: string; note: string }
   | { ok: false; reason: string };
 
-async function loadTask(
-  ctx: MutationCtx,
-  taskId: string,
-): Promise<Doc<"tasks"> | null> {
-  return await ctx.db
-    .query("tasks")
-    .withIndex("by_task_id", (q) => q.eq("taskId", taskId))
-    .unique();
-}
-
-async function loadDevbox(ctx: MutationCtx, devboxId: string | undefined) {
-  return devboxId === undefined
-    ? null
-    : await ctx.db
-        .query("devboxes")
-        .withIndex("by_devbox_id", (q) => q.eq("devboxId", devboxId))
-        .unique();
-}
-
 /**
  * Stop a task: cancels in place while queued, otherwise enqueues a
- * taskId-guarded interrupt. Same guards as the orchestrator's stop_task —
- * terminal tasks and devboxes that moved on are refused, never interrupted.
+ * taskId-guarded interrupt (tasks.stopTaskCore — the same transactional core
+ * behind the orchestrator's stop_task). Terminal tasks and devboxes that
+ * moved on are refused, never interrupted.
  */
 export const stopTask = mutation({
   args: { secret: v.string(), taskId: v.string() },
@@ -296,52 +251,46 @@ export const stopTask = mutation({
     if (!secretOk(args.secret)) {
       return { ok: false, reason: "unauthorized" };
     }
-    const task = await loadTask(ctx, args.taskId);
+    // Same transaction as the stop itself, so the title read here can't go
+    // stale before the notes post.
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }
-    if (isTerminalTaskStatus(task.status)) {
-      return {
-        ok: false,
-        reason: `task is already ${task.status} — nothing to stop`,
-      };
-    }
-    if (task.devboxId === undefined) {
-      if (await cancelQueuedRow(ctx, args.taskId)) {
-        await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
-          taskId: args.taskId,
-          text: `:octagonal_sign: *${task.title}* (\`${args.taskId}\`) was cancelled from the dashboard while still queued.`,
-        });
+    const outcome = await stopTaskCore(ctx, args.taskId, {
+      queuedCancelText: `:octagonal_sign: *${task.title}* (\`${args.taskId}\`) was cancelled from the dashboard while still queued.`,
+      // Attribute the stop in the thread — the eventual :octagonal_sign:
+      // update doesn't say who asked.
+      interruptRequestedText: `:octagonal_sign: Stop requested from the dashboard for *${task.title}* (\`${args.taskId}\`) — a stopped update follows if a turn was in flight.`,
+    });
+    switch (outcome.kind) {
+      case "not_found":
+        return { ok: false, reason: `no task with id ${args.taskId}` };
+      case "already_terminal":
+        return {
+          ok: false,
+          reason: `task is already ${outcome.status} — nothing to stop`,
+        };
+      case "cancelled_queued":
         return {
           ok: true,
           taskId: args.taskId,
           note: "cancelled while queued (no devbox was assigned yet)",
         };
-      }
-      return { ok: false, reason: "task state changed underneath — try again" };
+      case "cancel_conflict":
+        return {
+          ok: false,
+          reason: "task state changed underneath — try again",
+        };
+      case "rejected":
+        return { ok: false, reason: outcome.reason };
+      case "interrupted":
+        return {
+          ok: true,
+          taskId: args.taskId,
+          note: "interrupt queued — a 'stopped' update will follow if a turn was in flight",
+        };
     }
-    const devbox = await loadDevbox(ctx, task.devboxId);
-    const rejection = stopRejection(task, devbox);
-    if (rejection !== null || devbox === null) {
-      return { ok: false, reason: rejection ?? "devbox is missing" };
-    }
-    const payload: InterruptPayload = { taskId: args.taskId };
-    await enqueueCommandRow(ctx, {
-      devboxId: devbox.devboxId,
-      kind: "interrupt",
-      payload: JSON.stringify(payload),
-    });
-    // Attribute the stop in the thread — the eventual :octagonal_sign: update
-    // doesn't say who asked.
-    await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
-      taskId: args.taskId,
-      text: `:octagonal_sign: Stop requested from the dashboard for *${task.title}* (\`${args.taskId}\`) — a stopped update follows if a turn was in flight.`,
-    });
-    return {
-      ok: true,
-      taskId: args.taskId,
-      note: "interrupt queued — a 'stopped' update will follow if a turn was in flight",
-    };
   },
 });
 
@@ -358,14 +307,17 @@ export const steerTask = mutation({
     if (args.text.trim() === "") {
       return { ok: false, reason: "message is empty" };
     }
-    const task = await loadTask(ctx, args.taskId);
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }
     const devbox = await loadDevbox(ctx, task.devboxId);
     const rejection = steerRejection(task, devbox);
     if (rejection !== null || devbox === null) {
-      return { ok: false, reason: rejection ?? "devbox is missing" };
+      return {
+        ok: false,
+        reason: rejection ?? `devbox ${task.devboxId} is missing`,
+      };
     }
     const payload: UserMessagePayload = {
       taskId: args.taskId,
@@ -402,7 +354,7 @@ export const retryTask = mutation({
     if (!secretOk(args.secret)) {
       return { ok: false, reason: "unauthorized" };
     }
-    const source = await loadTask(ctx, args.taskId);
+    const source = await taskByTaskId(ctx, args.taskId);
     if (source === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }
@@ -428,9 +380,8 @@ export const retryTask = mutation({
       prompt: source.prompt,
       placement: "ephemeral",
       slackChannel: source.slackChannel,
-      ...(source.slackThreadTs === undefined
-        ? {}
-        : { slackThreadTs: source.slackThreadTs }),
+      // Known-defined: the legacy-no-thread guard above returned already.
+      slackThreadTs: source.slackThreadTs,
       ...(source.slackUser === undefined
         ? {}
         : { slackUser: source.slackUser }),
@@ -474,7 +425,7 @@ export const setTaskArchived = mutation({
     if (!secretOk(args.secret)) {
       return { ok: false, reason: "unauthorized" };
     }
-    const task = await loadTask(ctx, args.taskId);
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }
@@ -530,7 +481,7 @@ export const createComment = mutation({
     if (!Number.isFinite(args.videoTimeSec) || args.videoTimeSec < 0) {
       return { ok: false, reason: "invalid timestamp" };
     }
-    const task = await loadTask(ctx, args.taskId);
+    const task = await taskByTaskId(ctx, args.taskId);
     if (task === null) {
       return { ok: false, reason: `no task with id ${args.taskId}` };
     }

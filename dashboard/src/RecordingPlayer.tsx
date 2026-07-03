@@ -17,6 +17,7 @@ import "@vidstack/react/player/styles/base.css";
 import { type ReactNode, type RefObject, useState } from "react";
 import { previewAlign } from "./commentLayout";
 import type { PlayerState } from "./recording";
+import { formatTimecode } from "./ui";
 
 /** Discrete playback rates for the speed control (issue #66). The </> keyboard
  * shortcuts step Vidstack's own rate ladder; this menu snaps to these. */
@@ -38,14 +39,6 @@ export type RecordingPlayerProps = {
   /** The live player instance, so the rail can seek the video on comment click. */
   playerRef: RefObject<MediaPlayerInstance | null>;
 };
-
-/** m:ss timecode for a number of seconds. */
-export function formatTimecode(totalSeconds: number): string {
-  const s = Math.max(0, Math.floor(totalSeconds));
-  const mins = Math.floor(s / 60);
-  const secs = s % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
-}
 
 /**
  * The task-details recording section. Renders the themed Vidstack player (with
@@ -73,9 +66,6 @@ function ThemedPlayer({
   onFocusComment,
   playerRef,
 }: RecordingPlayerProps & { src: string }) {
-  // The video second a comment is being written at, or null when not capturing.
-  const [captureAt, setCaptureAt] = useState<number | null>(null);
-
   return (
     <MediaPlayer
       className="rec-player"
@@ -95,13 +85,7 @@ function ThemedPlayer({
       <MediaProvider />
       <PlayerControls
         comments={comments}
-        captureAt={captureAt}
-        onArm={(t) => setCaptureAt(t)}
-        onCancelCapture={() => setCaptureAt(null)}
-        onSubmitCapture={async (text) => {
-          if (captureAt !== null) await onCreateComment(captureAt, text);
-          setCaptureAt(null);
-        }}
+        onCreateComment={onCreateComment}
         onFocusComment={onFocusComment}
       />
     </MediaPlayer>
@@ -110,20 +94,16 @@ function ThemedPlayer({
 
 function PlayerControls({
   comments,
-  captureAt,
-  onArm,
-  onCancelCapture,
-  onSubmitCapture,
+  onCreateComment,
   onFocusComment,
 }: {
   comments: PlayerComment[];
-  /** The video second being commented at, or null when not capturing. */
-  captureAt: number | null;
-  onArm: (videoTimeSec: number) => void;
-  onCancelCapture: () => void;
-  onSubmitCapture: (text: string) => Promise<void>;
+  onCreateComment: (videoTimeSec: number, text: string) => Promise<void>;
   onFocusComment: (id: string) => void;
 }) {
+  // The video second a comment is being written at, or null when not capturing.
+  const [captureAt, setCaptureAt] = useState<number | null>(null);
+
   return (
     <Controls.Root className="rec-controls">
       {/* Click/gesture area above the bar keeps the video tappable. */}
@@ -142,8 +122,11 @@ function PlayerControls({
         // so writing a comment never obscures the video (#113).
         <CommentComposer
           videoTimeSec={captureAt}
-          onCancel={onCancelCapture}
-          onSubmit={onSubmitCapture}
+          onCancel={() => setCaptureAt(null)}
+          onSubmit={async (text) => {
+            await onCreateComment(captureAt, text);
+            setCaptureAt(null);
+          }}
         />
       ) : (
         <Controls.Group className="rec-button-row">
@@ -162,7 +145,7 @@ function PlayerControls({
             <Time className="rec-time-dur" type="duration" />
           </span>
           <span className="rec-spacer" />
-          <CommentButton onArm={onArm} />
+          <CommentButton onArm={setCaptureAt} />
           <SpeedControl />
           <VolumeControl />
           <FullscreenButton className="rec-btn">

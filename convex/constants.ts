@@ -3,19 +3,12 @@
 // bundling a default-runtime functions module.
 
 import { v } from "convex/values";
+import { DEVBOX_EVENT_TYPES } from "../shared/protocol";
 
+// Derived from the shared wire contract so a new event type can't be added to
+// the union without this validator accepting it.
 export const devboxEventTypeValidator = v.union(
-  // Status events (drive task status + Slack).
-  v.literal("started"),
-  v.literal("progress"),
-  v.literal("needs_input"),
-  v.literal("completed"),
-  v.literal("failed"),
-  v.literal("stopped"),
-  // Info events (#70 retro timeline only; never drive task status).
-  v.literal("assistant_text"),
-  v.literal("tool_call"),
-  v.literal("tool_result"),
+  ...DEVBOX_EVENT_TYPES.map((t) => v.literal(t)),
 );
 
 /** A devbox/host heartbeat older than this is treated as gone. */

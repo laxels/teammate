@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reconcileOrphanedTasks } from "../src/reconcile";
+import { reconcileOrphanedTasks } from "./reconcile";
 
 type Emitted = { taskId: string; type: string; summary: string };
 

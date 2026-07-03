@@ -12,6 +12,7 @@ import {
   QUEUE_RETENTION_MS,
 } from "./cleanup";
 import schema from "./schema";
+import { drainScheduled } from "./test.helpers";
 
 // Bun has no import.meta.glob; hand-build the module map convex-test needs.
 // The _generated entries anchor the functions root, and cleanup.ts must be
@@ -268,12 +269,8 @@ test("drains a backlog in batches via self-rescheduling", async () => {
   expect(result.deleted.hostEvents).toBe(PRUNE_BATCH_SIZE);
   expect(result.rescheduled).toBe(true);
 
-  // The continuation is a real 0ms timer inside convex-test: yield
-  // macrotasks so each link of the chain fires, then await its completion.
-  for (let i = 0; i < 20; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await t.finishInProgressScheduledFunctions();
-  }
+  // Run each link of the self-rescheduling continuation chain to completion.
+  await drainScheduled(t);
 
   const remaining = await t.run(async (ctx) =>
     (await ctx.db.query("hostEvents").collect()).map((r) => r.summary),
