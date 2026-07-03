@@ -13,7 +13,7 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
 | Monitoring page | `web/` | Served by the gateway, tailnet-only | react-vnc remote desktop + steering sidebar + Stop Claude button |
 | Fleet dashboard | `dashboard/` | Fleet host (LaunchAgent `com.ultraclaude.dashboard` + Tailscale Serve), tailnet-only | Live board of in-flight tasks + history, stop/follow-up/retry controls, fleet status; talks straight to Convex (`convex/dashboard.ts`, gated by `DASHBOARD_SECRET` from a host-side `config.json`). Deploy: `scripts/deploy-dashboard.sh` → `https://ultraclaude-host-1.<tailnet>/` |
 | Host agent | `hostagent/` | Each fleet Mac host (LaunchAgent `com.ultraclaude.hostagent`, Bun) | Heartbeats the host to Convex every 60s (self-registers its row + liveness) and consumes `provision_vm`/`destroy_vm` host commands to clone/boot/rsync-code-into/destroy ephemeral Tart VMs (`hostagent/src/vm.ts`). Advertises the fleet-provisioner role (`FLEET_PROVISIONER=1`) in its heartbeat, but no longer bootstraps new hosts itself — GitHub Actions does (#87) |
-| Shared contracts | `shared/` | imported by `convex`, `gateway`, `hostagent`, `src`, `web` | Wire types (`shared/protocol.ts`) |
+| Shared contracts | `shared/` | imported by `convex`, `gateway`, `hostagent`, `src`, `web`, `dashboard` | Wire types (`shared/protocol.ts`) + shared transcript UI (`shared/transcriptUi.tsx`) |
 
 ## Infrastructure
 
@@ -136,9 +136,11 @@ delegates each task to a Claude Code instance running in a macOS devbox VM.
    orchestrator (message.channels/message.groups subscriptions); replies in
    threads that aren't ours are dropped pre-LLM, and the model answers
    NO_REPLY to bystander chatter. The gateway emits `needs_input` when the
-   session calls AskUserQuestion, and uploads the session transcript to
-   Convex (`/devbox/transcript`, `transcripts` table) at terminal status so
-   the record outlives the VM (browsable from the dashboard).
+   session calls AskUserQuestion, and streams assistant text, tool calls,
+   and tool results as info events (`DevboxInfoEventType`) to
+   `/devbox/events`; these build the dashboard's task-details retro timeline
+   and outlive the VM (the separate `/devbox/transcript` upload and
+   `transcripts` table were removed in #70).
 8. Monitoring page: full remote desktop (`/ws/vnc` → VM Screen Sharing) plus
    steering sidebar (`/ws/steer` → Agent SDK streaming input / `interrupt()`)
    — the same `pushUserMessage` primitive Slack thread replies use, so steers

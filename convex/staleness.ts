@@ -28,13 +28,13 @@ export const checkStaleTasks = internalAction({
     const active = await ctx.runQuery(internal.tasks.activeWithLatestEvent, {});
 
     for (const task of active) {
-      const nudgeArgs: Parameters<typeof shouldNudge>[0] = {
+      const nudgeArgs = {
         nowMs: now,
         latestActivityMs: task.latestActivityMs,
+        ...(task.lastNudgedAt === undefined
+          ? {}
+          : { lastNudgedAtMs: task.lastNudgedAt }),
       };
-      if (task.lastNudgedAt !== undefined) {
-        nudgeArgs.lastNudgedAtMs = task.lastNudgedAt;
-      }
       if (!shouldNudge(nudgeArgs)) {
         continue;
       }

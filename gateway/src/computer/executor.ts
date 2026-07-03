@@ -45,11 +45,11 @@ export type ScrollDirection = "up" | "down" | "left" | "right";
  * coordinates; raise this once that behavior is verified for Opus 4.8 on the
  * devbox display.)
  */
-export const MAX_LONG_EDGE = 1568;
+const MAX_LONG_EDGE = 1568;
 /** UI settle time between an input action and its verification screenshot. */
-export const SETTLE_MS = 500;
+const SETTLE_MS = 500;
 /** cliclick types long strings unreliably in one shot; chunk like xdotool. */
-export const TYPE_CHUNK_SIZE = 50;
+const TYPE_CHUNK_SIZE = 50;
 const MAX_WAIT_SECONDS = 30;
 /** One scroll_amount "click" ≈ 3 wheel lines (xdotool convention). */
 const SCROLL_LINES_PER_CLICK = 3;
@@ -257,7 +257,7 @@ export type ExecutorDeps = {
   cliclickPath?: string;
 };
 
-export const DEFAULT_CLICLICK_PATH = "/usr/local/bin/cliclick";
+const DEFAULT_CLICLICK_PATH = "/usr/local/bin/cliclick";
 
 export class ComputerExecutor {
   #run: CommandRunner;
@@ -457,30 +457,19 @@ export class ComputerExecutor {
   }
 
   async holdKey(spec: string, durationSeconds: number): Promise<void> {
-    const press = parseKeySpec(spec);
-    if (
-      press === null ||
-      press.key.kind !== "named" ||
-      press.modifiers.length > 0
-    ) {
-      // Only modifier holds are synthesizable via cliclick kd/ku.
-      const modifiers = parseModifierList(spec);
-      if (modifiers === null || modifiers.length === 0) {
-        throw new ExecutorError(
-          `Can only hold modifier keys (shift/ctrl/alt/super), got "${spec}". For repeated keys, use the key tool multiple times.`,
-        );
-      }
-      const ms = this.#clampWait(durationSeconds);
-      await this.#cliclick([
-        ...modifiers.map((mod) => `kd:${mod}`),
-        `w:${ms}`,
-        ...modifiers.map((mod) => `ku:${mod}`),
-      ]);
-      return;
+    // Only modifier holds are synthesizable via cliclick kd/ku.
+    const modifiers = parseModifierList(spec);
+    if (modifiers === null || modifiers.length === 0) {
+      throw new ExecutorError(
+        `Can only hold modifier keys (shift/ctrl/alt/super), got "${spec}". For repeated keys, use the key tool multiple times.`,
+      );
     }
-    throw new ExecutorError(
-      `Can only hold modifier keys (shift/ctrl/alt/super), got "${spec}".`,
-    );
+    const ms = this.#clampWait(durationSeconds);
+    await this.#cliclick([
+      ...modifiers.map((mod) => `kd:${mod}`),
+      `w:${ms}`,
+      ...modifiers.map((mod) => `ku:${mod}`),
+    ]);
   }
 
   async scroll(

@@ -131,6 +131,42 @@ test("an assistant_text info event on a fresh task records without driving statu
   expect(events[0]?.detail).toContain("full reasoning");
 });
 
+// notify.devboxEvent renders the status card from the task ROW (a delayed
+// action must not paint a stale event's summary under a fresh status), so
+// recordEvent must stamp the applied summary on the row — and a late rejected
+// event must never clobber it.
+test("applied status events stamp lastSummary on the task row; rejected late events don't", async () => {
+  const t = newT();
+  await seedRunningTask(t, "task-1");
+
+  expect(
+    (
+      await postEvent(t, {
+        type: "completed",
+        summary: "the full final answer",
+      })
+    ).status,
+  ).toBe(200);
+  expect((await readTask(t, "task-1"))?.lastSummary).toBe(
+    "the full final answer",
+  );
+
+  // A late progress event racing behind the terminal is rejected
+  // (shouldApplyTaskStatus) — it must not overwrite the terminal summary.
+  expect(
+    (
+      await postEvent(t, {
+        type: "progress",
+        summary: "stale progress",
+        ts: Date.now() + 1,
+      })
+    ).status,
+  ).toBe(200);
+  expect((await readTask(t, "task-1"))?.lastSummary).toBe(
+    "the full final answer",
+  );
+});
+
 test("info-event types are accepted by the /devbox/events validator", async () => {
   const t = newT();
   for (const type of ["assistant_text", "tool_call", "tool_result"]) {

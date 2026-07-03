@@ -5,19 +5,11 @@
 // tailnet. The monitoring page is served statically by the gateway, so all
 // page connections are same-origin.
 
-export type PermissionMode =
-  | "default"
-  | "acceptEdits"
-  | "bypassPermissions"
-  | "plan";
-
 // ---- Monitoring page <-> gateway: WebSocket at /ws/steer ----
 
 export type SteerClientMessage =
   | { type: "user_message"; text: string }
-  | { type: "interrupt" }
-  // No UI sender yet (planned sidebar control); the gateway already handles it.
-  | { type: "set_permission_mode"; mode: PermissionMode };
+  | { type: "interrupt" };
 
 export type SteerServerMessage =
   // Raw SDKMessage from @anthropic-ai/claude-agent-sdk, forwarded verbatim.
@@ -152,6 +144,13 @@ export type HostVmPayload = {
  * event flush) before the destroy command is enqueued. */
 export const EPHEMERAL_RETIRE_GRACE_MS = 5 * 60_000;
 
+/** The port every devbox gateway listens on. The orchestrator pre-computes
+ * gateway URLs with it (src/hostPool.ts), the gateway defaults to it
+ * (gateway/src/config.ts), and hostagent/src/vm.ts wires it into VM
+ * provisioning (deploy-payload.sh ships shared/ to hosts as ~/shared, so
+ * hostagent may import it at runtime). */
+export const GATEWAY_PORT = 8787;
+
 // ---- Gateway -> orchestrator: POST {CONVEX_SITE_URL}/devbox/events ----
 // Auth: `x-devbox-secret` header must equal the DEVBOX_SHARED_SECRET env var
 // on both sides.
@@ -236,16 +235,19 @@ export const RECORDING_CONTENT_TYPE = "video/quicktime";
 // timeline (#70 — comment ↔ event alignment).
 
 // Status events drive the task's lifecycle status (DEVBOX_EVENT_TO_TASK_STATUS)
-// and are mirrored to the task's Slack thread.
-export type DevboxStatusEventType =
-  | "started"
-  | "progress"
-  // Emitted when the session blocks on AskUserQuestion (gateway session.ts);
-  // a steered user message answers it.
-  | "needs_input"
-  | "completed"
-  | "failed"
-  | "stopped";
+// and are mirrored to the task's Slack thread. "needs_input" is emitted when
+// the session blocks on AskUserQuestion (gateway session.ts); a steered user
+// message answers it.
+export const DEVBOX_STATUS_EVENT_TYPES = [
+  "started",
+  "progress",
+  "needs_input",
+  "completed",
+  "failed",
+  "stopped",
+] as const;
+
+export type DevboxStatusEventType = (typeof DEVBOX_STATUS_EVENT_TYPES)[number];
 
 // Info events enrich the task-details retro timeline (#70): the full assistant
 // narration, each tool call, and each tool result (including computer-use
@@ -253,12 +255,24 @@ export type DevboxStatusEventType =
 // (statusForEvent returns undefined) and are NOT posted to Slack — see
 // convex/devboxes.ts recordEvent. Volume is high (computer-use emits a
 // screenshot roughly every step); that is expected and acceptable.
-export type DevboxInfoEventType =
-  | "assistant_text"
-  | "tool_call"
-  | "tool_result";
+export const DEVBOX_INFO_EVENT_TYPES = [
+  "assistant_text",
+  "tool_call",
+  "tool_result",
+] as const;
 
-export type DevboxEventType = DevboxStatusEventType | DevboxInfoEventType;
+export type DevboxInfoEventType = (typeof DEVBOX_INFO_EVENT_TYPES)[number];
+
+// The single source of truth for the DevboxEvent wire types: the HTTP-boundary
+// validator (src/orchestration.ts parseDevboxEvent) and the Convex mutation
+// validator (convex/constants.ts) both derive from this array, so adding an
+// event type here propagates everywhere.
+export const DEVBOX_EVENT_TYPES = [
+  ...DEVBOX_STATUS_EVENT_TYPES,
+  ...DEVBOX_INFO_EVENT_TYPES,
+] as const;
+
+export type DevboxEventType = (typeof DEVBOX_EVENT_TYPES)[number];
 
 export type DevboxEvent = {
   devboxId: string;
@@ -300,10 +314,7 @@ export type TaskStatus =
   | "failed"
   | "stopped";
 
-export const DEVBOX_EVENT_TO_TASK_STATUS: Record<
-  DevboxStatusEventType,
-  TaskStatus
-> = {
+const DEVBOX_EVENT_TO_TASK_STATUS: Record<DevboxStatusEventType, TaskStatus> = {
   started: "running",
   progress: "running",
   needs_input: "needs_input",

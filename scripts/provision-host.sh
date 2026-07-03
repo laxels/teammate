@@ -42,12 +42,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 # Hostagent LaunchAgent PATH lacks homebrew (sshpass lives there).
 export PATH="/opt/homebrew/bin:$PATH"
-API="https://api.scaleway.com"
-ZONE="fr-par-1"
-SERVERS_PATH="/apple-silicon/v1alpha1/zones/$ZONE/servers"
+# Scaleway constants + shared helpers (log, env_secret, json_string, scw_api):
+# single copy in scripts/fleet-lib.sh, shared with the other fleet scripts.
+source "$REPO_ROOT/scripts/fleet-lib.sh"
 SERVER_TYPE="M2-L"
-SSH_USER="m1"
-TART='~/tart.app/Contents/MacOS/tart'
 TART_URL="https://github.com/openai/tart/releases/download/2.32.1/tart.tar.gz"
 # Golden-image pin (GOLDEN_REMOTE/GOLDEN_LOCAL): single source of truth shared
 # with the other fleet scripts (issue #89), so a new host pulls the same golden
@@ -57,8 +55,6 @@ source "$REPO_ROOT/scripts/golden-constants.sh"
 # shared with the other fleet scripts. Stays env-overridable so the GH Actions
 # provisioner / #30 cutover can point this at another deployment.
 source "$REPO_ROOT/scripts/deployment-constants.sh"
-
-log() { printf '\n==> %s\n' "$*"; }
 
 # Best-effort fleet lifecycle event into Convex hostEvents (get_fleet surfaces
 # these). Never fails the bootstrap on a reporting error. No-op until
@@ -70,44 +66,6 @@ fleet_event() { # <type> <summary>
     -H "Content-Type: application/json" \
     -d "{\"hostId\":\"$HOST_NAME\",\"type\":\"$1\",\"summary\":$(json_string "$2")}" \
     "$CONVEX_SITE_URL/fleet/event" >/dev/null 2>&1 || true
-}
-
-json_string() { # <str> -> JSON-quoted string (escapes via python3)
-  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
-}
-
-env_secret() { # <KEY> -> value from the environment, else repo .env; never echoed
-  # Prefer an env var of the same name so GitHub Actions can inject secrets
-  # without writing them to a file; fall back to $ENV_FILE for laptop runs.
-  local key="$1" val="${!1:-}"
-  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
-  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-  if [[ -z "$val" ]]; then
-    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
-    return 1
-  fi
-  printf '%s' "$val"
-}
-
-scw_api() { # <method> <path> [json-body]
-  # No curl -f: HTTP error bodies (quota details, validation messages) must
-  # reach stderr — they end up in hostEvents when a fleet host runs this.
-  local method="$1" path="$2" body="${3:-}" response http_code
-  if [[ -n "$body" ]]; then
-    response="$(curl -sS -w $'\n%{http_code}' -X "$method" \
-      -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" \
-      -H "Content-Type: application/json" -d "$body" "$API$path")"
-  else
-    response="$(curl -sS -w $'\n%{http_code}' -X "$method" \
-      -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" "$API$path")"
-  fi
-  http_code="${response##*$'\n'}"
-  response="${response%$'\n'*}"
-  if (( http_code >= 400 )); then
-    echo "ERROR: Scaleway API $method $path -> HTTP $http_code: $response" >&2
-    return 1
-  fi
-  printf '%s' "$response"
 }
 
 json_get() { # <dot.path> — reads JSON on stdin, prints the value

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createRingBuffer } from "../src/history";
+import { createRingBuffer } from "./history";
 
 describe("createRingBuffer", () => {
   test("returns pushed items oldest-first while under capacity", () => {

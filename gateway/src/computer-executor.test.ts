@@ -7,7 +7,7 @@ import {
   modelToPoints,
   parseKeySpec,
   SCREEN_POINT_SIZE_SCRIPT,
-} from "../src/computer/executor";
+} from "./computer/executor";
 
 type FakeScreen = {
   pixelWidth: number;

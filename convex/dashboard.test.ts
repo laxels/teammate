@@ -3,6 +3,7 @@ import { convexTest } from "convex-test";
 import type { TaskEffort, TaskStatus } from "../shared/protocol";
 import { api } from "./_generated/api";
 import schema from "./schema";
+import { drainScheduled } from "./test.helpers";
 
 // Hand-built module map (bun has no import.meta.glob). retryTask reaches
 // hosts.placeEphemeralTaskRow and schedules notify.taskNote at 0ms, so both
@@ -44,13 +45,6 @@ afterEach(() => {
     process.env.SLACK_BOT_TOKEN = savedSlackToken;
   }
 });
-
-async function drainScheduled(t: Tester): Promise<void> {
-  for (let i = 0; i < 5; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await t.finishInProgressScheduledFunctions();
-  }
-}
 
 /** Seeds a terminal ephemeral task (the retry source). slackThreadTs is set so
  * retryTask doesn't bail on the legacy-no-thread guard. */

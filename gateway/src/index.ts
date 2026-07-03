@@ -49,6 +49,14 @@ const emitEvent = createEventSender(config);
 const localUrl = `http://127.0.0.1:${server.port}`;
 // POST /task and /interrupt require the shared secret even from localhost.
 const authHeader = { "x-devbox-secret": config.devboxSharedSecret };
+// The one shape every local control call shares; the per-kind response
+// handling (409-as-failed-event vs warn-log) stays with each command below.
+const postLocal = (path: string, payload: string) =>
+  fetch(`${localUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeader },
+    body: payload,
+  });
 const startConsumer = () =>
   startCommandConsumer({
     client: new ConvexClient(config.convexUrl),
@@ -62,11 +70,7 @@ const startConsumer = () =>
         // anomaly — the cross-task reuse that used to evict-and-retry here only
         // ever happened on the retired permanent devbox (#107) — so surface it
         // as a failed task rather than fighting for the slot.
-        const response = await fetch(`${localUrl}/task`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...authHeader },
-          body: command.payload,
-        });
+        const response = await postLocal("/task", command.payload);
         if (response.status !== 202) {
           const request = JSON.parse(command.payload) as { taskId?: string };
           if (typeof request.taskId === "string") {
@@ -83,11 +87,7 @@ const startConsumer = () =>
         // Slack-relayed steering. A 409 means the session ended (or the devbox
         // moved on) before delivery — the task's terminal status update already
         // tells that story in its thread, so just log.
-        const response = await fetch(`${localUrl}/message`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...authHeader },
-          body: command.payload,
-        });
+        const response = await postLocal("/message", command.payload);
         if (!response.ok) {
           console.warn(
             `[gateway] user_message ${command.commandId} not delivered (HTTP ${response.status})`,
@@ -98,11 +98,7 @@ const startConsumer = () =>
       if (command.kind === "interrupt") {
         // The payload may carry { taskId } so /interrupt can refuse to stop a
         // session that has moved on to another task.
-        const response = await fetch(`${localUrl}/interrupt`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...authHeader },
-          body: command.payload,
-        });
+        const response = await postLocal("/interrupt", command.payload);
         if (!response.ok) {
           console.warn(
             `[gateway] interrupt ${command.commandId} not applied (HTTP ${response.status})`,

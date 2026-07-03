@@ -1,21 +1,23 @@
-import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
+import { usePaginatedQuery, useQuery } from "convex/react";
 import { useState } from "react";
 import { api } from "../../convex/_generated/api";
+import { isTerminalTaskStatus } from "../../shared/protocol";
 import { useDashboardSecret } from "./config";
 import { spaLink, taskPath, useRoute } from "./router";
 import { TaskDetailPage } from "./TaskDetailPage";
 import {
   type ActiveTask,
   ArchiveButton,
-  ArmedButton,
   calendar,
   duration,
   type Fleet,
   FollowUp,
   type HistoryTask,
   MastClock,
+  orphanNoteEntries,
+  RetryButton,
   StatusTag,
-  TERMINAL,
+  StopButton,
   useActionNotes,
   useNowTicker,
 } from "./ui";
@@ -105,9 +107,7 @@ function ActiveRow({
   note: string | undefined;
   onNote: (taskId: string, note: string) => void;
 }) {
-  const secret = useDashboardSecret();
   const now = useNowTicker();
-  const stop = useMutation(api.dashboard.stopTask);
   const provisioning = task.devboxStatus === "provisioning";
   return (
     <div className="row row-active">
@@ -163,19 +163,7 @@ function ActiveRow({
           {task.status !== "queued" && task.devboxId !== undefined && (
             <FollowUp taskId={task.taskId} onNote={onNote} />
           )}
-          <ArmedButton
-            label="stop"
-            armedLabel="confirm stop"
-            danger
-            onFire={() => {
-              void stop({ secret, taskId: task.taskId }).then((result) => {
-                onNote(
-                  task.taskId,
-                  result.ok ? `✓ ${result.note}` : `✗ ${result.reason}`,
-                );
-              });
-            }}
-          />
+          <StopButton taskId={task.taskId} onNote={onNote} />
         </span>
       </div>
       {note !== undefined && <div className="row-note">{note}</div>}
@@ -192,8 +180,6 @@ function HistoryRow({
   note: string | undefined;
   onNote: (taskId: string, note: string) => void;
 }) {
-  const secret = useDashboardSecret();
-  const retry = useMutation(api.dashboard.retryTask);
   const finished = task.finishedAt ?? task.updatedAt;
   const ran =
     task.startedAt !== undefined && task.finishedAt !== undefined
@@ -228,22 +214,9 @@ function HistoryRow({
           )}
         </span>
         <span className="row-actions">
-          {TERMINAL.has(task.status) && (
+          {isTerminalTaskStatus(task.status) && (
             <>
-              <ArmedButton
-                label="retry"
-                armedLabel="confirm retry"
-                onFire={() => {
-                  void retry({ secret, taskId: task.taskId }).then((result) => {
-                    onNote(
-                      task.taskId,
-                      result.ok
-                        ? `✓ ${result.note} → ${result.taskId}`
-                        : `✗ ${result.reason}`,
-                    );
-                  });
-                }}
-              />
+              <RetryButton taskId={task.taskId} onNote={onNote} />
               <ArchiveButton
                 taskId={task.taskId}
                 archived={task.archived}
@@ -280,12 +253,13 @@ function FleetBoard() {
   const { notes, postNote } = useActionNotes();
 
   const unauthorized = fleet === null;
-  // Feedback for rows that left the live board (stop confirmations land
-  // exactly as the row unmounts).
-  const activeIds = new Set((active ?? []).map((t) => t.taskId));
-  const orphanNotes = Object.entries(notes).filter(
-    ([taskId]) => !activeIds.has(taskId),
-  );
+  // Feedback for rows that left the page entirely (e.g. an archive
+  // confirmation landing exactly as the row unmounts). Notes for tasks still
+  // shown — on the live board or a history row — render inline on their row.
+  const orphanNotes = orphanNoteEntries(notes, [
+    ...(active ?? []).map((t) => t.taskId),
+    ...history.results.map((t) => t.taskId),
+  ]);
 
   return (
     <main>

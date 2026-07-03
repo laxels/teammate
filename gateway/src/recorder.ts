@@ -64,7 +64,7 @@ export type RecorderDeps = {
  * marks the recording failed (it does NOT upload — a capture that hasn't exited
  * has no finalized `moov` atom, so the file would be unplayable). Finalization
  * is near instant in practice; this only bounds a hung capture. */
-export const FINALIZE_TIMEOUT_MS = 30_000;
+const FINALIZE_TIMEOUT_MS = 30_000;
 
 /** `screencapture -v`: video recording; `-C` cursor; `-k` clicks; `-x` no UI
  * sounds. Runs until SIGINT, which writes a valid `moov` and exits cleanly. */

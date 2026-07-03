@@ -31,21 +31,10 @@ source "$REPO_ROOT/scripts/deployment-constants.sh"
 # Golden-image pin (GOLDEN_LOCAL): single source of truth (issue #89), so the
 # smoke test boots the same golden the fleet runs. Stays env-overridable.
 source "$REPO_ROOT/scripts/golden-constants.sh"
+# Shared fleet helpers (log, env_secret, …): single copy in scripts/fleet-lib.sh.
+source "$REPO_ROOT/scripts/fleet-lib.sh"
 # A host is "fresh" if seen within this window; > HEARTBEAT_FRESHNESS_MS (120s).
 FRESH_CUTOFF_SECS="${FLEET_SMOKE_FRESH_SECS:-180}"
-
-log() { printf '\n==> %s\n' "$*"; }
-
-env_secret() { # <KEY> -> value from env, else repo .env; never echoed
-  local key="$1" val="${!1:-}"
-  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
-  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-  if [[ -z "$val" ]]; then
-    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
-    return 1
-  fi
-  printf '%s' "$val"
-}
 
 DEVBOX_SHARED_SECRET="$(env_secret DEVBOX_SHARED_SECRET)"
 

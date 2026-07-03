@@ -1,13 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FetchLike } from "../src/events";
-import {
-  createScreenRecorder,
-  type RecorderProcess,
-  type SpawnRecorder,
-} from "../src/recorder";
-import { until } from "./helpers";
+import type { FetchLike } from "./events";
+import { createScreenRecorder, type RecorderProcess } from "./recorder";
+import { until } from "./test-helpers";
 
 const config = {
   convexSiteUrl: "https://site.convex.cloud",
@@ -86,23 +82,48 @@ function uniqueDir(): string {
   return join(tmpdir(), `recorder-test-${crypto.randomUUID().slice(0, 8)}`);
 }
 
-describe("ScreenRecorder", () => {
-  test("start spawns screencapture and marks the task recording", async () => {
-    const { fetchFn, calls } = makeFetch();
-    const { proc } = makeProc();
-    const spawnPaths: string[] = [];
-    const spawn: SpawnRecorder = (path) => {
+/** One recorder wired to the standard stubs; tests override only what they
+ * exercise and get every recorded interaction back. */
+function makeRecorder(
+  opts: {
+    fetch?: Parameters<typeof makeFetch>[0];
+    exitsOnKill?: boolean;
+    bytes?: Uint8Array;
+    finalizeTimeoutMs?: number;
+  } = {},
+): {
+  recorder: ReturnType<typeof createScreenRecorder>;
+  calls: FetchCall[];
+  signals: string[];
+  removed: string[];
+  spawnPaths: string[];
+} {
+  const { fetchFn, calls } = makeFetch(opts.fetch);
+  const { proc, signals } = makeProc(opts);
+  const removed: string[] = [];
+  const spawnPaths: string[] = [];
+  const recorder = createScreenRecorder({
+    config,
+    fetchFn,
+    spawn: (path) => {
       spawnPaths.push(path);
       return proc;
-    };
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1]),
-      removeFile: async () => undefined,
-    });
+    },
+    recordingsDir: uniqueDir(),
+    readFile: async () => opts.bytes ?? new Uint8Array([1]),
+    removeFile: async (path) => {
+      removed.push(path);
+    },
+    ...(opts.finalizeTimeoutMs === undefined
+      ? {}
+      : { finalizeTimeoutMs: opts.finalizeTimeoutMs }),
+  });
+  return { recorder, calls, signals, removed, spawnPaths };
+}
+
+describe("ScreenRecorder", () => {
+  test("start spawns screencapture and marks the task recording", async () => {
+    const { recorder, calls, spawnPaths } = makeRecorder();
 
     recorder.start("task-1");
     await until(() => statusPosts(calls).includes("recording"));
@@ -119,15 +140,9 @@ describe("ScreenRecorder", () => {
   });
 
   test("finish SIGINTs, uploads via the upload-URL flow, and marks available", async () => {
-    const { fetchFn, calls } = makeFetch({ storageId: "blob-xyz" });
-    const { proc, signals } = makeProc();
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3, 4]),
-      removeFile: async () => undefined,
+    const { recorder, calls, signals } = makeRecorder({
+      fetch: { storageId: "blob-xyz" },
+      bytes: new Uint8Array([1, 2, 3, 4]),
     });
 
     recorder.start("task-1");
@@ -153,15 +168,7 @@ describe("ScreenRecorder", () => {
   });
 
   test("finish is a no-op for an unknown / already-finished task", async () => {
-    const { fetchFn, calls } = makeFetch();
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => makeProc().proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1]),
-      removeFile: async () => undefined,
-    });
+    const { recorder, calls } = makeRecorder();
 
     await recorder.finish("never-started");
     expect(calls).toHaveLength(0);
@@ -176,15 +183,7 @@ describe("ScreenRecorder", () => {
   });
 
   test("an empty recording file is reported as failed", async () => {
-    const { fetchFn, calls } = makeFetch();
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => makeProc().proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([]),
-      removeFile: async () => undefined,
-    });
+    const { recorder, calls } = makeRecorder({ bytes: new Uint8Array([]) });
 
     recorder.start("task-1");
     await until(() => statusPosts(calls).includes("recording"));
@@ -196,14 +195,9 @@ describe("ScreenRecorder", () => {
   });
 
   test("an upload-URL failure is reported as failed", async () => {
-    const { fetchFn, calls } = makeFetch({ uploadUrlOk: false });
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => makeProc().proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3]),
-      removeFile: async () => undefined,
+    const { recorder, calls } = makeRecorder({
+      fetch: { uploadUrlOk: false },
+      bytes: new Uint8Array([1, 2, 3]),
     });
 
     recorder.start("task-1");
@@ -214,14 +208,9 @@ describe("ScreenRecorder", () => {
   });
 
   test("an upload POST failure is reported as failed", async () => {
-    const { fetchFn, calls } = makeFetch({ uploadOk: false });
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => makeProc().proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3]),
-      removeFile: async () => undefined,
+    const { recorder, calls } = makeRecorder({
+      fetch: { uploadOk: false },
+      bytes: new Uint8Array([1, 2, 3]),
     });
 
     recorder.start("task-1");
@@ -232,17 +221,8 @@ describe("ScreenRecorder", () => {
   });
 
   test("the recording file is cleaned up after finish", async () => {
-    const { fetchFn, calls } = makeFetch();
-    const removed: string[] = [];
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => makeProc().proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3]),
-      removeFile: async (path) => {
-        removed.push(path);
-      },
+    const { recorder, calls, removed } = makeRecorder({
+      bytes: new Uint8Array([1, 2, 3]),
     });
 
     recorder.start("task-1");
@@ -254,16 +234,7 @@ describe("ScreenRecorder", () => {
   });
 
   test("abort kills the capture without uploading", async () => {
-    const { fetchFn, calls } = makeFetch();
-    const { proc, signals } = makeProc();
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1]),
-      removeFile: async () => undefined,
-    });
+    const { recorder, calls, signals } = makeRecorder();
 
     recorder.start("task-1");
     await until(() => statusPosts(calls).includes("recording"));
@@ -283,19 +254,9 @@ describe("ScreenRecorder", () => {
     // a finish() in the same tick used to see no active recording and drop it —
     // start() then spawned screencapture AFTER the task was already done,
     // orphaning the process and leaving the status stuck at "recording".
-    const { fetchFn, calls } = makeFetch({ storageId: "fast-blob" });
-    const { proc, signals } = makeProc();
-    const spawnPaths: string[] = [];
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: (path) => {
-        spawnPaths.push(path);
-        return proc;
-      },
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3, 4]),
-      removeFile: async () => undefined,
+    const { recorder, calls, signals, spawnPaths } = makeRecorder({
+      fetch: { storageId: "fast-blob" },
+      bytes: new Uint8Array([1, 2, 3, 4]),
     });
 
     recorder.start("task-fast");
@@ -318,15 +279,9 @@ describe("ScreenRecorder", () => {
     // Regression: if SIGINT doesn't make screencapture exit within the window,
     // the .mov has no finalized moov atom — we must NOT upload it, and must not
     // leave the process running.
-    const { fetchFn, calls } = makeFetch();
-    const { proc, signals } = makeProc({ exitsOnKill: false });
-    const recorder = createScreenRecorder({
-      config,
-      fetchFn,
-      spawn: () => proc,
-      recordingsDir: uniqueDir(),
-      readFile: async () => new Uint8Array([1, 2, 3]),
-      removeFile: async () => undefined,
+    const { recorder, calls, signals } = makeRecorder({
+      exitsOnKill: false,
+      bytes: new Uint8Array([1, 2, 3]),
       finalizeTimeoutMs: 20,
     });
 

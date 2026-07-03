@@ -1,37 +1,48 @@
-import { v } from "convex/values";
-import { timingSafeEqual } from "../src/slack";
+import { type Infer, v } from "convex/values";
+import { timingSafeEqual } from "../shared/auth";
 import {
   internalMutation,
   type MutationCtx,
   mutation,
   query,
 } from "./_generated/server";
-
-export const commandKindValidator = v.union(
-  v.literal("start"),
-  v.literal("user_message"),
-  v.literal("interrupt"),
-);
+import { devboxByDevboxId } from "./devboxes";
+import { commandKindValidator } from "./schema";
 
 /**
- * Gateways authenticate with the same shared secret used for /devbox/events,
- * passed as a function argument (gateways are Convex clients, so there are no
- * request headers). On mismatch the functions no-op rather than throw: a
- * misconfigured gateway sees an empty queue instead of generating error spam.
- * A console.warn still records the mismatch for diagnosability.
+ * Constant-time check of a caller-supplied secret against its expected env
+ * value; an unset/empty expected secret denies everything. On mismatch it
+ * returns false and console.warns `warnMessage` — callers no-op rather than
+ * throw, so a misconfigured client sees empty results instead of generating
+ * error spam, while the warn keeps the mismatch diagnosable.
  */
-export function devboxSecretOk(secret: string): boolean {
-  const expected = process.env.DEVBOX_SHARED_SECRET;
+export function secretMatches(
+  expected: string | undefined,
+  provided: string,
+  warnMessage: string,
+): boolean {
   const ok =
     expected !== undefined &&
     expected !== "" &&
-    timingSafeEqual(secret, expected);
+    timingSafeEqual(provided, expected);
   if (!ok) {
-    console.warn(
-      "commands: devbox shared secret mismatch (or DEVBOX_SHARED_SECRET unset); ignoring request",
-    );
+    console.warn(warnMessage);
   }
   return ok;
+}
+
+/**
+ * Gateways and host agents authenticate with the same shared secret used for
+ * /devbox/events, passed as a function argument (they are Convex clients, so
+ * there are no request headers). `context` prefixes the mismatch warn with
+ * the calling module.
+ */
+export function devboxSecretOk(secret: string, context = "commands"): boolean {
+  return secretMatches(
+    process.env.DEVBOX_SHARED_SECRET,
+    secret,
+    `${context}: devbox shared secret mismatch (or DEVBOX_SHARED_SECRET unset); ignoring request`,
+  );
 }
 
 /** Reactive query a gateway subscribes to for its own pending commands. */
@@ -112,10 +123,7 @@ export const heartbeat = mutation({
     if (!devboxSecretOk(args.secret)) {
       return;
     }
-    const devbox = await ctx.db
-      .query("devboxes")
-      .withIndex("by_devbox_id", (q) => q.eq("devboxId", args.devboxId))
-      .unique();
+    const devbox = await devboxByDevboxId(ctx, args.devboxId);
     if (devbox !== null) {
       await ctx.db.patch(devbox._id, { lastSeenAt: Date.now() });
     }
@@ -128,7 +136,7 @@ export async function enqueueCommandRow(
   ctx: MutationCtx,
   args: {
     devboxId: string;
-    kind: "start" | "user_message" | "interrupt";
+    kind: Infer<typeof commandKindValidator>;
     payload: string;
   },
 ): Promise<string> {

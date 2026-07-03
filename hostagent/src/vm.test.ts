@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import {
   createVmExecutors,
+  GATEWAY_KICKSTART,
   type Run,
   type RunResult,
+  SSH_BASE,
+  TAILSCALE_RESET,
   type VmConfig,
 } from "./vm";
 
@@ -19,20 +22,9 @@ const config: VmConfig = {
 
 const TART = config.tartBin;
 const IP = "192.168.64.9";
-const SSH_E =
-  "sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o PubkeyAuthentication=no -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=1";
-const KICKSTART =
-  "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
-  "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
-  "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";
-const TAILSCALE_RESET =
-  "set -e; " +
-  "sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true; " +
-  "for i in $(seq 1 15); do sudo launchctl print system/homebrew.mxcl.tailscale >/dev/null 2>&1 || break; sleep 1; done; " +
-  "sudo rm -rf /Library/Tailscale; " +
-  "for i in $(seq 1 10); do sudo launchctl bootstrap system /Library/LaunchDaemons/homebrew.mxcl.tailscale.plist 2>/dev/null && break; sleep 2; done; " +
-  "for i in $(seq 1 30); do /opt/homebrew/bin/tailscale version --daemon >/dev/null 2>&1 && exit 0; sleep 1; done; " +
-  'echo "tailscaled did not come back after state wipe" >&2; exit 1';
+// vm.ts passes the full joined SSH_BASE (sshpass prefix included) as rsync's
+// -e argument.
+const SSH_E = SSH_BASE.join(" ");
 
 type Call = { command: string[]; stdin: string | undefined };
 type Handler = (command: string[]) => Partial<RunResult> | undefined;
@@ -107,7 +99,7 @@ test("provision runs the exact step sequence in order", async () => {
     `ssh admin@${IP}: ${TAILSCALE_RESET}`,
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale up --authkey="$(cat)" --hostname=dev-1 --accept-dns=false`,
     `ssh admin@${IP}: sudo /opt/homebrew/bin/tailscale serve --bg 8787`,
-    `ssh admin@${IP}: ${KICKSTART}`,
+    `ssh admin@${IP}: ${GATEWAY_KICKSTART}`,
     `ssh admin@${IP}: curl -s http://127.0.0.1:8787/health`,
     `ssh admin@${IP}: touch ~/ultraclaude.ready`,
     `ssh admin@${IP}: curl -fsS --max-time 60 https://dev-1.ts.example.com/health`,

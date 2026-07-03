@@ -86,7 +86,7 @@
  * as a distinct section of the same pill. */
 .tx-tool-result {
   border-top: 1px solid var(--border-faint);
-  background: var(--paper-sunken, var(--paper));
+  background: var(--paper-sunken);
 }
 
 .tx-tool-result::before {

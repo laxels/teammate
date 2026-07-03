@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { convexTest } from "convex-test";
 import type { TaskEffort } from "../shared/protocol";
 import { api, internal } from "./_generated/api";
+import { allocateEphemeralSlot } from "./hosts";
 import schema from "./schema";
+import { drainScheduled } from "./test.helpers";
 
 // Bun has no import.meta.glob; hand-build the module map convex-test needs.
 // provisionVmFailed schedules placeQueuedEphemeralTasks (hosts) and
@@ -21,16 +23,6 @@ function newT() {
 }
 
 type Tester = ReturnType<typeof newT>;
-
-/** Runs the 0ms scheduled follow-ups (placeQueuedEphemeralTasks,
- * notify.devboxEvent) so they execute inside the test and any error surfaces,
- * instead of erroring in the background after the suite goes green. */
-async function drainScheduled(t: Tester): Promise<void> {
-  for (let i = 0; i < 5; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await t.finishInProgressScheduledFunctions();
-  }
-}
 
 const SECRET = "s3cret";
 let savedSlackToken: string | undefined;
@@ -132,9 +124,9 @@ test("a failed provision drops the leaked row, fails the task, and reclaims the 
 
   // The leak condition: both EULA slots are held by provisioning rows, so the
   // host accepts no new work — allocation returns null.
-  const beforeAlloc = await t.mutation(internal.hosts.allocateEphemeral, {
-    taskId: "task-new",
-  });
+  const beforeAlloc = await t.run(async (ctx) =>
+    allocateEphemeralSlot(ctx, "task-new"),
+  );
   expect(beforeAlloc).toBeNull();
 
   await t.mutation(api.hosts.provisionVmFailed, {
@@ -168,9 +160,9 @@ test("a failed provision drops the leaked row, fails the task, and reclaims the 
   expect((await getTask(t, "task-2"))?.status).toBe("queued");
 
   // 3. The slot is reclaimed: the host now has spare capacity again.
-  const afterAlloc = await t.mutation(internal.hosts.allocateEphemeral, {
-    taskId: "task-new",
-  });
+  const afterAlloc = await t.run(async (ctx) =>
+    allocateEphemeralSlot(ctx, "task-new"),
+  );
   expect(afterAlloc?.hostId).toBe("host-1");
 });
 

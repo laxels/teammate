@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   commentEventTime,
@@ -7,7 +13,7 @@ import {
   layoutComments,
   type RailItem,
 } from "./commentLayout";
-import { formatTimecode } from "./RecordingPlayer";
+import { formatTimecode } from "./ui";
 
 /** The slice of a comment the rail renders (#70). */
 export type RailComment = {
@@ -209,46 +215,24 @@ function CommentBlock({
         </button>
       )}
       <div className="comment-body">
-        <div className="comment-meta">
-          <button
-            type="button"
-            className="comment-ts"
-            title="Jump the recording here"
-            onClick={(e) => {
-              e.stopPropagation();
-              onSeek(comment.videoTimeSec);
-            }}
-          >
-            {formatTimecode(comment.videoTimeSec)}
-          </button>
-          {!editing && (
-            <span className="comment-actions">
-              <button
-                type="button"
-                className="comment-act"
-                title="Edit"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onFocus(comment.id);
-                  setEditing(true);
-                }}
-              >
-                edit
-              </button>
-              <button
-                type="button"
-                className="comment-act comment-act-danger"
-                title="Delete"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void onDelete(comment.id);
-                }}
-              >
-                delete
-              </button>
-            </span>
-          )}
-        </div>
+        <CommentMeta
+          comment={comment}
+          editing={editing}
+          className="comment-meta"
+          onSeek={(e) => {
+            e.stopPropagation();
+            onSeek(comment.videoTimeSec);
+          }}
+          onEditClick={(e) => {
+            e.stopPropagation();
+            onFocus(comment.id);
+            setEditing(true);
+          }}
+          onDelete={(e) => {
+            e.stopPropagation();
+            void onDelete(comment.id);
+          }}
+        />
         {editing ? (
           <CommentEditor
             initial={comment.text}
@@ -274,6 +258,58 @@ function CommentBlock({
           onEdit={onEdit}
           onDelete={onDelete}
         />
+      )}
+    </div>
+  );
+}
+
+/** The timestamp-seek button + edit/delete action pair shared by the rail card
+ * and the full-view dialog. Handlers receive the raw click event so each caller
+ * keeps its own propagation/close behavior inline. */
+function CommentMeta({
+  comment,
+  editing,
+  className,
+  onSeek,
+  onEditClick,
+  onDelete,
+}: {
+  comment: RailComment;
+  editing: boolean;
+  className: string;
+  onSeek: (e: MouseEvent<HTMLButtonElement>) => void;
+  onEditClick: (e: MouseEvent<HTMLButtonElement>) => void;
+  onDelete: (e: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <div className={className}>
+      <button
+        type="button"
+        className="comment-ts"
+        title="Jump the recording here"
+        onClick={onSeek}
+      >
+        {formatTimecode(comment.videoTimeSec)}
+      </button>
+      {!editing && (
+        <span className="comment-actions">
+          <button
+            type="button"
+            className="comment-act"
+            title="Edit"
+            onClick={onEditClick}
+          >
+            edit
+          </button>
+          <button
+            type="button"
+            className="comment-act comment-act-danger"
+            title="Delete"
+            onClick={onDelete}
+          >
+            delete
+          </button>
+        </span>
       )}
     </div>
   );
@@ -318,6 +354,10 @@ function CommentDialog({
     <div
       className="comment-dialog-backdrop"
       onClick={(e) => {
+        // The dialog is portal'd but still a React child of the comment card,
+        // so without this, every click in here would bubble (through the React
+        // tree, not the DOM) to the card's onClick and toggle rail focus.
+        e.stopPropagation();
         // Only a click on the backdrop itself dismisses; clicks that bubble up
         // from the dialog card are ignored.
         if (e.target === e.currentTarget) onClose();
@@ -337,42 +377,20 @@ function CommentDialog({
           />
         </div>
         <div className="comment-dialog-body">
-          <div className="comment-dialog-meta">
-            <button
-              type="button"
-              className="comment-ts"
-              title="Jump the recording here"
-              onClick={() => {
-                onSeek(comment.videoTimeSec);
-                onClose();
-              }}
-            >
-              {timecode}
-            </button>
-            {!editing && (
-              <span className="comment-actions">
-                <button
-                  type="button"
-                  className="comment-act"
-                  title="Edit"
-                  onClick={() => setEditing(true)}
-                >
-                  edit
-                </button>
-                <button
-                  type="button"
-                  className="comment-act comment-act-danger"
-                  title="Delete"
-                  onClick={() => {
-                    onClose();
-                    void onDelete(comment.id);
-                  }}
-                >
-                  delete
-                </button>
-              </span>
-            )}
-          </div>
+          <CommentMeta
+            comment={comment}
+            editing={editing}
+            className="comment-dialog-meta"
+            onSeek={() => {
+              onSeek(comment.videoTimeSec);
+              onClose();
+            }}
+            onEditClick={() => setEditing(true)}
+            onDelete={() => {
+              onClose();
+              void onDelete(comment.id);
+            }}
+          />
           {editing ? (
             <CommentEditor
               initial={comment.text}

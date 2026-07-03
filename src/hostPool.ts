@@ -2,7 +2,11 @@
 // convex/devboxes.ts) and covered by `bun test`. No Convex runtime
 // dependencies here.
 
-import { isTerminalTaskStatus, type TaskStatus } from "../shared/protocol";
+import {
+  GATEWAY_PORT,
+  isTerminalTaskStatus,
+  type TaskStatus,
+} from "../shared/protocol";
 
 // ---- Host selection for ephemeral devbox allocation ----
 
@@ -126,7 +130,7 @@ export function ephemeralGatewayUrl(
   devboxId: string,
   tailnetSuffix: string,
 ): string {
-  return `http://${devboxId}.${tailnetSuffix}:8787`;
+  return `http://${devboxId}.${tailnetSuffix}:${GATEWAY_PORT}`;
 }
 
 // ---- Retire decision ----

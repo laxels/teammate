@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Server } from "bun";
+import { timingSafeEqual } from "../../shared/auth";
 import {
   type DeliverableFile,
   type GatewayHealth,
@@ -67,17 +68,6 @@ export type GatewayServerOptions = {
 };
 
 const DEFAULT_WEB_DIST = resolve(import.meta.dir, "../../web/dist");
-
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
 
 /** Validates the optional `files` array (DeliverableFile[]) on a start/steer
  * payload, dropping malformed entries. Returns undefined when absent/empty. */
@@ -192,7 +182,8 @@ export function createGatewayServer(
 
   const emitEvent = createEventSender(config, fetchFn, options.now ?? Date.now);
 
-  const send = (message: SteerServerMessage): string => JSON.stringify(message);
+  const encode = (message: SteerServerMessage): string =>
+    JSON.stringify(message);
 
   // `server` is assigned below; the callbacks only run once it is listening.
   let server: Server<WsData>;
@@ -220,7 +211,7 @@ export function createGatewayServer(
       "share-file": createShareMcpServer({ config, taskId, fetchFn }),
     }),
     onMessage: (message) =>
-      server.publish(STEER_TOPIC, send({ type: "sdk_message", message })),
+      server.publish(STEER_TOPIC, encode({ type: "sdk_message", message })),
     onStatusChange: (status: SessionStatus) => {
       // Task finished/stopped: drop its (and only its) downloaded inbound files.
       if (!status.running && activeInboxTaskId !== null) {
@@ -229,7 +220,7 @@ export function createGatewayServer(
       }
       server.publish(
         STEER_TOPIC,
-        send({
+        encode({
           type: "status",
           running: status.running,
           taskId: status.taskId,
@@ -275,9 +266,15 @@ export function createGatewayServer(
         return Response.json(health);
       }
 
-      // Tailscale Serve exposes this whole port to the tailnet, so the
-      // control endpoints require the shared secret (same value gateways use
-      // to authenticate with Convex).
+      // The shared secret on these control endpoints authenticates the
+      // ORCHESTRATOR (it is the same value gateways use with Convex): it keeps
+      // stale/misrouted orchestrator commands out, and it gates starting a
+      // task on an idle devbox. It is NOT a defense against tailnet actors —
+      // Tailscale Serve exposes this whole port to the tailnet, and /ws/steer
+      // and /ws/vnc are intentionally unauthenticated because the browser
+      // monitoring page holds no secret. The tailnet is the trust boundary:
+      // any tailnet actor already gets full desktop control via /ws/vnc (with
+      // the admin/admin credentials baked into web/src/App.tsx).
       if (
         request.method === "POST" &&
         (url.pathname === "/task" ||
@@ -440,11 +437,11 @@ export function createGatewayServer(
       open(ws) {
         if (ws.data.kind === "steer") {
           ws.send(
-            send({ type: "history", messages: session.historySnapshot() }),
+            encode({ type: "history", messages: session.historySnapshot() }),
           );
           const status = session.status();
           ws.send(
-            send({
+            encode({
               type: "status",
               running: status.running,
               taskId: status.taskId,
@@ -467,7 +464,7 @@ export function createGatewayServer(
             typeof raw === "string" ? raw : raw.toString("utf8"),
             session,
           );
-          if (reply !== null) ws.send(send(reply));
+          if (reply !== null) ws.send(encode(reply));
           return;
         }
         forwardVncClientFrame(

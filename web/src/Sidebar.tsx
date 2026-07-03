@@ -9,7 +9,6 @@ import {
 import { AssistantText, ToolPill } from "../../shared/transcriptUi";
 import type { TranscriptItem, TranscriptState } from "./transcript";
 
-const COMPOSER_MAX_HEIGHT_PX = 140;
 const AUTOSCROLL_SLACK_PX = 80;
 
 type SidebarProps = {
@@ -181,7 +180,8 @@ function Composer({ onSend }: { onSend: (text: string) => void }) {
     const el = textareaRef.current;
     if (el !== null) {
       el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT_PX)}px`;
+      // The CSS max-height on .composer-input caps this autosize.
+      el.style.height = `${el.scrollHeight}px`;
     }
   }, []);
 

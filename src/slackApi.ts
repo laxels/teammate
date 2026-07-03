@@ -310,8 +310,39 @@ export type SlackUploadResult =
   | { ok: true; fileId: string }
   | { ok: false; error: string };
 
-/** Step 1 of the external-upload flow: reserve a single-use upload URL.
- * Form-encoded (these methods reject JSON bodies). */
+/** POSTs a form-encoded Slack Web API call (the upload methods reject JSON
+ * bodies) and normalizes HTTP/Slack-level failures into an error string.
+ * Transport errors propagate — uploadSlackFile's outer catch formats them. */
+async function postSlackForm(
+  fetchFn: typeof fetch,
+  botToken: string,
+  method: string,
+  params: URLSearchParams,
+): Promise<
+  { ok: true; result: Record<string, unknown> } | { ok: false; error: string }
+> {
+  const response = await fetchFn(`https://slack.com/api/${method}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${botToken}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+  if (!response.ok) {
+    return { ok: false, error: `${method} HTTP ${response.status}` };
+  }
+  const result = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (result.ok === true) {
+    return { ok: true, result };
+  }
+  return { ok: false, error: `${method} failed: ${result.error ?? "unknown"}` };
+}
+
+/** Step 1 of the external-upload flow: reserve a single-use upload URL. */
 async function getUploadUrlExternal(
   fetchFn: typeof fetch,
   botToken: string,
@@ -320,42 +351,22 @@ async function getUploadUrlExternal(
 ): Promise<
   { ok: true; uploadUrl: string; fileId: string } | { ok: false; error: string }
 > {
-  const response = await fetchFn(
-    "https://slack.com/api/files.getUploadURLExternal",
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${botToken}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        filename,
-        length: String(length),
-      }).toString(),
-    },
+  const posted = await postSlackForm(
+    fetchFn,
+    botToken,
+    "files.getUploadURLExternal",
+    new URLSearchParams({ filename, length: String(length) }),
   );
-  if (!response.ok) {
-    return {
-      ok: false,
-      error: `files.getUploadURLExternal HTTP ${response.status}`,
-    };
+  if (!posted.ok) {
+    return posted;
   }
-  const result = (await response.json().catch(() => ({}))) as {
-    ok?: boolean;
-    error?: string;
-    upload_url?: string;
-    file_id?: string;
-  };
-  if (
-    result.ok === true &&
-    typeof result.upload_url === "string" &&
-    typeof result.file_id === "string"
-  ) {
-    return { ok: true, uploadUrl: result.upload_url, fileId: result.file_id };
+  const { upload_url, file_id, error } = posted.result;
+  if (typeof upload_url === "string" && typeof file_id === "string") {
+    return { ok: true, uploadUrl: upload_url, fileId: file_id };
   }
   return {
     ok: false,
-    error: `files.getUploadURLExternal failed: ${result.error ?? "unknown"}`,
+    error: `files.getUploadURLExternal failed: ${error ?? "unknown"}`,
   };
 }
 
@@ -379,34 +390,13 @@ async function completeUploadExternal(
   if (args.initialComment !== undefined) {
     body.set("initial_comment", args.initialComment);
   }
-  const response = await fetchFn(
-    "https://slack.com/api/files.completeUploadExternal",
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${botToken}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: body.toString(),
-    },
+  const posted = await postSlackForm(
+    fetchFn,
+    botToken,
+    "files.completeUploadExternal",
+    body,
   );
-  if (!response.ok) {
-    return {
-      ok: false,
-      error: `files.completeUploadExternal HTTP ${response.status}`,
-    };
-  }
-  const result = (await response.json().catch(() => ({}))) as {
-    ok?: boolean;
-    error?: string;
-  };
-  if (result.ok === true) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    error: `files.completeUploadExternal failed: ${result.error ?? "unknown"}`,
-  };
+  return posted.ok ? { ok: true } : posted;
 }
 
 /**

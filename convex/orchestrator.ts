@@ -3,8 +3,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
 import {
-  type InterruptPayload,
-  isTerminalTaskStatus,
   MAX_INBOUND_FILE_BYTES,
   MAX_ORCHESTRATOR_IMAGE_BYTES,
   MAX_ORCHESTRATOR_INLINE_TOTAL_BYTES,
@@ -21,7 +19,6 @@ import {
   resolveThreadTarget,
   type SlackFileRef,
   steerRejection,
-  stopRejection,
   type ThreadTarget,
   taskActionAuthorization,
 } from "../src/orchestration";
@@ -431,7 +428,7 @@ async function executeTool(
       if (typeof taskId !== "string") {
         return toolError("taskId (string) is required");
       }
-      let task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
+      const task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
       if (task === null) {
         return toolError(`no task with id ${taskId}`);
       }
@@ -439,65 +436,48 @@ async function executeTool(
       if (unauthorized !== null) {
         return toolError(unauthorized);
       }
-      if (isTerminalTaskStatus(task.status)) {
-        return toolError(
-          `task ${taskId} is already ${task.status} — nothing to stop`,
-        );
-      }
-      if (task.devboxId === undefined) {
-        // Still waiting for ephemeral placement: cancel in place.
-        const cancelled = await ctx.runMutation(internal.tasks.cancelQueued, {
-          taskId,
-        });
-        if (cancelled) {
-          // Queue cancellations never reach /devbox/events, so the terminal
-          // note for the task's thread is posted here.
-          await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
-            taskId,
-            text: `:octagonal_sign: *${task.title}* (\`${taskId}\`) was cancelled while still queued — no devbox had been assigned yet.`,
-          });
+      // One transactional stop (tasks.stopTaskCore): the terminal check,
+      // queued cancel, and taskId-guarded interrupt all run inside a single
+      // mutation, so this action never races its own reads.
+      const outcome = await ctx.runMutation(internal.tasks.stop, {
+        taskId,
+        // Queue cancellations never reach /devbox/events, so the terminal
+        // note for the task's thread is posted by the stop mutation.
+        queuedCancelText: `:octagonal_sign: *${task.title}* (\`${taskId}\`) was cancelled while still queued — no devbox had been assigned yet.`,
+      });
+      switch (outcome.kind) {
+        case "not_found":
+          return toolError(`no task with id ${taskId}`);
+        case "already_terminal":
+          return toolError(
+            `task ${taskId} is already ${outcome.status} — nothing to stop`,
+          );
+        case "cancelled_queued":
           return JSON.stringify({
             ok: true,
             taskId,
             note: "task was still queued (no devbox yet) and has been cancelled",
           });
-        }
-        // Lost a race between the read and the cancel: re-read to see what
-        // actually happened instead of guessing.
-        task = await ctx.runQuery(internal.tasks.getByTaskId, { taskId });
-        if (task === null) {
-          return toolError(`no task with id ${taskId}`);
-        }
-        if (isTerminalTaskStatus(task.status)) {
+        case "cancel_conflict":
           return toolError(
-            `task ${taskId} is already ${task.status} — nothing to stop`,
+            `task ${taskId} could not be cancelled (status: ${outcome.status}) — try again`,
+          );
+        case "rejected":
+          return toolError(outcome.reason);
+        case "interrupted":
+          return JSON.stringify({
+            ok: true,
+            taskId,
+            note: "interrupt queued — if a turn was in flight, a 'stopped' status update will follow in the task's thread",
+          });
+        default: {
+          // Compile-time exhaustiveness: a new outcome kind fails to assign.
+          const unreachable: never = outcome;
+          return toolError(
+            `unhandled stop outcome ${JSON.stringify(unreachable)}`,
           );
         }
-        if (task.devboxId === undefined) {
-          return toolError(
-            `task ${taskId} could not be cancelled (status: ${task.status}) — try again`,
-          );
-        }
-        // Placed while we were cancelling: fall through to the interrupt path.
       }
-      const devbox = await ctx.runQuery(internal.devboxes.getByDevboxId, {
-        devboxId: task.devboxId,
-      });
-      const rejection = stopRejection(task, devbox);
-      if (rejection !== null || devbox === null) {
-        return toolError(rejection ?? `devbox ${task.devboxId} is missing`);
-      }
-      const payload: InterruptPayload = { taskId };
-      await ctx.runMutation(internal.commands.enqueue, {
-        devboxId: devbox.devboxId,
-        kind: "interrupt",
-        payload: JSON.stringify(payload),
-      });
-      return JSON.stringify({
-        ok: true,
-        taskId,
-        note: "interrupt queued — if a turn was in flight, a 'stopped' status update will follow in the task's thread",
-      });
     }
 
     default:

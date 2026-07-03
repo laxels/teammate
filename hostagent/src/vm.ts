@@ -3,6 +3,8 @@
 // stub the exact tart/ssh command sequences. The provisioning steps run from
 // ON the host (no ssh jump).
 
+import { GATEWAY_PORT } from "../../shared/protocol";
+
 export type RunResult = { code: number; stdout: string; stderr: string };
 export type RunOptions = { stdin?: string };
 export type Run = (
@@ -56,7 +58,6 @@ export type VmExecutorOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-const GATEWAY_PORT = 8787;
 const VM_USER = "admin";
 // Golden-image default; VMs are reachable only from the host (NAT) and the
 // tailnet, and sshd inside the image allows password auth on purpose.
@@ -77,7 +78,7 @@ const TAILSCALE = "/opt/homebrew/bin/tailscale";
 // bootout intermittently fails with "Bootstrap failed: 5: Input/output
 // error" (observed on a freshly booted clone, 2026-06-12). Wait for the
 // label to disappear before removing state, and retry the bootstrap.
-const TAILSCALE_RESET =
+export const TAILSCALE_RESET =
   "set -e; " +
   "sudo launchctl bootout system/homebrew.mxcl.tailscale 2>/dev/null || true; " +
   "for i in $(seq 1 15); do sudo launchctl print system/homebrew.mxcl.tailscale >/dev/null 2>&1 || break; sleep 1; done; " +
@@ -122,7 +123,7 @@ const SSH_OPTS = [
   "NumberOfPasswordPrompts=1",
 ];
 
-const SSH_BASE = ["sshpass", "-p", VM_PASSWORD, "ssh", ...SSH_OPTS];
+export const SSH_BASE = ["sshpass", "-p", VM_PASSWORD, "ssh", ...SSH_OPTS];
 
 function sshCommand(ip: string, remoteCommand: string): string[] {
   return [...SSH_BASE, `${VM_USER}@${ip}`, remoteCommand];
@@ -130,7 +131,7 @@ function sshCommand(ip: string, remoteCommand: string): string[] {
 
 // Kickstart the baked gateway LaunchAgent, bootstrapping it first if this
 // boot never loaded it.
-const GATEWAY_KICKSTART =
+export const GATEWAY_KICKSTART =
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway " +
   "|| { launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.ultraclaude.gateway.plist 2>/dev/null; " +
   "launchctl kickstart -k gui/501/com.ultraclaude.gateway; }";

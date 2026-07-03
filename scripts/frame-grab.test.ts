@@ -118,10 +118,8 @@ describe("grabFrame pipeline", () => {
   });
 
   test("uploads the real frame even when runFfmpeg yields an ArrayBuffer (#102)", async () => {
-    // Bun's Response(subprocessStdout).bytes() returns a bare ArrayBuffer for
-    // multi-chunk ffmpeg output — the exact runtime value that broke the old
-    // `png.slice().buffer` body (-> undefined -> 0-byte blob). The pipeline must
-    // still upload the bytes.
+    // The bare-ArrayBuffer runtime value multi-chunk stdout produces — see
+    // readAll in dashboard-server.ts (#102). The pipeline must still upload it.
     const log = {
       urls: [] as string[],
       uploadBody: null as RequestInit["body"],

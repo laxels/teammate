@@ -4,6 +4,7 @@
 #   ~/ultraclaude-payload/  gateway/src, shared, web/dist — rsynced into each
 #                           devbox VM at provision time by the host agent
 #   ~/hostagent/            host agent source + deps (bun install on the host)
+#   ~/shared/               shared modules the host agent imports (../../shared)
 # Restarts the hostagent LaunchAgent when it is loaded (no-op otherwise).
 #
 # Usage: scripts/deploy-payload.sh <host-ssh> [<host-ssh>...]
@@ -52,6 +53,13 @@ for HOST_SSH in "$@"; do
       package.json bunfig.toml dashboard/package.json hostagent/package.json \
       web/package.json \
       "$HOST_SSH:ultraclaude-payload/")
+
+  # hostagent/src imports ../../shared at runtime (shared/commandConsumer.ts,
+  # which has zero runtime deps), so ship shared/ as the ~/shared sibling —
+  # BEFORE hostagent/src, so a KeepAlive respawn mid-deploy never sees new
+  # src without ~/shared next to it.
+  log "[$HOST_SSH] Syncing shared/ to ~/shared"
+  rsync -az -e "ssh ${SSH_OPTS[*]}" "$REPO_ROOT/shared/" "$HOST_SSH:shared/"
 
   log "[$HOST_SSH] Syncing host agent to ~/hostagent"
   (cd "$REPO_ROOT/hostagent" &&

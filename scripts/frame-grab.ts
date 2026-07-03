@@ -82,10 +82,9 @@ export function ffmpegFrameArgs(url: string, videoTimeSec: number): string[] {
 export type FrameGrabDeps = {
   fetchFn: (url: string, init?: RequestInit) => Promise<Response>;
   /** Runs ffmpeg with the given args, resolving the PNG bytes from stdout.
-   * MUST resolve a real Uint8Array (see dashboard-server.runFfmpeg / #102):
-   * Bun's Response(subprocessStdout).bytes() hands back a bare ArrayBuffer for
-   * multi-chunk output, which has no `.buffer` — the source of the empty-upload
-   * bug. Throws on a non-zero exit, a timeout, or a missing binary. */
+   * MUST resolve a real Uint8Array — see readAll in dashboard-server.ts (#102:
+   * bare-ArrayBuffer stdout made the old upload body undefined). Throws on a
+   * non-zero exit, a timeout, or a missing binary. */
   runFfmpeg: (args: string[], timeoutMs: number) => Promise<Uint8Array>;
 };
 
@@ -170,10 +169,9 @@ export async function grabFrame(
     return { ok: false, status: 502, reason: "upload-url unreachable" };
   }
 
-  // 4. Upload the PNG; read back its storageId. Send the Uint8Array directly:
-  // it's valid BodyInit and carries exactly its bytes. (The old `png.slice()
-  // .buffer` was the #102 bug — `.buffer` is undefined when png is an
-  // ArrayBuffer, so the body became `undefined` → a 0-byte blob.)
+  // 4. Upload the PNG; read back its storageId. Send the Uint8Array directly
+  // as BodyInit (the old `png.slice().buffer` was the #102 empty-upload bug —
+  // see readAll in dashboard-server.ts).
   try {
     const res = await deps.fetchFn(uploadUrl, {
       method: "POST",

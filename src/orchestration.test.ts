@@ -60,7 +60,6 @@ describe("classifySlackEvent", () => {
     expect(result.trigger).toEqual({
       type: "message",
       channel: "D0DM",
-      channelType: "im",
       user: "U0HUMAN",
       text: "start a task to fix the login bug",
       ts: "1749500000.000100",
@@ -83,7 +82,6 @@ describe("classifySlackEvent", () => {
     expect(result.kind).toBe("trigger");
     if (result.kind !== "trigger") throw new Error("unreachable");
     expect(result.trigger.channel).toBe("C0GENERAL");
-    expect(result.trigger.channelType).toBeUndefined();
     expect(result.trigger.threadTs).toBeUndefined();
   });
 
@@ -316,7 +314,6 @@ describe("resolveThreadTarget", () => {
     expect(
       resolveThreadTarget({
         ...base,
-        channelType: "im",
         threadTs: undefined,
         files: [],
       }),
@@ -327,7 +324,6 @@ describe("resolveThreadTarget", () => {
     expect(
       resolveThreadTarget({
         ...base,
-        channelType: "im",
         threadTs: "1749400000.000001",
         files: [],
       }),
@@ -340,7 +336,6 @@ describe("resolveThreadTarget", () => {
         ...base,
         type: "app_mention",
         channel: "C0GENERAL",
-        channelType: undefined,
         threadTs: undefined,
         files: [],
       }),
@@ -353,7 +348,6 @@ describe("resolveThreadTarget", () => {
         ...base,
         type: "app_mention",
         channel: "C0GENERAL",
-        channelType: undefined,
         threadTs: "1749400000.000001",
         files: [],
       }),
@@ -406,7 +400,6 @@ describe("buildOrchestratorUserMessage", () => {
   const trigger = {
     type: "message" as const,
     channel: "D0DM",
-    channelType: "im",
     user: "U0HUMAN",
     text: "looks good, but also add a regression test",
     ts: "1749500010.000100",
@@ -429,7 +422,6 @@ describe("buildOrchestratorUserMessage", () => {
         ...trigger,
         type: "app_mention",
         channel: "C0GENERAL",
-        channelType: undefined,
       },
       threadTasks: [],
     });

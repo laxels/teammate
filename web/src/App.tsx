@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { VncScreen, type VncScreenHandle } from "react-vnc";
 import type { SteerClientMessage } from "../../shared/protocol";
 import { Sidebar } from "./Sidebar";
-import { SteerClient, steerUrl, vncUrl } from "./steer";
+import { SteerClient, wsUrl } from "./steer";
 import { initialState, reduce } from "./transcript";
 
 const VNC_RETRY_MS = 3000;
@@ -12,7 +12,7 @@ export function App() {
   const clientRef = useRef<SteerClient | null>(null);
 
   useEffect(() => {
-    const client = new SteerClient(steerUrl(window.location), {
+    const client = new SteerClient(wsUrl(window.location, "/ws/steer"), {
       onMessage: (message) => dispatch({ kind: "server", message }),
       onConnectionChange: (connected) =>
         dispatch({ kind: "connection", connected }),
@@ -56,7 +56,7 @@ export function App() {
 function VncPane() {
   const ref = useRef<VncScreenHandle>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const url = useMemo(() => vncUrl(window.location), []);
+  const url = useMemo(() => wsUrl(window.location, "/ws/vnc"), []);
 
   useEffect(
     () => () => {

@@ -7,8 +7,8 @@
 # is no longer free — a live host keeps serving the stale image until it is
 # deliberately refreshed. This script is that operation: the per-host refresh
 # PRIMITIVE (drain -> pull -> clone -> swap -> rejoin) plus two rollout MODES over
-# the fleet. It generalizes bake-golden.sh's single-host "flip the live host"
-# closing note to the whole fleet.
+# the fleet. It generalizes what used to be bake-golden.sh's single-host "flip
+# the live host" closing note to the whole fleet.
 #
 #   Usage: scripts/refresh-golden.sh [options]
 #     --tag <vN>            golden version to roll to (default: the pinned
@@ -74,11 +74,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ULTRACLAUDE_ENV:-$REPO_ROOT/.env}"
 # Hostagent LaunchAgent PATH lacks homebrew; harmless to widen for ssh/curl.
 export PATH="/opt/homebrew/bin:$PATH"
-API="https://api.scaleway.com"
-ZONE="fr-par-1"
-SERVERS_PATH="/apple-silicon/v1alpha1/zones/$ZONE/servers"
-SSH_USER="m1"
-TART='~/tart.app/Contents/MacOS/tart'
+# Scaleway constants + shared helpers (log, env_secret, json_string, scw_api):
+# single copy in scripts/fleet-lib.sh, shared with the other fleet scripts.
+source "$REPO_ROOT/scripts/fleet-lib.sh"
 
 # ---------------------------------------------------------------- arg parsing
 MODE="rolling"
@@ -120,37 +118,7 @@ source "$REPO_ROOT/scripts/golden-constants.sh"
 # Deployment-identity constants (CONVEX_SITE_URL): single source of truth.
 source "$REPO_ROOT/scripts/deployment-constants.sh"
 
-log() { printf '\n==> %s\n' "$*"; }
-
-env_secret() { # <KEY> -> value from env, else repo .env; never echoed
-  local key="$1" val="${!1:-}"
-  if [[ -n "$val" ]]; then printf '%s' "$val"; return 0; fi
-  val="$(grep "^$key=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-  if [[ -z "$val" ]]; then
-    echo "ERROR: $key not set and missing from $ENV_FILE" >&2
-    return 1
-  fi
-  printf '%s' "$val"
-}
-
-json_string() { # <str> -> JSON-quoted string
-  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
-}
-
 # ---------------------------------------------------------------- Scaleway IP
-scw_api() { # <method> <path> -> response body on stdout (errors to stderr)
-  local method="$1" path="$2" response http_code
-  response="$(curl -sS -w $'\n%{http_code}' -X "$method" \
-    -H "X-Auth-Token: $SCALEWAY_SECRET_KEY" "$API$path")"
-  http_code="${response##*$'\n'}"
-  response="${response%$'\n'*}"
-  if (( http_code >= 400 )); then
-    echo "ERROR: Scaleway API $method $path -> HTTP $http_code: $response" >&2
-    return 1
-  fi
-  printf '%s' "$response"
-}
-
 # Map a host NAME to its public IP from the (cached) server list. Empty if the
 # host has no Scaleway server (a typo, or a host not in this project).
 resolve_host_ip() { # <host-name> -> ip or ""

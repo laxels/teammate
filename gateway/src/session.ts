@@ -5,14 +5,9 @@ import {
   type PermissionResult,
   type SDKMessage,
   type SDKUserMessage,
-  type PermissionMode as SdkPermissionMode,
   query as sdkQuery,
 } from "@anthropic-ai/claude-agent-sdk";
-import {
-  DETAIL_MAX_CHARS,
-  type PermissionMode,
-  type StartTaskRequest,
-} from "../../shared/protocol";
+import { DETAIL_MAX_CHARS, type StartTaskRequest } from "../../shared/protocol";
 import type { EventExtra, EventSender, ScreenshotUploader } from "./events";
 import { createRingBuffer, type RingBuffer } from "./history";
 import { DEVBOX_SYSTEM_PROMPT } from "./prompt";
@@ -36,7 +31,6 @@ import { createThrottler, type Throttler } from "./throttle";
  */
 export type AgentQuery = AsyncGenerator<SDKMessage, void> & {
   interrupt(): Promise<void>;
-  setPermissionMode(mode: SdkPermissionMode): Promise<void>;
 };
 
 export type QueryFn = (params: {
@@ -375,13 +369,7 @@ export class SessionManager {
         });
       }, ANSWER_TIMEOUT_MS);
       timer.unref?.();
-      this.#pendingQuestion = {
-        input,
-        timer,
-        resolve: (result) => {
-          resolve(result);
-        },
-      };
+      this.#pendingQuestion = { input, timer, resolve };
     });
   }
 
@@ -413,12 +401,6 @@ export class SessionManager {
     // so a steer before the first SDK message keeps init-hang detection.
     if (this.#lastMessageAt !== null) this.#lastMessageAt = this.#deps.now();
     this.#queue.push(userMessage(text));
-    return true;
-  }
-
-  async setPermissionMode(mode: PermissionMode): Promise<boolean> {
-    if (!this.#running || this.#query === null) return false;
-    await this.#query.setPermissionMode(mode);
     return true;
   }
 
@@ -460,7 +442,11 @@ export class SessionManager {
       }
     } catch (error) {
       console.error("[gateway] session error:", error);
-      if (!this.#interrupted) {
+      // Only report "failed" when the error actually cut a turn short: a
+      // finished-but-steerable session keeps the stream open while idle, and
+      // its task already reported a terminal status that a late "failed"
+      // would regress (terminal-to-terminal transitions apply in Convex).
+      if (!this.#interrupted && this.#turnInFlight) {
         this.#emit(
           "failed",
           excerpt(
@@ -593,27 +579,36 @@ export class SessionManager {
   ): Promise<void> {
     for (const result of extractToolResults(message)) {
       if (this.#interrupted) return;
-      const tool = this.#toolUseNames.get(result.toolUseId);
-      let imageStorageId: string | undefined;
-      const firstImage = result.images[0];
-      if (firstImage !== undefined && this.#uploadScreenshot !== null) {
-        const bytes = Uint8Array.from(Buffer.from(firstImage.data, "base64"));
-        const id = await this.#uploadScreenshot(bytes, firstImage.mimeType);
-        if (id !== null) imageStorageId = id;
+      // Never let one emission reject: #toolResultTail is a bare .then chain,
+      // so an escaped rejection would skip every later callback — silently
+      // dropping the remaining results AND the terminal event queued behind
+      // them. (The production uploader never rejects by contract, but that
+      // invariant is enforced nowhere else.) Log and continue.
+      try {
+        const tool = this.#toolUseNames.get(result.toolUseId);
+        let imageStorageId: string | undefined;
+        const firstImage = result.images[0];
+        if (firstImage !== undefined && this.#uploadScreenshot !== null) {
+          const bytes = Uint8Array.from(Buffer.from(firstImage.data, "base64"));
+          const id = await this.#uploadScreenshot(bytes, firstImage.mimeType);
+          if (id !== null) imageStorageId = id;
+        }
+        const summary =
+          result.text !== ""
+            ? excerpt(result.text)
+            : imageStorageId !== undefined
+              ? "Screenshot"
+              : "Tool result";
+        void this.#deps.emitEvent(taskId, "tool_result", summary, {
+          ...(tool === undefined ? {} : { tool }),
+          ...(result.text === ""
+            ? {}
+            : { detail: clip(result.text, DETAIL_MAX_CHARS) }),
+          ...(imageStorageId === undefined ? {} : { imageStorageId }),
+        });
+      } catch (error) {
+        console.error("[gateway] tool-result emission failed:", error);
       }
-      const summary =
-        result.text !== ""
-          ? excerpt(result.text)
-          : imageStorageId !== undefined
-            ? "Screenshot"
-            : "Tool result";
-      void this.#deps.emitEvent(taskId, "tool_result", summary, {
-        ...(tool === undefined ? {} : { tool }),
-        ...(result.text === ""
-          ? {}
-          : { detail: clip(result.text, DETAIL_MAX_CHARS) }),
-        ...(imageStorageId === undefined ? {} : { imageStorageId }),
-      });
     }
   }
 

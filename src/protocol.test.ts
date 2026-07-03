@@ -1,3 +1,5 @@
+// Tests shared/protocol.ts; kept in src/ so a single tsc pass (root tsconfig)
+// covers it.
 import { expect, test } from "bun:test";
 import {
   isTerminalTaskStatus,
