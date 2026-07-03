@@ -1,6 +1,7 @@
 // Pure orchestration helpers shared by the Convex functions (convex/) and
 // covered by `bun test`. No Convex runtime dependencies here.
 
+import { excerpt } from "../shared/agentSummary";
 import {
   DEVBOX_EVENT_TYPES,
   type DevboxEvent,
@@ -221,13 +222,12 @@ const DEVBOX_EVENT_TYPES_SET: ReadonlySet<string> = new Set(DEVBOX_EVENT_TYPES);
  * through only when present and well-typed; a malformed one is dropped, never a
  * rejection (the core event still records).
  */
-export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-  const body = payload as Record<string, unknown>;
+/** The identity-agnostic core of the two agent-event wire validators: the
+ * event body minus the devboxId/machineId key, or null when malformed. */
+function parseAgentEventCore(
+  body: Record<string, unknown>,
+): Omit<DevboxEvent, "devboxId"> | null {
   if (
-    typeof body.devboxId !== "string" ||
     typeof body.taskId !== "string" ||
     typeof body.type !== "string" ||
     !DEVBOX_EVENT_TYPES_SET.has(body.type) ||
@@ -237,7 +237,6 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
     return null;
   }
   return {
-    devboxId: body.devboxId,
     taskId: body.taskId,
     type: body.type as DevboxEventType,
     summary: body.summary,
@@ -248,6 +247,18 @@ export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
       ? { imageStorageId: body.imageStorageId }
       : {}),
   };
+}
+
+export function parseDevboxEvent(payload: unknown): DevboxEvent | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  if (typeof body.devboxId !== "string") {
+    return null;
+  }
+  const core = parseAgentEventCore(body);
+  return core === null ? null : { devboxId: body.devboxId, ...core };
 }
 
 // ---- LocalAgentEvent (local daemon -> /local/events) body validation ----
@@ -262,40 +273,19 @@ export function parseLocalAgentEvent(payload: unknown): LocalAgentEvent | null {
     return null;
   }
   const body = payload as Record<string, unknown>;
-  if (
-    typeof body.machineId !== "string" ||
-    typeof body.taskId !== "string" ||
-    typeof body.type !== "string" ||
-    !DEVBOX_EVENT_TYPES_SET.has(body.type) ||
-    typeof body.summary !== "string" ||
-    typeof body.ts !== "number"
-  ) {
+  if (typeof body.machineId !== "string") {
     return null;
   }
-  return {
-    machineId: body.machineId,
-    taskId: body.taskId,
-    type: body.type as DevboxEventType,
-    summary: body.summary,
-    ts: body.ts,
-    ...(typeof body.detail === "string" ? { detail: body.detail } : {}),
-    ...(typeof body.tool === "string" ? { tool: body.tool } : {}),
-    ...(typeof body.imageStorageId === "string"
-      ? { imageStorageId: body.imageStorageId }
-      : {}),
-  };
+  const core = parseAgentEventCore(body);
+  return core === null ? null : { machineId: body.machineId, ...core };
 }
 
 // ---- Peer channel formatting (#138) ----
 
-/** One-line preview for timeline summaries and Slack asks: whitespace
- * collapsed, truncated with an ellipsis. */
-export function excerptLine(text: string, maxChars = 300): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.length <= maxChars
-    ? collapsed
-    : `${collapsed.slice(0, maxChars - 1)}…`;
-}
+/** One-line preview for timeline summaries and Slack asks — the shared
+ * agent-summary `excerpt` helper under the name convex/ modules import
+ * (whitespace collapsed, ellipsis-in-budget, 300-char default). */
+export const excerptLine = excerpt;
 
 /** Peer request bodies originate from a cloud agent that has read untrusted
  * web content (the prompt-injection path #138 mitigates with hard bans and

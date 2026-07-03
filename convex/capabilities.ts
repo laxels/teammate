@@ -37,17 +37,19 @@ export const record = internalMutation({
 
 /** The most recently updated manifest — the fleet converges on one golden
  * (scripts/refresh-golden.sh), so "latest uploaded" tracks "what's serving"
- * without joining host heartbeats. Null until the first upload. */
+ * without joining host heartbeats. Null until the first upload. Indexed:
+ * this runs on every orchestrator turn. */
 export const current = internalQuery({
   args: {},
   handler: async (ctx) => {
-    const manifests = await ctx.db.query("capabilityManifests").collect();
-    if (manifests.length === 0) {
+    const latest = await ctx.db
+      .query("capabilityManifests")
+      .withIndex("by_updated")
+      .order("desc")
+      .first();
+    if (latest === null) {
       return null;
     }
-    manifests.sort((a, b) => b.updatedAt - a.updatedAt);
-    // biome-ignore lint/style/noNonNullAssertion: length checked above
-    const latest = manifests[0]!;
     return {
       goldenTag: latest.goldenTag,
       generated: latest.generated,

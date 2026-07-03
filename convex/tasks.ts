@@ -16,6 +16,7 @@ import {
   query,
 } from "./_generated/server";
 import { devboxSecretOk, enqueueCommandRow } from "./commands";
+import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 import { devboxByDevboxId } from "./devboxes";
 import type { StoredFile } from "./files";
 import { machineByMachineId, releaseLocalAgentForTask } from "./local";
@@ -277,11 +278,36 @@ export async function stopTaskCore(
           reason: `local machine ${task.localMachineId} is no longer serving task ${taskId} — nothing to interrupt`,
         };
       }
+      // An OFFLINE daemon will never post the "stopped" event this stop
+      // otherwise waits for — and once the machine is released, a later
+      // daemon reboot's reconcile pass has nothing to key off. Stop the task
+      // terminally in place instead (the queued interrupt still cleans up a
+      // session that unexpectedly resurfaces).
+      const offline = Date.now() - machine.lastSeenAt > HEARTBEAT_FRESHNESS_MS;
       await releaseLocalAgentForTask(
         ctx,
-        taskId,
+        task,
         "The task was stopped before this request was answered.",
+        { freeMachine: offline },
       );
+      if (offline) {
+        const now = Date.now();
+        const summary =
+          "Stopped while the machine's daemon was offline (no live session to interrupt).";
+        await ctx.db.patch(task._id, {
+          status: "stopped",
+          lastSummary: summary,
+          updatedAt: now,
+          finishedAt: now,
+        });
+        await ctx.db.insert("taskEvents", {
+          taskId: task.taskId,
+          machineId: task.localMachineId,
+          type: "stopped",
+          summary,
+          ts: now,
+        });
+      }
       if (notes.interruptRequestedText !== undefined) {
         await ctx.scheduler.runAfter(0, internal.notify.taskNote, {
           taskId,
@@ -316,11 +342,12 @@ export async function stopTaskCore(
     payload: JSON.stringify(payload),
   });
   // #138: a split task's local helper is released alongside the cloud
-  // interrupt (frees the machine, unblocks any awaited peer requests).
+  // interrupt (stops the helper session, unblocks any awaited peer requests;
+  // the machine's busy marker frees via the daemon's own signals).
   if (task.localMachineId !== undefined) {
     await releaseLocalAgentForTask(
       ctx,
-      taskId,
+      task,
       "The task was stopped before this request was answered.",
     );
   }
@@ -439,6 +466,9 @@ export const activeWithLatestEvent = internalQuery({
           taskId: task.taskId,
           title: task.title,
           devboxId: task.devboxId,
+          // #138: local-primary tasks derive their staleness status line from
+          // the machine's daemon heartbeat instead of a devbox.
+          localMachineId: task.localMachineId,
           slackChannel: task.slackChannel,
           slackThreadTs: task.slackThreadTs,
           lastNudgedAt: task.lastNudgedAt,

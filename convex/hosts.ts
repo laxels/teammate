@@ -31,7 +31,7 @@ import {
 import { HEARTBEAT_FRESHNESS_MS } from "./constants";
 import { devboxByDevboxId } from "./devboxes";
 import { resolveDeliverableFiles, type StoredFile } from "./files";
-import { releaseLocalAgentForTask } from "./local";
+import { publicMachine, releaseLocalAgentForTask } from "./local";
 import { taskByTaskId } from "./tasks";
 
 /** Apple's EULA allows 2 concurrent macOS VMs per host. */
@@ -247,7 +247,7 @@ async function terminallyFailTask(
   // #138: a split task's local helper is released with the failing task.
   await releaseLocalAgentForTask(
     ctx,
-    args.taskId,
+    task,
     "The task failed before this request was answered.",
   );
 }
@@ -623,14 +623,7 @@ export async function fleetSnapshotData(ctx: QueryCtx) {
     // #138: the users' own Macs running the localagent daemon — not fleet
     // capacity (never allocated for cloud work), listed for observability
     // and the orchestrator's routing decisions.
-    localMachines: localMachines.map((m) => ({
-      machineId: m.machineId,
-      displayName: m.displayName,
-      ownerSlackUser: m.ownerSlackUser,
-      taskId: m.taskId,
-      lastSeenAt: m.lastSeenAt,
-      online: now - m.lastSeenAt <= HEARTBEAT_FRESHNESS_MS,
-    })),
+    localMachines: localMachines.map((m) => publicMachine(m, now)),
     hosts: hosts.map((host) => ({
       hostId: host.hostId,
       status: host.status,

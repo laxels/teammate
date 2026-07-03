@@ -41,6 +41,95 @@ function localSecretOk(request: Request): boolean {
   );
 }
 
+type SecretGate = (request: Request) => boolean;
+
+// ---- Shared route bodies (#138) ----
+// The devbox and local trust tiers expose the same storage plumbing
+// (generateUploadUrl / file serve / artifact upload) behind different secret
+// gates; one factory per body keeps the sibling routes in lockstep.
+
+/** POST -> { url }: a short-lived Convex storage upload URL (the
+ * generateUploadUrl flow keeps large/binary blobs off the size-capped
+ * HTTP-action path). */
+function uploadUrlRoute(gate: SecretGate) {
+  return httpAction(async (ctx, request) => {
+    if (!gate(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const url = await ctx.storage.generateUploadUrl();
+    return Response.json({ url });
+  });
+}
+
+/** GET ?storageId= -> blob bytes. Serving through the secret-gated endpoint
+ * (instead of a public ctx.storage.getUrl link in a command payload) keeps
+ * private Slack files from being fetchable by anyone who sees the payload. */
+function storedFileRoute(gate: SecretGate) {
+  return httpAction(async (ctx, request) => {
+    if (!gate(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const storageId = new URL(request.url).searchParams.get("storageId");
+    if (storageId === null || storageId === "") {
+      return new Response("missing storageId", { status: 400 });
+    }
+    // get() returns null for a missing/pruned blob; an invalid id throws —
+    // either way the caller gets a non-2xx and reports the file as
+    // undownloadable.
+    let blob: Blob | null;
+    try {
+      blob = await ctx.storage.get(storageId as Id<"_storage">);
+    } catch {
+      blob = null;
+    }
+    if (blob === null) {
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(blob);
+  });
+}
+
+/** POST multipart (file, taskId, filename, title?, comment?) -> 202: stage the
+ * bytes and hand off to artifacts.uploadToSlack, which posts them into the
+ * task's thread and then deletes the blob. */
+function artifactRoute(gate: SecretGate) {
+  return httpAction(async (ctx, request) => {
+    if (!gate(request)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return new Response("expected multipart/form-data", { status: 400 });
+    }
+    const file = form.get("file");
+    const taskId = form.get("taskId");
+    const filename = form.get("filename");
+    if (
+      !(file instanceof Blob) ||
+      typeof taskId !== "string" ||
+      typeof filename !== "string"
+    ) {
+      return new Response("expected file, taskId, filename", { status: 400 });
+    }
+    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
+      return new Response("payload too large", { status: 413 });
+    }
+    const title = form.get("title");
+    const comment = form.get("comment");
+    const storageId = await ctx.storage.store(file);
+    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
+      taskId,
+      storageId,
+      filename,
+      ...(typeof title === "string" && title !== "" ? { title } : {}),
+      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
+    });
+    return new Response(null, { status: 202 });
+  });
+}
+
 /** The single global fleet lock name (see convex/fleetLock.ts). The
  * golden-refresh op (#89) takes this SAME lock: it mutates live fleet state, so
  * it must serialize against provisioning and against another roll. */
@@ -212,42 +301,7 @@ http.route({
 http.route({
   path: "/devbox/artifact",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    if (!devboxSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-
-    let form: FormData;
-    try {
-      form = await request.formData();
-    } catch {
-      return new Response("expected multipart/form-data", { status: 400 });
-    }
-    const file = form.get("file");
-    const taskId = form.get("taskId");
-    const filename = form.get("filename");
-    if (
-      !(file instanceof Blob) ||
-      typeof taskId !== "string" ||
-      typeof filename !== "string"
-    ) {
-      return new Response("expected file, taskId, filename", { status: 400 });
-    }
-    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
-      return new Response("payload too large", { status: 413 });
-    }
-    const title = form.get("title");
-    const comment = form.get("comment");
-    const storageId = await ctx.storage.store(file);
-    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
-      taskId,
-      storageId,
-      filename,
-      ...(typeof title === "string" && title !== "" ? { title } : {}),
-      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
-    });
-    return new Response(null, { status: 202 });
-  }),
+  handler: artifactRoute(devboxSecretOk),
 });
 
 // Shared storage upload URL: returns a short-lived Convex storage upload URL a
@@ -259,13 +313,7 @@ http.route({
 http.route({
   path: "/devbox/recording/upload-url",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    if (!devboxSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    const url = await ctx.storage.generateUploadUrl();
-    return Response.json({ url });
-  }),
+  handler: uploadUrlRoute(devboxSecretOk),
 });
 
 // Gateway -> orchestrator screen-recording lifecycle (see shared/protocol.ts):
@@ -352,27 +400,7 @@ http.route({
 http.route({
   path: "/devbox/file",
   method: "GET",
-  handler: httpAction(async (ctx, request) => {
-    if (!devboxSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    const storageId = new URL(request.url).searchParams.get("storageId");
-    if (storageId === null || storageId === "") {
-      return new Response("missing storageId", { status: 400 });
-    }
-    // get() returns null for a missing/pruned blob; an invalid id throws —
-    // either way the gateway gets a non-2xx and reports the file as undownloadable.
-    let blob: Blob | null;
-    try {
-      blob = await ctx.storage.get(storageId as Id<"_storage">);
-    } catch {
-      blob = null;
-    }
-    if (blob === null) {
-      return new Response("not found", { status: 404 });
-    }
-    return new Response(blob);
-  }),
+  handler: storedFileRoute(devboxSecretOk),
 });
 
 // ---- Cloud-agent peer surface (#138, x-devbox-secret) ----
@@ -504,38 +532,14 @@ http.route({
 http.route({
   path: "/local/upload-url",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    if (!localSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    const url = await ctx.storage.generateUploadUrl();
-    return Response.json({ url });
-  }),
+  handler: uploadUrlRoute(localSecretOk),
 });
 
 // Staged Slack attachments for local tasks — /devbox/file's sibling.
 http.route({
   path: "/local/file",
   method: "GET",
-  handler: httpAction(async (ctx, request) => {
-    if (!localSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    const storageId = new URL(request.url).searchParams.get("storageId");
-    if (storageId === null || storageId === "") {
-      return new Response("missing storageId", { status: 400 });
-    }
-    let blob: Blob | null;
-    try {
-      blob = await ctx.storage.get(storageId as Id<"_storage">);
-    } catch {
-      blob = null;
-    }
-    if (blob === null) {
-      return new Response("not found", { status: 404 });
-    }
-    return new Response(blob);
-  }),
+  handler: storedFileRoute(localSecretOk),
 });
 
 // Local agent artifact upload — /devbox/artifact's sibling (same multipart
@@ -543,41 +547,7 @@ http.route({
 http.route({
   path: "/local/artifact",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    if (!localSecretOk(request)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    let form: FormData;
-    try {
-      form = await request.formData();
-    } catch {
-      return new Response("expected multipart/form-data", { status: 400 });
-    }
-    const file = form.get("file");
-    const taskId = form.get("taskId");
-    const filename = form.get("filename");
-    if (
-      !(file instanceof Blob) ||
-      typeof taskId !== "string" ||
-      typeof filename !== "string"
-    ) {
-      return new Response("expected file, taskId, filename", { status: 400 });
-    }
-    if (file.size > MAX_OUTBOUND_FILE_BYTES) {
-      return new Response("payload too large", { status: 413 });
-    }
-    const title = form.get("title");
-    const comment = form.get("comment");
-    const storageId = await ctx.storage.store(file);
-    await ctx.scheduler.runAfter(0, internal.artifacts.uploadToSlack, {
-      taskId,
-      storageId,
-      filename,
-      ...(typeof title === "string" && title !== "" ? { title } : {}),
-      ...(typeof comment === "string" && comment !== "" ? { comment } : {}),
-    });
-    return new Response(null, { status: 202 });
-  }),
+  handler: artifactRoute(localSecretOk),
 });
 
 // A local agent answers a peer request (the reply_to_cloud tool).

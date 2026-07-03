@@ -9,6 +9,8 @@
 //     (params + result in one pill), matching the steering sidebar.
 //   - Assistant text is a single full-text row (no summary/detail split).
 
+import { PEER_EVENT_TYPES } from "../../shared/protocol";
+
 export type RawEvent = {
   type: string;
   summary: string;
@@ -95,9 +97,11 @@ export function buildTimeline(events: RawEvent[]): TimelineRow[] {
           local: e.source === "local",
         });
         break;
-      // #138: peer-channel traffic between a split task's agents.
-      case "peer_request":
-      case "peer_reply":
+      // #138: peer-channel traffic between a split task's agents
+      // (PEER_EVENT_TYPES — the switch needs the literals, the import keeps
+      // producer and consumer in one grep).
+      case PEER_EVENT_TYPES[0]:
+      case PEER_EVENT_TYPES[1]:
         rows.push({
           kind: "peer",
           ts: e.ts,

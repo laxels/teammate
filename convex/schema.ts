@@ -506,5 +506,9 @@ export default defineSchema({
     generated: v.string(),
     curated: v.string(),
     updatedAt: v.number(),
-  }).index("by_tag", ["goldenTag"]),
+  })
+    .index("by_tag", ["goldenTag"])
+    // capabilities.current runs on every orchestrator turn: newest row via
+    // index, never a whole-table scan of multi-KB manifest bodies.
+    .index("by_updated", ["updatedAt"]),
 });

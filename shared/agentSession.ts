@@ -296,12 +296,19 @@ export class AgentSessionManager {
       model: MODEL,
       effort: request.effort ?? DEFAULT_EFFORT,
       systemPrompt: this.#systemPrompt,
-      permissionMode: "bypassPermissions",
-      // AskUserQuestion is the one tool bypassPermissions can't auto-allow
-      // (requiresUserInteraction): without this callback the CLI fails the
-      // call instantly and the "answer by replying in the thread" flow is
-      // dead. Everything else passes through the optional tool gate (#138:
-      // the localagent's hard bans), then defaults to allow.
+      // Permission wiring is LOAD-BEARING for the tool gate: under
+      // "bypassPermissions" the CLI auto-allows every tool WITHOUT consulting
+      // canUseTool — only AskUserQuestion (requiresUserInteraction) ever
+      // reaches the callback. A gated session (#138: the localagent's hard
+      // bans on the user's real Mac) must therefore run in "default" mode,
+      // where every tool call routes through canUseTool and the gate actually
+      // executes. Ungated sessions (devbox gateway) keep the bypass fast path.
+      permissionMode: this.#toolGate !== null ? "default" : "bypassPermissions",
+      // AskUserQuestion is the one tool bypassPermissions can't auto-allow:
+      // without this callback the CLI fails the call instantly and the
+      // "answer by replying in the thread" flow is dead. In "default" mode
+      // this callback additionally runs the tool gate for every other tool,
+      // then defaults to allow.
       canUseTool: async (toolName, input) => {
         if (toolName === "AskUserQuestion") {
           return await this.#awaitAnswer(input);
@@ -312,7 +319,9 @@ export class AgentSessionManager {
         }
         return { behavior: "allow", updatedInput: input };
       },
-      allowDangerouslySkipPermissions: true,
+      ...(this.#toolGate !== null
+        ? {}
+        : { allowDangerouslySkipPermissions: true }),
       cwd: request.cwd ?? homedir(),
       // Subprocess stderr into the gateway log: hung sessions must leave
       // evidence (a first-turn hang on 2026-06-12 left none).

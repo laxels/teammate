@@ -53,14 +53,18 @@ if (!existsSync(config.cuaDriverBin)) {
 const authHeader = { "x-local-secret": config.localMachineSecret };
 const inboxBaseDir = join(homedir(), ".ultraclaude", "local-inbox");
 
+// One sender for the session AND the out-of-session failure events below
+// (deliveries serialize on its queue either way).
+const emitEvent = createAgentEventSender({
+  convexSiteUrl: config.convexSiteUrl,
+  endpointPath: "/local/events",
+  authHeader,
+  identity: { machineId: config.machineId },
+  logPrefix: "localagent",
+});
+
 const session = new AgentSessionManager({
-  emitEvent: createAgentEventSender({
-    convexSiteUrl: config.convexSiteUrl,
-    endpointPath: "/local/events",
-    authHeader,
-    identity: { machineId: config.machineId },
-    logPrefix: "localagent",
-  }),
+  emitEvent,
   uploadScreenshot: createAgentScreenshotUploader({
     convexSiteUrl: config.convexSiteUrl,
     uploadUrlPath: "/local/upload-url",
@@ -123,16 +127,24 @@ async function executeStart(payload: string): Promise<void> {
   }
   const taskId = body.taskId;
   if (session.status().running) {
-    // Mirrors the gateway's 409 handling: a single-session daemon must not
-    // fight for the slot; fail the incoming task loudly instead.
-    console.error(
-      `[localagent] start for ${taskId} rejected: a session is already running`,
-    );
-    await emitFailed(
-      taskId,
-      "The local machine's agent is busy with another session — the task was rejected. Retry once the machine frees.",
-    );
-    return;
+    // A FINISHED session legitimately lingers (finished-but-steerable, and a
+    // stopped session's subprocess takes a moment to wind down): evict it and
+    // wait — the machine was only marked free because its task ended. A
+    // genuinely mid-task session is a placement bug; fail the newcomer loudly
+    // rather than fight for the slot (mirrors the gateway's 409 handling).
+    if (session.terminalEmitted()) {
+      await session.stop();
+    }
+    if (!session.terminalEmitted() || !(await waitForIdle())) {
+      console.error(
+        `[localagent] start for ${taskId} rejected: a session is already running`,
+      );
+      await emitFailed(
+        taskId,
+        "The local machine's agent is busy with another session — the task was rejected. Retry once the machine frees.",
+      );
+      return;
+    }
   }
   const suffix = await stagedPromptSuffix(
     taskId,
@@ -189,18 +201,30 @@ async function executeInterrupt(payload: string): Promise<void> {
     return;
   }
   await session.stop();
+  // Drain the wind-down before acking: the next serialized command may be a
+  // start for this just-freed machine.
+  await waitForIdle();
 }
 
 async function emitFailed(taskId: string, summary: string): Promise<void> {
   // One-off event outside the session (which never started for this task).
-  const send = createAgentEventSender({
-    convexSiteUrl: config.convexSiteUrl,
-    endpointPath: "/local/events",
-    authHeader,
-    identity: { machineId: config.machineId },
-    logPrefix: "localagent",
-  });
-  await send(taskId, "failed", summary);
+  await emitEvent(taskId, "failed", summary);
+}
+
+/** Wait for the session's wind-down to finish. session.stop() resolves once
+ * the interrupt is REQUESTED; #running clears only when the SDK subprocess
+ * stream actually ends, typically a moment later. The serialized command
+ * chain executes an interrupt then the next start back-to-back, so without
+ * this wait a start placed on the just-freed machine would busy-reject. */
+async function waitForIdle(timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (session.status().running) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return true;
 }
 
 async function execute(command: PendingLocalCommand): Promise<void> {
@@ -247,6 +271,7 @@ const stopConsumer = startLocalConsumer({
   secret: config.localMachineSecret,
   displayName: config.displayName,
   ownerSlackUser: config.ownerSlackUser,
+  getSessionTaskId: () => session.status().taskId,
   execute,
 });
 

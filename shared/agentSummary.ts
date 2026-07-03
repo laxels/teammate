@@ -159,7 +159,9 @@ export function extractToolResults(message: SDKUserMessage): ToolResultInfo[] {
  * "left_click") so the timeline shows the bare action name. */
 export function prettyToolName(name: string): string {
   const parts = name.split("__");
-  return parts.length > 1 ? (parts.at(-1) as string) : name;
+  // No Array.prototype.at: this module is bundled into the Convex functions
+  // build (via src/orchestration.ts), whose tsconfig lib predates es2022.
+  return parts.length > 1 ? (parts[parts.length - 1] as string) : name;
 }
 
 /** Best-effort one-line JSON of a tool's input for the collapsed `detail`. */

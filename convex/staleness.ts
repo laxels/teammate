@@ -49,7 +49,26 @@ export const checkStaleTasks = internalAction({
         devbox === null ? null : monitoringUrl(devbox.gatewayUrl);
 
       let statusPart: string;
-      if (devbox === null) {
+      if (devbox === null && task.localMachineId !== undefined) {
+        // #138: a local-primary task's liveness signal is its machine's
+        // daemon heartbeat, not a devbox.
+        const machine = await ctx.runQuery(internal.local.getMachine, {
+          machineId: task.localMachineId,
+        });
+        if (machine === null) {
+          statusPart = `local machine ${task.localMachineId} is not registered`;
+        } else {
+          const heartbeatMin = Math.round((now - machine.lastSeenAt) / 60_000);
+          const heartbeatPart =
+            now - machine.lastSeenAt <= HEARTBEAT_FRESHNESS_MS
+              ? `last local-machine heartbeat ${heartbeatMin}m ago`
+              : `no local-machine heartbeat for ${heartbeatMin}m — its daemon may be off`;
+          statusPart =
+            machine.taskId === task.taskId
+              ? heartbeatPart
+              : `${heartbeatPart}, and the machine is no longer serving this task`;
+        }
+      } else if (devbox === null) {
         statusPart = "no devbox is assigned to this task";
       } else {
         const heartbeatMin = Math.round((now - devbox.lastSeenAt) / 60_000);

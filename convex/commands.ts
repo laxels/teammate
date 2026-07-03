@@ -1,5 +1,5 @@
 import { type Infer, v } from "convex/values";
-import { timingSafeEqual } from "../shared/auth";
+import { secretMatches } from "../shared/auth";
 import {
   internalMutation,
   type MutationCtx,
@@ -9,27 +9,10 @@ import {
 import { devboxByDevboxId } from "./devboxes";
 import { commandKindValidator } from "./schema";
 
-/**
- * Constant-time check of a caller-supplied secret against its expected env
- * value; an unset/empty expected secret denies everything. On mismatch it
- * returns false and console.warns `warnMessage` — callers no-op rather than
- * throw, so a misconfigured client sees empty results instead of generating
- * error spam, while the warn keeps the mismatch diagnosable.
- */
-export function secretMatches(
-  expected: string | undefined,
-  provided: string,
-  warnMessage: string,
-): boolean {
-  const ok =
-    expected !== undefined &&
-    expected !== "" &&
-    timingSafeEqual(provided, expected);
-  if (!ok) {
-    console.warn(warnMessage);
-  }
-  return ok;
-}
+// Re-exported for the modules that historically imported it from here
+// (dashboard.ts); the implementation lives in shared/auth.ts (#138 moved it
+// so convex/local.ts can use it without an import cycle through this file).
+export { secretMatches } from "../shared/auth";
 
 /**
  * Gateways and host agents authenticate with the same shared secret used for

@@ -418,10 +418,13 @@ async function executeTool(
         });
         if (!placed.ok) {
           // The machine was taken between the pick and the place (or went
-          // offline): fail the row so it can't strand as queued-forever.
-          await ctx.runMutation(internal.tasks.forceStatus, {
+          // offline). The row is still an unplaced "queued" task at this
+          // point, so the queued-cancel path retires it properly (terminal
+          // status + finishedAt + a taskEvents row + the thread note) instead
+          // of a bare status flip.
+          await ctx.runMutation(internal.tasks.stop, {
             taskId,
-            status: "failed",
+            queuedCancelText: `:octagonal_sign: *${title}* (\`${taskId}\`) could not start on the local machine: ${placed.reason ?? "placement failed"}.`,
           });
           return toolError(
             `could not place the local task: ${placed.reason ?? "unknown"}`,

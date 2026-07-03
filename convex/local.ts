@@ -13,10 +13,11 @@
 // it for the local-release hooks); it keeps its own task lookup.
 
 import { type Infer, v } from "convex/values";
-import { timingSafeEqual } from "../shared/auth";
+import { secretMatches } from "../shared/auth";
 import {
   type InterruptPayload,
   isTerminalTaskStatus,
+  LOCAL_ACCESS_DENIED_REPLY,
   PEER_BODY_MAX_CHARS,
   type StartTaskRequest,
   shouldApplyTaskStatus,
@@ -46,22 +47,16 @@ import { commandKindValidator } from "./schema";
  * Local daemons authenticate with LOCAL_MACHINE_SECRET — their own trust
  * tier, deliberately not the fleet-wide devbox secret: a leaked fleet
  * credential must never grant the ability to drive a user's real machine
- * (and vice versa). Deliberately NOT commands.ts's secretMatches: importing
- * it would close an import cycle (devboxes -> local -> commands -> devboxes),
- * since tasks.ts and devboxes.ts import this module for the release hooks.
+ * (and vice versa). secretMatches lives in shared/auth.ts (not commands.ts)
+ * so importing it here can't close an import cycle (devboxes -> local ->
+ * commands -> devboxes).
  */
 export function localSecretOk(secret: string, context = "local"): boolean {
-  const expected = process.env.LOCAL_MACHINE_SECRET;
-  const ok =
-    expected !== undefined &&
-    expected !== "" &&
-    timingSafeEqual(secret, expected);
-  if (!ok) {
-    console.warn(
-      `${context}: local machine secret mismatch (or LOCAL_MACHINE_SECRET unset); ignoring request`,
-    );
-  }
-  return ok;
+  return secretMatches(
+    process.env.LOCAL_MACHINE_SECRET,
+    secret,
+    `${context}: local machine secret mismatch (or LOCAL_MACHINE_SECRET unset); ignoring request`,
+  );
 }
 
 /** Own copy of the task lookup (tasks.ts imports this module). */
@@ -87,15 +82,61 @@ function machineOnline(machine: MachineRow, now: number): boolean {
 
 // ---- Registration / heartbeat ----
 
-/** Self-registering liveness signal, mirroring hosts.heartbeat: the first
+/** True when a start command for `taskId` is still on its way to the machine
+ * (pending, or claimed-but-unacked while the daemon downloads files / boots
+ * the session). While one is in flight, a heartbeat that doesn't yet report
+ * the task must not be read as "the session is gone". */
+async function startInFlight(
+  ctx: QueryCtx,
+  machineId: string,
+  taskId: string,
+): Promise<boolean> {
+  for (const status of ["pending", "running"] as const) {
+    const rows = await ctx.db
+      .query("localCommands")
+      .withIndex("by_machine_status", (q) =>
+        q.eq("machineId", machineId).eq("status", status),
+      )
+      .collect();
+    for (const row of rows) {
+      if (row.kind !== "start") {
+        continue;
+      }
+      try {
+        if (
+          (JSON.parse(row.payload) as { taskId?: unknown }).taskId === taskId
+        ) {
+          return true;
+        }
+      } catch {
+        // Malformed payload can't be correlated; ignore.
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Self-registering liveness signal, mirroring hosts.heartbeat: the first
  * heartbeat creates the machine row; later ones refresh lastSeenAt and the
- * reported metadata. */
+ * reported metadata.
+ *
+ * The heartbeat also RECONCILES the machine's busy marker: the daemon reports
+ * the task its live session serves (`taskId`), and a machine still marked
+ * busy for a task the daemon is NOT running — with no start command in
+ * flight — is freed. This is the release path for sessions that end without
+ * a terminal event (an interrupt landing on an idle helper emits nothing) and
+ * the self-heal for any marker leak; releaseLocalAgentForTask deliberately
+ * does NOT free the machine (the session is still winding down when it runs).
+ */
 export const heartbeat = mutation({
   args: {
     machineId: v.string(),
     secret: v.string(),
     displayName: v.optional(v.string()),
     ownerSlackUser: v.optional(v.string()),
+    /** The task the daemon's live session currently serves, if any. */
+    taskId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     if (!localSecretOk(args.secret)) {
@@ -118,23 +159,37 @@ export const heartbeat = mutation({
       });
       return;
     }
-    await ctx.db.patch(machine._id, { lastSeenAt: Date.now(), ...reported });
+    const freeStaleAssignment =
+      machine.taskId !== undefined &&
+      machine.taskId !== args.taskId &&
+      !(await startInFlight(ctx, args.machineId, machine.taskId));
+    await ctx.db.patch(machine._id, {
+      lastSeenAt: Date.now(),
+      ...reported,
+      ...(freeStaleAssignment ? { taskId: undefined } : {}),
+    });
   },
 });
+
+/** The public projection of a machine row (dashboard fleet cell, orchestrator
+ * <local_machines> section, hosts.fleetSnapshotData). */
+export function publicMachine(m: MachineRow, now: number) {
+  return {
+    machineId: m.machineId,
+    displayName: m.displayName,
+    ownerSlackUser: m.ownerSlackUser,
+    taskId: m.taskId,
+    lastSeenAt: m.lastSeenAt,
+    online: machineOnline(m, now),
+  };
+}
 
 export const listMachines = internalQuery({
   args: {},
   handler: async (ctx) => {
     const machines = await ctx.db.query("localMachines").collect();
     const now = Date.now();
-    return machines.map((m) => ({
-      machineId: m.machineId,
-      displayName: m.displayName,
-      ownerSlackUser: m.ownerSlackUser,
-      taskId: m.taskId,
-      lastSeenAt: m.lastSeenAt,
-      online: machineOnline(m, now),
-    }));
+    return machines.map((m) => publicMachine(m, now));
   },
 });
 
@@ -276,9 +331,11 @@ export const recordEvent = internalMutation({
         : { imageStorageId: args.imageStorageId }),
     });
 
-    // Any event proves daemon liveness.
+    // Any event proves daemon liveness. Info events arrive ~every agent step,
+    // so only write when meaningfully staler than the 60s heartbeat cadence —
+    // each patch fans out to every subscription on the row.
     const machine = await machineByMachineId(ctx, args.machineId);
-    if (machine !== null) {
+    if (machine !== null && Date.now() - machine.lastSeenAt > 30_000) {
       await ctx.db.patch(machine._id, { lastSeenAt: Date.now() });
     }
 
@@ -320,12 +377,14 @@ export const recordEvent = internalMutation({
 
     if (task !== null && isCurrentAssignment) {
       if (isPrimary && applies && isTerminalTaskStatus(incomingStatus)) {
-        // Primary local task finished: free the machine (and stop the
-        // session, which idles finished-but-steerable otherwise).
+        // Primary local task finished: the daemon itself reported the
+        // terminal status, so the session is done — free the machine now and
+        // stop the (finished-but-steerable) session.
         await releaseLocalAgentForTask(
           ctx,
-          args.taskId,
+          task,
           `The task ended (${incomingStatus}) before this request was answered.`,
+          { freeMachine: true },
         );
       } else if (
         !isPrimary &&
@@ -334,15 +393,15 @@ export const recordEvent = internalMutation({
         // Helper agent died mid-task: unblock the cloud agent. "completed"
         // is NOT synthesized — a helper completes a turn after every
         // answered request, and a request delivered mid-turn would be
-        // answered on the next one.
+        // answered on the next one. The machine frees now: the daemon just
+        // told us the session ended.
         await synthesizePeerReplies(
           ctx,
           args.taskId,
           `The local agent ended (${args.type}) before answering this request: ${excerptLine(args.summary)}`,
         );
-        const m = await machineByMachineId(ctx, args.machineId);
-        if (m !== null && m.taskId === args.taskId) {
-          await ctx.db.patch(m._id, { taskId: undefined });
+        if (machine !== null && machine.taskId === args.taskId) {
+          await ctx.db.patch(machine._id, { taskId: undefined });
         }
       }
     }
@@ -474,16 +533,65 @@ export type PeerRequestState =
   | "permission_pending"
   | "denied"
   | "machine_busy"
+  | "machine_offline"
   | "no_machine"
   | "unknown_task"
   | "not_your_task"
   | "task_terminal";
 
 /**
+ * The machine a spawn (or permission ask) should target, honoring the
+ * ownership rule: a FREE eligible machine wins; when every eligible machine
+ * is busy the pick reports that (a busy owned machine must not shadow a free
+ * unowned one — hence the two-pass filter); no eligible machine at all is the
+ * caller's "no_machine".
+ */
+async function pickSpawnMachine(
+  ctx: QueryCtx,
+  preferOwner: string | undefined,
+): Promise<
+  | { kind: "free"; machine: MachineRow }
+  | { kind: "busy"; machine: MachineRow }
+  | { kind: "none" }
+> {
+  const machines = await ctx.db.query("localMachines").collect();
+  const now = Date.now();
+  const opts = { preferOwner, now, freshnessMs: HEARTBEAT_FRESHNESS_MS };
+  const free = pickLocalMachine(
+    machines.filter((m) => m.taskId === undefined),
+    opts,
+  );
+  if (free !== null) {
+    return { kind: "free", machine: free };
+  }
+  const any = pickLocalMachine(machines, opts);
+  return any === null ? { kind: "none" } : { kind: "busy", machine: any };
+}
+
+/** The task's existing peer row for a requestId, if any. requestIds are
+ * task-scoped: the by_request index can legitimately hold same-requestId rows
+ * from different tasks, so lookups filter — never `.unique()`. */
+async function peerRowFor(
+  ctx: QueryCtx,
+  taskId: string,
+  requestId: string,
+  kind: "request" | "reply",
+) {
+  const rows = await ctx.db
+    .query("peerMessages")
+    .withIndex("by_request", (q) =>
+      q.eq("requestId", requestId).eq("kind", kind),
+    )
+    .collect();
+  return rows.find((r) => r.taskId === taskId) ?? null;
+}
+
+/**
  * A cloud agent requests local work (POST /devbox/peer/request). Records the
  * request, then either delivers it to the live local agent, spawns one (grant
  * present, machine free), or kicks off the permission flow. Idempotent on
- * requestId: a retried POST reports state without duplicating the request.
+ * (taskId, requestId): a retried POST reports state without duplicating the
+ * request.
  */
 export const peerRequest = internalMutation({
   args: {
@@ -509,12 +617,12 @@ export const peerRequest = internalMutation({
     }
 
     const body = args.body.slice(0, PEER_BODY_MAX_CHARS);
-    const existing = await ctx.db
-      .query("peerMessages")
-      .withIndex("by_request", (q) =>
-        q.eq("requestId", args.requestId).eq("kind", "request"),
-      )
-      .unique();
+    const existing = await peerRowFor(
+      ctx,
+      args.taskId,
+      args.requestId,
+      "request",
+    );
     const isNew = existing === null;
     if (isNew) {
       await insertPeerRow(ctx, {
@@ -538,14 +646,17 @@ export const peerRequest = internalMutation({
           taskId: args.taskId,
           requestId: args.requestId,
           kind: "reply",
-          body: "Local-machine access was denied for this task. Continue cloud-only, best effort, and note the limitation in your result.",
+          body: LOCAL_ACCESS_DENIED_REPLY,
         });
       }
       return { state: "denied" };
     }
 
     if (access?.status === "granted") {
-      // Live agent: deliver directly (the orchestrator LLM is out of the loop).
+      // Live agent: deliver directly (the orchestrator LLM is out of the
+      // loop). Delivery is enqueued even when the daemon's heartbeat is stale
+      // (it consumes on reconnect), but the state is honest about it so the
+      // cloud agent can apply its deadline instead of trusting "delivered".
       if (task.localMachineId !== undefined) {
         const machine = await machineByMachineId(ctx, task.localMachineId);
         if (machine !== null && machine.taskId === task.taskId) {
@@ -560,27 +671,27 @@ export const peerRequest = internalMutation({
               payload: JSON.stringify(payload),
             });
           }
-          return { state: "delivered", machineId: machine.machineId };
+          return {
+            state: machineOnline(machine, Date.now())
+              ? "delivered"
+              : "machine_offline",
+            machineId: machine.machineId,
+          };
         }
       }
       // No live agent: spawn one on a free machine.
-      const machines = await ctx.db.query("localMachines").collect();
-      const machine = pickLocalMachine(machines, {
-        preferOwner: task.slackUser,
-        now: Date.now(),
-        freshnessMs: HEARTBEAT_FRESHNESS_MS,
-      });
-      if (machine === null) {
+      const pick = await pickSpawnMachine(ctx, task.slackUser);
+      if (pick.kind === "none") {
         return { state: "no_machine" };
       }
-      if (machine.taskId !== undefined && machine.taskId !== task.taskId) {
-        return { state: "machine_busy", machineId: machine.machineId };
+      if (pick.kind === "busy") {
+        return { state: "machine_busy", machineId: pick.machine.machineId };
       }
       const pending = await unansweredRequests(ctx, args.taskId);
       await spawnLocalAgent(
         ctx,
         task,
-        machine,
+        pick.machine,
         buildLocalHelperPrompt({
           taskId: task.taskId,
           title: task.title,
@@ -590,18 +701,14 @@ export const peerRequest = internalMutation({
           })),
         }),
       );
-      return { state: "spawned", machineId: machine.machineId };
+      return { state: "spawned", machineId: pick.machine.machineId };
     }
 
     // No grant yet. Only start the permission flow when a machine exists to
-    // grant access TO; otherwise report the gap immediately.
-    const machines = await ctx.db.query("localMachines").collect();
-    const anyCandidate = pickLocalMachine(machines, {
-      preferOwner: task.slackUser,
-      now: Date.now(),
-      freshnessMs: HEARTBEAT_FRESHNESS_MS,
-    });
-    if (anyCandidate === null) {
+    // grant access TO (busy is fine — permission is per-task, not per-slot);
+    // otherwise report the gap immediately.
+    const pick = await pickSpawnMachine(ctx, task.slackUser);
+    if (pick.kind === "none") {
       return { state: "no_machine" };
     }
     if (access?.status === "requested") {
@@ -619,27 +726,31 @@ export const peerRequest = internalMutation({
   },
 });
 
-/** Poll target for the cloud agent's await_local_result tool. */
+/** Poll target for the cloud agent's await_local_result tool. A found reply
+ * short-circuits the status lookups (the poll loop's hot exit); agentActive
+ * additionally requires a FRESH heartbeat, so a dead daemon reads as
+ * inactive and the cloud agent applies its deadline instead of waiting on a
+ * machine that will never answer. */
 export const peerReplyFor = internalQuery({
   args: { taskId: v.string(), requestId: v.string() },
   handler: async (ctx, args) => {
-    const replies = await ctx.db
-      .query("peerMessages")
-      .withIndex("by_request", (q) =>
-        q.eq("requestId", args.requestId).eq("kind", "reply"),
-      )
-      .collect();
-    const reply = replies.find((r) => r.taskId === args.taskId) ?? null;
+    const reply = await peerRowFor(ctx, args.taskId, args.requestId, "reply");
+    if (reply !== null) {
+      return { reply: reply.body, localAccess: null, agentActive: false };
+    }
     const task = await taskByTaskId(ctx, args.taskId);
     const machine =
       task?.localMachineId === undefined
         ? null
         : await machineByMachineId(ctx, task.localMachineId);
     return {
-      reply: reply === null ? null : reply.body,
+      reply: null,
       localAccess: task?.localAccess?.status ?? null,
       agentActive:
-        task !== null && machine !== null && machine.taskId === task.taskId,
+        task !== null &&
+        machine !== null &&
+        machine.taskId === task.taskId &&
+        machineOnline(machine, Date.now()),
     };
   },
 });
@@ -664,22 +775,22 @@ export const peerReply = internalMutation({
         reason: `machine ${args.machineId} is not assigned to task ${args.taskId}`,
       };
     }
-    const request = await ctx.db
-      .query("peerMessages")
-      .withIndex("by_request", (q) =>
-        q.eq("requestId", args.requestId).eq("kind", "request"),
-      )
-      .unique();
-    if (request === null || request.taskId !== args.taskId) {
+    const request = await peerRowFor(
+      ctx,
+      args.taskId,
+      args.requestId,
+      "request",
+    );
+    if (request === null) {
       return { ok: false, reason: `unknown requestId ${args.requestId}` };
     }
-    const answered = await ctx.db
-      .query("peerMessages")
-      .withIndex("by_request", (q) =>
-        q.eq("requestId", args.requestId).eq("kind", "reply"),
-      )
-      .collect();
-    if (answered.some((r) => r.taskId === args.taskId)) {
+    const answered = await peerRowFor(
+      ctx,
+      args.taskId,
+      args.requestId,
+      "reply",
+    );
+    if (answered !== null) {
       return { ok: true, reason: "already answered" };
     }
     await insertPeerRow(ctx, {
@@ -749,8 +860,12 @@ export const resolveAccess = internalMutation({
       const answered = await synthesizePeerReplies(
         ctx,
         args.taskId,
-        "Local-machine access was denied for this task. Continue cloud-only, best effort, and note the limitation in your result.",
+        LOCAL_ACCESS_DENIED_REPLY,
       );
+      // A denial can REVOKE an earlier grant: a live helper session must be
+      // stopped, not left driving the user's machine to finish its request.
+      // (The machine's busy marker frees via the daemon's own signals.)
+      await releaseLocalAgentForTask(ctx, task, LOCAL_ACCESS_DENIED_REPLY);
       return {
         ok: true,
         decision: "denied",
@@ -770,12 +885,8 @@ export const resolveAccess = internalMutation({
       machine = await machineByMachineId(ctx, task.localMachineId);
     }
     if (machine === null) {
-      const machines = await ctx.db.query("localMachines").collect();
-      machine = pickLocalMachine(machines, {
-        preferOwner: args.requester,
-        now: Date.now(),
-        freshnessMs: HEARTBEAT_FRESHNESS_MS,
-      });
+      const pick = await pickSpawnMachine(ctx, args.requester);
+      machine = pick.kind === "none" ? null : pick.machine;
     }
     if (machine === null) {
       return {
@@ -970,32 +1081,50 @@ export const reconcileOrphans = mutation({
   },
 });
 
+/** The task-row slice releaseLocalAgentForTask needs; every caller already
+ * holds the freshly-loaded row, so it is passed in rather than re-queried. */
+export type TaskForRelease = {
+  taskId: string;
+  localMachineId?: string | undefined;
+};
+
 /**
- * Releases a task's local agent: frees the machine, stops the session (the
- * daemon holds it open between turns otherwise), and synthesizes replies for
- * anything still unanswered. Called from every task-terminal path — cloud
- * events (devboxes.recordEvent), stops (tasks.stopTaskCore), provision
- * failures (hosts.terminallyFailTask) — and from the local-primary terminal
- * branch above. Idempotent: a second call finds no assignment and no-ops.
+ * Releases a task's local agent: stops the session (an interrupt — the daemon
+ * holds it open between turns otherwise) and synthesizes replies for anything
+ * still unanswered. Called from every task-terminal path — cloud events
+ * (devboxes.recordEvent), stops (tasks.stopTaskCore), provision failures
+ * (hosts.terminallyFailTask), grant revocation (resolveAccess) — and from the
+ * local-primary terminal branch of recordEvent. Idempotent.
+ *
+ * The machine's busy marker is freed ONLY when `freeMachine` is set: the
+ * session is typically still winding down when this runs, and an eagerly
+ * freed machine lets a new task be placed onto a daemon whose old session is
+ * live (busy-reject race) and erases the marker reconcileOrphans needs when
+ * the daemon is dead (stranded-task bug). The marker instead clears on the
+ * daemon's own signals — the terminal event (recordEvent) or the heartbeat
+ * reconcile — except where the caller KNOWS the session is gone (local
+ * terminal event applied; offline-machine stop).
  */
 export async function releaseLocalAgentForTask(
   ctx: MutationCtx,
-  taskId: string,
+  task: TaskForRelease,
   syntheticReplyText: string,
+  opts: { freeMachine?: boolean } = {},
 ): Promise<void> {
-  const task = await taskByTaskId(ctx, taskId);
-  if (task === null || task.localMachineId === undefined) {
+  if (task.localMachineId === undefined) {
     return;
   }
   const machine = await machineByMachineId(ctx, task.localMachineId);
-  if (machine !== null && machine.taskId === taskId) {
-    await ctx.db.patch(machine._id, { taskId: undefined });
-    const payload: InterruptPayload = { taskId };
+  if (machine !== null && machine.taskId === task.taskId) {
+    if (opts.freeMachine === true) {
+      await ctx.db.patch(machine._id, { taskId: undefined });
+    }
+    const payload: InterruptPayload = { taskId: task.taskId };
     await enqueueLocalCommandRow(ctx, {
       machineId: machine.machineId,
       kind: "interrupt",
       payload: JSON.stringify(payload),
     });
   }
-  await synthesizePeerReplies(ctx, taskId, syntheticReplyText);
+  await synthesizePeerReplies(ctx, task.taskId, syntheticReplyText);
 }

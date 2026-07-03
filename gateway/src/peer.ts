@@ -130,6 +130,8 @@ const STATE_NOTES: Record<string, string> = {
     "The user DENIED local-machine access for this task. Do not re-request. Continue cloud-only best-effort and note the limitation in your result.",
   machine_busy:
     "The user's machine is busy with another task (one local session at a time, no queueing). Re-file the request later, or continue cloud-only.",
+  machine_offline:
+    "The request was queued for the machine's daemon, but its heartbeat is STALE (the Mac may be asleep or off). It will be delivered if the daemon reconnects; poll await_local_result with a short deadline, then continue cloud-only and say so.",
   no_machine:
     "No local machine is available (none registered, offline, or not this user's). Continue cloud-only best-effort and note the limitation in your result.",
   unknown_task: "This task is unknown to the orchestrator — likely a bug.",

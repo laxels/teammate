@@ -30,6 +30,10 @@ export type LocalConsumerOptions = {
   secret: string;
   displayName?: string | undefined;
   ownerSlackUser?: string | undefined;
+  /** The task the live session currently serves (null when idle). Reported
+   * in every heartbeat so Convex can reconcile the machine's busy marker —
+   * the release path for sessions that end without a terminal event. */
+  getSessionTaskId?: () => string | null;
   execute: (command: PendingLocalCommand) => Promise<void>;
   heartbeatIntervalMs?: number;
 };
@@ -44,15 +48,19 @@ export function startLocalConsumer(options: LocalConsumerOptions): () => void {
     refs,
     secret: options.secret,
     subscriptionArgs: { machineId: options.machineId },
-    buildHeartbeatArgs: () => ({
-      machineId: options.machineId,
-      ...(options.displayName === undefined
-        ? {}
-        : { displayName: options.displayName }),
-      ...(options.ownerSlackUser === undefined
-        ? {}
-        : { ownerSlackUser: options.ownerSlackUser }),
-    }),
+    buildHeartbeatArgs: () => {
+      const sessionTaskId = options.getSessionTaskId?.() ?? null;
+      return {
+        machineId: options.machineId,
+        ...(options.displayName === undefined
+          ? {}
+          : { displayName: options.displayName }),
+        ...(options.ownerSlackUser === undefined
+          ? {}
+          : { ownerSlackUser: options.ownerSlackUser }),
+        ...(sessionTaskId === null ? {} : { taskId: sessionTaskId }),
+      };
+    },
     onHeartbeatSuccess: () => {
       if (!heartbeatLogged) {
         heartbeatLogged = true;

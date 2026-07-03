@@ -107,12 +107,13 @@ export const recordEvent = internalMutation({
           : {}),
       });
       // #138: a split task's local helper is released when the cloud (primary)
-      // agent finishes — frees the machine, stops the idle helper session, and
-      // synthesizes replies for anything the helper never answered.
+      // agent finishes — stops the idle helper session and synthesizes replies
+      // for anything the helper never answered. The machine's busy marker
+      // frees via the daemon's own signals (terminal event / heartbeat).
       if (isTerminalTaskStatus(incomingStatus)) {
         await releaseLocalAgentForTask(
           ctx,
-          args.taskId,
+          task,
           `The task ended (${incomingStatus}) before this request was answered.`,
         );
       }

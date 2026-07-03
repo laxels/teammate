@@ -13,6 +13,7 @@ import {
   buildLocalAccessRequestMessage,
   buildStatusCard,
   monitoringUrl,
+  pickLocalMachine,
   replyHintFor,
 } from "../src/orchestration";
 import {
@@ -23,7 +24,7 @@ import {
 } from "../src/slackApi";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
-import { devboxEventTypeValidator } from "./constants";
+import { devboxEventTypeValidator, HEARTBEAT_FRESHNESS_MS } from "./constants";
 
 const RETIRE_GRACE_MIN = Math.round(EPHEMERAL_RETIRE_GRACE_MS / 60_000);
 
@@ -67,11 +68,15 @@ export const devboxEvent = internalAction({
     if (task === null) {
       return;
     }
+    // A split task's LOCAL-agent event carries no devboxId, but the card it
+    // repaints belongs to a devbox-backed task — fall back to the task row's
+    // devbox so the Monitor link never vanishes from the card mid-task.
+    const devboxId = args.devboxId ?? task.devboxId;
     const devbox =
-      args.devboxId === undefined
+      devboxId === undefined
         ? null
         : await ctx.runQuery(internal.devboxes.getByDevboxId, {
-            devboxId: args.devboxId,
+            devboxId,
           });
     const monitorUrl =
       devbox === null ? null : monitoringUrl(devbox.gatewayUrl);
@@ -239,14 +244,15 @@ export const localAccessRequest = internalAction({
     if (task === null) {
       return;
     }
+    // Name the machine the grant would actually land on: the same picker
+    // resolveAccess/peerRequest use (owner-preferring, freshness-gated).
     const machines = await ctx.runQuery(internal.local.listMachines, {});
     const candidate =
-      machines.find(
-        (m) =>
-          m.online &&
-          (m.ownerSlackUser === undefined ||
-            m.ownerSlackUser === task.slackUser),
-      ) ?? machines[0];
+      pickLocalMachine(machines, {
+        preferOwner: task.slackUser,
+        now: Date.now(),
+        freshnessMs: HEARTBEAT_FRESHNESS_MS,
+      }) ?? machines[0];
     await postSlackMessage({
       botToken,
       channel: task.slackChannel,

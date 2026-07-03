@@ -1,9 +1,12 @@
-// Wire contracts between the three Ultraclaude components:
-// monitoring page (web/) <-> devbox gateway (gateway/) <-> orchestrator (convex/).
+// Wire contracts between the Ultraclaude components:
+// monitoring page (web/) <-> devbox gateway (gateway/) <-> orchestrator
+// (convex/) <-> localagent daemon (localagent/, #138).
 //
 // The gateway runs INSIDE each devbox VM and is reachable only over the
 // tailnet. The monitoring page is served statically by the gateway, so all
-// page connections are same-origin.
+// page connections are same-origin. The localagent daemon runs on the user's
+// own Mac and is fully outbound (its contracts are in the "Local machine
+// mode" section below).
 
 // ---- Monitoring page <-> gateway: WebSocket at /ws/steer ----
 
@@ -386,6 +389,12 @@ export type PeerReplyPayload = {
  * bodies are truncated server-side (rows must stay far under Convex's ~1 MB
  * doc cap). Matches DETAIL_MAX_CHARS so a full tool-sized payload fits. */
 export const PEER_BODY_MAX_CHARS = 16_000;
+
+/** The synthetic reply a blocked cloud agent receives when local access is
+ * denied — one constant so the request-after-denial path, the denial
+ * resolution path, and the gateway tool guidance stay in lockstep. */
+export const LOCAL_ACCESS_DENIED_REPLY =
+  "Local-machine access was denied for this task. Continue cloud-only, best effort, and note the limitation in your result.";
 
 /** Timeline-only event types for peer traffic, inserted Convex-side when a
  * request/reply lands (never posted by an agent, never drive task status).

@@ -165,7 +165,7 @@ function peerReplies(t: Tester, requestId: string) {
 
 // ---- stopTaskCore local branches (via the internal.tasks.stop wrapper) ----
 
-test("stop on a local-primary task frees the machine, enqueues the interrupt, and unblocks peers", async () => {
+test("stop on a local-primary task (online machine) interrupts the daemon and unblocks peers, keeping the busy marker", async () => {
   const t = newT();
   await seedTask(t, {
     taskId: "task-lp",
@@ -183,13 +183,19 @@ test("stop on a local-primary task frees the machine, enqueues the interrupt, an
   });
   expect(outcome).toEqual({ kind: "interrupted" });
 
-  // The machine is released and the daemon gets a taskId-guarded interrupt.
-  expect((await loadMachine(t, "mac-1"))?.taskId).toBeUndefined();
+  // The daemon gets a taskId-guarded interrupt, but the busy marker is NOT
+  // eagerly cleared: the session is still winding down, and the daemon's own
+  // signals (stopped event / heartbeat reconcile) free the machine. An eager
+  // clear would let a new task be placed onto a still-live session and
+  // erase the marker a daemon-reboot reconcile keys off.
+  expect((await loadMachine(t, "mac-1"))?.taskId).toBe("task-lp");
   const commands = await localCommands(t);
   expect(commands.map((c) => c.kind)).toEqual(["interrupt"]);
   expect(JSON.parse(commands[0]?.payload ?? "{}")).toEqual({
     taskId: "task-lp",
   });
+  // The task itself stays non-terminal until the daemon's stopped event.
+  expect((await loadTask(t, "task-lp"))?.status).toBe("running");
   // The unanswered peer request got a synthetic reply so a blocked cloud
   // agent would unblock instead of waiting out its deadline.
   const replies = await peerReplies(t, "req-1");
@@ -197,6 +203,47 @@ test("stop on a local-primary task frees the machine, enqueues the interrupt, an
     "The task was stopped before this request was answered.",
   ]);
   await drainScheduled(t); // the attribution taskNote no-ops without a token
+});
+
+test("stop on a local-primary task with an OFFLINE daemon stops it terminally in place", async () => {
+  const t = newT();
+  await seedTask(t, {
+    taskId: "task-lp",
+    status: "running",
+    placement: "local",
+    localMachineId: "mac-1",
+  });
+  // Heartbeat far staler than HEARTBEAT_FRESHNESS_MS (2 min).
+  await t.run(async (ctx) => {
+    await ctx.db.insert("localMachines", {
+      machineId: "mac-1",
+      taskId: "task-lp",
+      lastSeenAt: Date.now() - 10 * 60_000,
+    });
+  });
+
+  const outcome = await t.mutation(internal.tasks.stop, {
+    taskId: "task-lp",
+    queuedCancelText: "cancelled while queued",
+  });
+  expect(outcome).toEqual({ kind: "interrupted" });
+
+  // No daemon will ever post the "stopped" event: the task terminates in
+  // place, with the terminal invariants (finishedAt + a history row) intact,
+  // and the machine frees so it is placeable when the daemon returns.
+  const task = await loadTask(t, "task-lp");
+  expect(task?.status).toBe("stopped");
+  expect(task?.finishedAt).toBeDefined();
+  const events = await t.run((ctx) =>
+    ctx.db
+      .query("taskEvents")
+      .withIndex("by_task_id", (q) => q.eq("taskId", "task-lp"))
+      .collect(),
+  );
+  expect(events.map((e) => e.type)).toEqual(["stopped"]);
+  expect((await loadMachine(t, "mac-1"))?.taskId).toBeUndefined();
+  // The interrupt still queues, cleaning up a session that resurfaces.
+  expect((await localCommands(t)).map((c) => c.kind)).toEqual(["interrupt"]);
 });
 
 test("stop rejects a local-primary task whose machine moved on", async () => {
@@ -244,8 +291,10 @@ test("stop on a split task interrupts the devbox AND releases the local helper",
   expect(devboxSide.map((c) => [c.devboxId, c.kind])).toEqual([
     ["dev-1", "interrupt"],
   ]);
-  // ...and the local helper released alongside it.
-  expect((await loadMachine(t, "mac-1"))?.taskId).toBeUndefined();
+  // ...and the local helper released alongside it (session interrupted,
+  // peers unblocked). The busy marker stays until the daemon's own signals
+  // confirm the session ended (stopped event / heartbeat reconcile).
+  expect((await loadMachine(t, "mac-1"))?.taskId).toBe("task-split");
   expect((await localCommands(t)).map((c) => c.kind)).toEqual(["interrupt"]);
   expect((await peerReplies(t, "req-2")).map((r) => r.body)).toEqual([
     "The task was stopped before this request was answered.",
@@ -299,12 +348,79 @@ test("a terminal cloud event on a split task releases the local helper", async (
   expect(result).toEqual({ taskFound: true, applied: true });
 
   expect((await loadTask(t, "task-split"))?.status).toBe("completed");
-  // Helper teardown: machine freed, idle session interrupted, peers unblocked.
-  expect((await loadMachine(t, "mac-1"))?.taskId).toBeUndefined();
+  // Helper teardown: idle session interrupted, peers unblocked. The busy
+  // marker frees via the daemon's own signals (an interrupted IDLE helper
+  // emits no stopped event, so the heartbeat reconcile is its release path).
+  expect((await loadMachine(t, "mac-1"))?.taskId).toBe("task-split");
   expect((await localCommands(t)).map((c) => c.kind)).toEqual(["interrupt"]);
   expect((await peerReplies(t, "req-3")).map((r) => r.body)).toEqual([
     "The task ended (completed) before this request was answered.",
   ]);
+});
+
+// ---- Heartbeat reconcile: the busy-marker release path (#138 review fix) ----
+
+test("a heartbeat reporting no session frees a stale busy marker unless a start is in flight", async () => {
+  const t = newT();
+  process.env.LOCAL_MACHINE_SECRET = "local-secret";
+  try {
+    await seedMachine(t, "mac-1", "task-done");
+
+    // A start command still pending for the marked task: NOT stale — the
+    // daemon just hasn't consumed it yet.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("localCommands", {
+        commandId: "lcmd-1",
+        machineId: "mac-1",
+        kind: "start",
+        payload: JSON.stringify({ taskId: "task-done", prompt: "p" }),
+        status: "pending",
+        createdAt: Date.now(),
+      });
+    });
+    await t.mutation(api.local.heartbeat, {
+      machineId: "mac-1",
+      secret: "local-secret",
+    });
+    expect((await loadMachine(t, "mac-1"))?.taskId).toBe("task-done");
+
+    // Start consumed (acked) and the daemon reports an idle session: the
+    // marker is stale — the session ended without a terminal event (e.g. an
+    // interrupted idle helper) — and frees.
+    await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query("localCommands")
+        .withIndex("by_command_id", (q) => q.eq("commandId", "lcmd-1"))
+        .unique();
+      if (row !== null) {
+        await ctx.db.patch(row._id, { status: "acked" });
+      }
+    });
+    await t.mutation(api.local.heartbeat, {
+      machineId: "mac-1",
+      secret: "local-secret",
+    });
+    expect((await loadMachine(t, "mac-1"))?.taskId).toBeUndefined();
+
+    // A heartbeat REPORTING the marked task never frees it.
+    await t.run(async (ctx) => {
+      const m = await ctx.db
+        .query("localMachines")
+        .withIndex("by_machine_id", (q) => q.eq("machineId", "mac-1"))
+        .unique();
+      if (m !== null) {
+        await ctx.db.patch(m._id, { taskId: "task-live" });
+      }
+    });
+    await t.mutation(api.local.heartbeat, {
+      machineId: "mac-1",
+      secret: "local-secret",
+      taskId: "task-live",
+    });
+    expect((await loadMachine(t, "mac-1"))?.taskId).toBe("task-live");
+  } finally {
+    delete process.env.LOCAL_MACHINE_SECRET;
+  }
 });
 
 // ---- Dashboard steer routing (#138) ----

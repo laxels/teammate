@@ -417,8 +417,11 @@ export const retryTask = mutation({
     }
     const retryTaskId = `task-${crypto.randomUUID().slice(0, 8)}`;
     // #138: a local-primary task retries on its machine. The dashboard is
-    // operator-only, so clicking retry IS the consent — the new per-task
-    // grant is recorded at creation. No queueing: a busy/offline machine
+    // operator-only (one shared DASHBOARD_SECRET, like anonymous comments),
+    // so clicking retry IS the consent and the new per-task grant is recorded
+    // at creation — deliberately WITHOUT the Slack flow's machine-owner
+    // check, which exists to keep OTHER Slack users from granting someone
+    // else's machine; the dashboard has no such second party. No queueing: a busy/offline machine
     // refuses the retry BEFORE the row is inserted (a mutation's writes
     // commit even when it returns ok:false, so a post-insert refusal would
     // strand a queued-forever row).
