@@ -172,9 +172,9 @@ describe("createHardBanGate", () => {
     });
     expect(click).toMatchObject({ behavior: "deny" });
     for (const action of ["type_text", "press_key", "scroll", "drag"]) {
-      expect(await gate(`mcp__cua-driver__${action}`, { x: 1, y: 1 })).toMatchObject(
-        { behavior: "deny" },
-      );
+      expect(
+        await gate(`mcp__cua-driver__${action}`, { x: 1, y: 1 }),
+      ).toMatchObject({ behavior: "deny" });
     }
   });
 
