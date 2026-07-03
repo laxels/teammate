@@ -20,7 +20,8 @@
 #   3. install the gateway LaunchAgent (canonical copy lives here)
 #   4. pin Claude Code to MODEL in ~/.claude/settings.json (the gateway's SDK
 #      `model` option is authoritative for gateway sessions, but interactive
-#      `claude` on the devbox reads this; v3 still baked claude-fable-5 — #50)
+#      `claude` on the devbox reads this; v4/v5 baked claude-opus-4-8 — stale
+#      post-#139, which moved the runtime back to claude-fable-5)
 #   5. remove ~/ultraclaude.env (provisioning writes it; the gateway fails fast
 #      and launchd KeepAlive retries without it)
 #   6. wipe tailscaled's on-disk state (a logged-out image still bakes a machine
@@ -95,7 +96,7 @@ SOURCE_IMAGE="$GOLDEN_LOCAL"
 TARGET=""
 # Canonical Claude model baked into ~/.claude/settings.json. MUST match the
 # gateway/orchestrator runtime model (gateway/src/session.ts, convex/orchestrator.ts).
-MODEL="claude-opus-4-8"
+MODEL="claude-fable-5"
 # The tart host the bake runs on (any fleet host carries the golden).
 HOST_SSH="m1@100.121.13.107"
 
@@ -239,8 +240,8 @@ PLIST
 vm 'plutil -lint ~/Library/LaunchAgents/com.ultraclaude.gateway.plist'
 
 # --------------------------------------------------------- pin Claude model
-# Merge-in (preserve env/OAuth, effortLevel, permissions, etc.); v3 baked
-# claude-fable-5, which is stale post-#50.
+# Merge-in (preserve env/OAuth, effortLevel, permissions, etc.); v4/v5 baked
+# claude-opus-4-8, which is stale post-#139 (back to claude-fable-5).
 log "Pinning Claude Code model to $MODEL in ~/.claude/settings.json"
 vm "python3 -c 'import json,sys; p=\"/Users/admin/.claude/settings.json\"; d=json.load(open(p)); d[\"model\"]=sys.argv[1]; json.dump(d,open(p,\"w\"),indent=2)' $MODEL"
 vm "python3 -c 'import json; d=json.load(open(\"/Users/admin/.claude/settings.json\")); assert d[\"model\"]==\"$MODEL\", d[\"model\"]; assert \"CLAUDE_CODE_OAUTH_TOKEN\" in d.get(\"env\",{}), \"OAuth env regressed!\"; print(\"settings.json OK: model=\"+d[\"model\"]+\", OAuth preserved\")'"

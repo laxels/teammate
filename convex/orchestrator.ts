@@ -32,10 +32,10 @@ import { internal } from "./_generated/api";
 import { type ActionCtx, internalAction } from "./_generated/server";
 import { resolveDeliverableFiles, type StoredFile } from "./files";
 
-// Model policy (ARCHITECTURE.md): claude-opus-4-8 at xhigh everywhere, no
+// Model policy (ARCHITECTURE.md): claude-fable-5 at xhigh everywhere, no
 // fallback model, no `fallbacks` parameter — flagged requests refuse rather
 // than downgrade.
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-fable-5";
 const MAX_TOOL_ITERATIONS = 12;
 
 // Instant "I'm on it" acknowledgement, reacted onto the triggering message the
@@ -495,7 +495,7 @@ function finalTextOf(message: Anthropic.Message): string {
 
 /**
  * Processes one ingested Slack event: filters out bot/self messages, claims
- * the event (at-most-once — see slack.claimEvent), runs the Opus 4.8 tool
+ * the event (at-most-once — see slack.claimEvent), runs the Fable 5 tool
  * loop, and posts the final reply in a thread under the triggering message.
  * Replies inside a task's thread get that task injected as context (see
  * buildOrchestratorUserMessage). Events stranded before the claim are
@@ -612,17 +612,29 @@ export const processSlackEvent = internalAction({
           output_config: { effort: "xhigh" },
           // Automatic prompt caching: marks the stable tools+system prefix as
           // cacheable so the loop's later iterations read what the first wrote.
-          // A NO-OP TODAY ON PURPOSE — the prefix (~1.8K tok) is below Opus
-          // 4.8's 4096-token cache floor, so nothing caches and no metric
-          // moves. It only starts paying off if a request's stable prefix ever
-          // crosses 4096 tok (large <thread_context> + staged images, or a
-          // grown system prompt). One line, zero correctness risk; kept for
-          // that free future win — do not remove as "useless." (#85)
+          // A NO-OP TODAY ON PURPOSE — the prefix (~1.8K tok) is just below
+          // Fable 5's 2048-token cache floor (was 4096 on Opus 4.8), so
+          // nothing caches and no metric moves. It starts paying off as soon
+          // as a request's stable prefix crosses 2048 tok (large
+          // <thread_context> + staged images, or a grown system prompt). One
+          // line, zero correctness risk; kept for that free future win — do
+          // not remove as "useless." (#85)
           cache_control: { type: "ephemeral" },
           system: SYSTEM_PROMPT,
           tools: TOOLS,
           messages,
         });
+
+        // Fable 5's request classifiers decline with HTTP 200 +
+        // stop_reason "refusal" — pre-output refusals carry an EMPTY content
+        // array, which the empty-finalText backstop below would mislabel as
+        // the step-limit message. Model policy: no fallbacks — surface the
+        // refusal instead of downgrading (mid-stream partials are discarded).
+        if (response.stop_reason === "refusal") {
+          finalText =
+            ":no_entry_sign: The model declined that request (safety refusal), and per our no-fallback policy I won't retry it on another model. If this looks like a false positive, rephrasing usually gets through.";
+          break;
+        }
 
         const toolUses = response.content.filter(
           (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",

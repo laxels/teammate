@@ -41,9 +41,9 @@ export type ScrollDirection = "up" | "down" | "left" | "right";
 /**
  * Images larger than 1568px on the long edge are silently downscaled by the
  * API, desyncing the model's coordinates from the screen — so we downscale
- * ourselves and keep the mapping. (Opus 4.7+ documents 2576px with 1:1
- * coordinates; raise this once that behavior is verified for Opus 4.8 on the
- * devbox display.)
+ * ourselves and keep the mapping. (Opus 4.7+ and Fable 5 document 2576px with
+ * 1:1 coordinates; raise this once that behavior is verified for Fable 5 on
+ * the devbox display.)
  */
 const MAX_LONG_EDGE = 1568;
 /** UI settle time between an input action and its verification screenshot. */

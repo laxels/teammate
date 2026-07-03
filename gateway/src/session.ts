@@ -81,7 +81,7 @@ export const INIT_WATCHDOG_MS = 2 * 60_000;
 export const STALL_WATCHDOG_MS = 10 * 60_000;
 export const WATCHDOG_INTERVAL_MS = 10_000;
 
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-fable-5";
 // Default reasoning effort. xhigh maximizes accuracy (model policy); a task can
 // override it per-request when the user explicitly asks for another level (#91).
 const DEFAULT_EFFORT = "xhigh";
