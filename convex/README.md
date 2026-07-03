@@ -1,6 +1,6 @@
 # Orchestrator (Convex)
 
-Slack-driven orchestrator: ingests Slack events, runs a Claude Opus 4.8 tool
+Slack-driven orchestrator: ingests Slack events, runs a Claude Fable 5 tool
 loop (`orchestrator.ts`), manages tasks/devboxes, relays devbox lifecycle
 events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 
@@ -10,7 +10,7 @@ events back to Slack, and proactively checks on stale tasks (`crons.ts`).
 | --- | --- | --- |
 | `SLACK_SIGNING_SECRET` | `http.ts` | Verifies `/slack/events` request signatures |
 | `SLACK_BOT_TOKEN` | `orchestrator.ts`, `notify.ts`, `staleness.ts`, `artifacts.ts` | `chat.postMessage` replies, status updates, and outbound file uploads |
-| `ANTHROPIC_API_KEY` | `orchestrator.ts` | Opus 4.8 tool loop (`claude-opus-4-8`, effort `xhigh`, no fallbacks) |
+| `ANTHROPIC_API_KEY` | `orchestrator.ts` | Fable 5 tool loop (`claude-fable-5`, effort `xhigh`, no fallbacks) |
 | `DEVBOX_SHARED_SECRET` | `http.ts`, `commands.ts`, `hosts.ts`, `fleetLock.ts` | Shared secret for all gateway/host/provisioner traffic — sent as the `x-devbox-secret` header on the `/devbox/*` and `/fleet/*` HTTP endpoints (`http.ts`), and as a `secret` argument on the Convex functions gateways/host agents call directly (`commands.ts`, `hosts.ts`; they're Convex clients, so there are no request headers) |
 | `DASHBOARD_SECRET` | `dashboard.ts` | Gates the public dashboard query/mutation functions |
 | `TAILNET_SUFFIX` | `hosts.ts` | Derives an ephemeral devbox's gateway URL; required once a host is available (otherwise placement throws) |
@@ -84,7 +84,7 @@ ahead of demand and fire the provisioner via `repository_dispatch`.
 1. Slack message → `/slack/events` → `slackEvents` row → scheduled
    `orchestrator.processSlackEvent`.
 2. The orchestrator filters bot/self messages (`src/orchestration.ts`), then
-   runs the Opus 4.8 loop with tools `list_tasks` / `get_task` / `start_task` /
+   runs the Fable 5 loop with tools `list_tasks` / `get_task` / `start_task` /
    `get_fleet` / `steer_task` / `stop_task`. Every reply is threaded under the triggering
    message (one request = one thread); a reply inside a task's thread gets
    that task injected as `<thread_context>` (looked up via the tasks
