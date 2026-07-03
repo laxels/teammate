@@ -176,6 +176,23 @@ describe("createHardBanGate", () => {
         await gate(`mcp__cua-driver__${action}`, { x: 1, y: 1 }),
       ).toMatchObject({ behavior: "deny" });
     }
+    // Round 2: a decorative bundle_id on a tool that doesn't consume it must
+    // not count as a target — only `page` genuinely targets by bundle_id.
+    expect(
+      await gate("mcp__cua-driver__click", {
+        x: 100,
+        y: 100,
+        scope: "desktop",
+        bundle_id: "com.apple.Safari",
+      }),
+    ).toMatchObject({ behavior: "deny" });
+    // And an empty bundle_id is not an identifier even for page.
+    expect(
+      await gate("mcp__cua-driver__page", {
+        action: "get_text",
+        bundle_id: "",
+      }),
+    ).toMatchObject({ behavior: "deny" });
   });
 
   test("pid-less perception tools still pass (reading is not driving)", async () => {

@@ -175,15 +175,21 @@ export function createHardBanGate(
     }
     const pid = input.pid;
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
-      // No pid. Reads are harmless (list_windows without args); an action can
-      // still be permitted when it names an identifiable, clean bundle id
-      // (`page` targets browsers that way). Anything ELSE side-effecting is
-      // targetless — a desktop-scope click/type lands on whatever window sits
-      // under the point, which defeats the ban list — so it fails closed.
-      const bundleId = input.bundle_id;
-      if (typeof bundleId === "string") {
-        const reason = bannedAppReason(bundleId);
-        return reason === null ? null : deny(`${action} refused: ${reason}`);
+      // No pid. Reads are harmless (list_windows without args). Among the
+      // side-effecting tools, ONLY `page` genuinely targets by bundle_id in
+      // the pinned driver — on every other action a bundle_id key is
+      // decoration the driver ignores, so treating it as an identifier would
+      // let `click({x, y, scope: "desktop", bundle_id: <anything benign>})`
+      // smuggle a targetless click past the ban list. Everything
+      // side-effecting without a real identifier fails closed: a
+      // desktop-scope/point-only action lands on whatever window sits under
+      // the point.
+      if (action === "page") {
+        const bundleId = input.bundle_id;
+        if (typeof bundleId === "string" && bundleId !== "") {
+          const reason = bannedAppReason(bundleId);
+          return reason === null ? null : deny(`${action} refused: ${reason}`);
+        }
       }
       if (isAction) {
         return deny(
