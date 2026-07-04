@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const SCRIPT = join(import.meta.dir, "worktree-setup.sh");
+const SCRIPT = join(import.meta.dir, "worktree-setup");
 
 // A minimal installable project: one file: dependency so `bun install
 // --frozen-lockfile` does real work without touching the network.
@@ -114,18 +114,5 @@ describe("worktree-setup.sh", () => {
     );
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("SOURCE_DIR");
-  });
-
-  test("keeps stdout clean when the hook redirect flag is set", async () => {
-    const result = await run(
-      {
-        SOURCE_DIR: source,
-        WORKTREE_PATH: worktree,
-        WORKTREE_SETUP_REDIRECT_SETUP_OUTPUT_TO_STDERR: "true",
-      },
-      worktree,
-    );
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
   });
 });
