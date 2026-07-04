@@ -40,7 +40,7 @@ async function run(
   return { exitCode: await proc.exited, stdout, stderr };
 }
 
-describe("worktree-setup.sh", () => {
+describe("worktree-setup", () => {
   let source: string;
   let worktree: string;
 
