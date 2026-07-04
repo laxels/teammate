@@ -48,7 +48,8 @@ issues to the project is `backlog.sh set`'s job (or the project UI).
 ## Worktrees and the singleton lane
 
 Parallel sessions each get their own git worktree. Worktree creation runs
-`bun run worktree-setup` ([scripts/worktree-setup.sh](scripts/worktree-setup.sh)),
+[scripts/worktree-setup](scripts/worktree-setup) (the executable path the
+global worktree hooks look for in every repo),
 which copies `.env`/`.env.local` from the primary checkout and runs
 `bun install --frozen-lockfile`, so a fresh worktree passes `bun run validate`
 immediately. Validation is safe to run concurrently in any number of worktrees

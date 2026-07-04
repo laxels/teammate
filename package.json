@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "scripts/singleton-lock.sh convex convex dev",
     "deploy:convex": "scripts/singleton-lock.sh convex convex dev --once",
-    "worktree-setup": "scripts/worktree-setup.sh",
     "validate": "concurrently --group --prefix-colors auto --names typecheck,lint,test \"bun run --no-env-file typecheck\" \"bun run --no-env-file lint\" \"bun run --no-env-file test\"",
     "typecheck": "tsc --noEmit && tsc -p convex --noEmit && tsc -p convex/tsconfig.test.json --noEmit && tsc -p gateway --noEmit && tsc -p hostagent --noEmit && tsc -p localagent --noEmit && tsc -p web --noEmit && tsc -p dashboard --noEmit && tsc -p scripts --noEmit",
     "lint": "biome check .",
